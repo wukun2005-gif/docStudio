@@ -17,10 +17,13 @@ import { splitIntoSentences } from "../../server/src/lib/groundednessCheck.js";
 describe("叙事模板 (#7)", () => {
   it("getTemplates 返回预置模板", () => {
     const templates = getTemplates();
-    expect(templates.length).toBeGreaterThanOrEqual(3);
+    expect(templates.length).toBe(6);
     expect(templates.map((t) => t.id)).toContain("weekly-report");
     expect(templates.map((t) => t.id)).toContain("research-report");
     expect(templates.map((t) => t.id)).toContain("meeting-notes");
+    expect(templates.map((t) => t.id)).toContain("product-spec");
+    expect(templates.map((t) => t.id)).toContain("business-plan");
+    expect(templates.map((t) => t.id)).toContain("academic-review");
   });
 
   it("getTemplateById 获取指定模板", () => {
@@ -32,6 +35,26 @@ describe("叙事模板 (#7)", () => {
 
   it("getTemplateById 不存在返回 undefined", () => {
     expect(getTemplateById("nonexistent")).toBeUndefined();
+  });
+
+  it("business-plan 模板结构完整", () => {
+    const tpl = getTemplateById("business-plan");
+    expect(tpl).toBeDefined();
+    expect(tpl!.name).toBe("商业计划书");
+    expect(tpl!.outline.length).toBe(9);
+    // 市场分析有子章节
+    const market = tpl!.outline.find((s) => s.id === "s3");
+    expect(market!.children.length).toBe(3);
+  });
+
+  it("academic-review 模板结构完整", () => {
+    const tpl = getTemplateById("academic-review");
+    expect(tpl).toBeDefined();
+    expect(tpl!.name).toBe("学术综述");
+    expect(tpl!.outline.length).toBe(6);
+    // 文献综述有子章节
+    const lit = tpl!.outline.find((s) => s.id === "s3");
+    expect(lit!.children.length).toBe(3);
   });
 });
 

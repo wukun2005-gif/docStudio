@@ -87,6 +87,77 @@ export const TEMPLATES: NarrativeTemplate[] = [
       { id: "s6", title: "里程碑", level: 1, children: [] },
     ],
   },
+  {
+    id: "business-plan",
+    name: "商业计划书",
+    description: "创业/融资用商业计划书模板，涵盖市场、产品、商业模式、财务规划",
+    outline: [
+      { id: "s1", title: "执行摘要", level: 1, children: [], description: "项目核心亮点与关键数据概述" },
+      { id: "s2", title: "公司/项目概述", level: 1, children: [
+        { id: "s2-1", title: "使命与愿景", level: 2, children: [] },
+        { id: "s2-2", title: "核心团队", level: 2, children: [] },
+      ]},
+      { id: "s3", title: "市场分析", level: 1, children: [
+        { id: "s3-1", title: "行业现状", level: 2, children: [], description: "市场规模、增长趋势" },
+        { id: "s3-2", title: "目标客户", level: 2, children: [] },
+        { id: "s3-3", title: "竞争格局", level: 2, children: [] },
+      ]},
+      { id: "s4", title: "产品/服务", level: 1, children: [
+        { id: "s4-1", title: "核心价值", level: 2, children: [] },
+        { id: "s4-2", title: "产品特性", level: 2, children: [] },
+        { id: "s4-3", title: "技术方案", level: 2, children: [] },
+      ]},
+      { id: "s5", title: "商业模式", level: 1, children: [
+        { id: "s5-1", title: "盈利模式", level: 2, children: [] },
+        { id: "s5-2", title: "定价策略", level: 2, children: [] },
+      ]},
+      { id: "s6", title: "营销策略", level: 1, children: [
+        { id: "s6-1", title: "获客渠道", level: 2, children: [] },
+        { id: "s6-2", title: "品牌定位", level: 2, children: [] },
+      ]},
+      { id: "s7", title: "运营计划", level: 1, children: [
+        { id: "s7-1", title: "里程碑与时间线", level: 2, children: [] },
+        { id: "s7-2", title: "关键资源", level: 2, children: [] },
+      ]},
+      { id: "s8", title: "财务规划", level: 1, children: [
+        { id: "s8-1", title: "收入预测", level: 2, children: [] },
+        { id: "s8-2", title: "成本结构", level: 2, children: [] },
+        { id: "s8-3", title: "融资需求", level: 2, children: [] },
+      ]},
+      { id: "s9", title: "风险分析", level: 1, children: [
+        { id: "s9-1", title: "主要风险", level: 2, children: [] },
+        { id: "s9-2", title: "应对策略", level: 2, children: [] },
+      ]},
+    ],
+  },
+  {
+    id: "academic-review",
+    name: "学术综述",
+    description: "学术论文/文献综述模板，适用于研究领域的系统性回顾",
+    outline: [
+      { id: "s1", title: "摘要", level: 1, children: [], description: "研究背景、方法、主要发现与结论" },
+      { id: "s2", title: "引言", level: 1, children: [
+        { id: "s2-1", title: "研究背景", level: 2, children: [] },
+        { id: "s2-2", title: "研究问题", level: 2, children: [] },
+        { id: "s2-3", title: "综述范围与方法", level: 2, children: [] },
+      ]},
+      { id: "s3", title: "文献综述", level: 1, children: [
+        { id: "s3-1", title: "理论基础", level: 2, children: [] },
+        { id: "s3-2", title: "研究现状", level: 2, children: [] },
+        { id: "s3-3", title: "研究空白", level: 2, children: [] },
+      ]},
+      { id: "s4", title: "分析与讨论", level: 1, children: [
+        { id: "s4-1", title: "核心发现", level: 2, children: [] },
+        { id: "s4-2", title: "对比分析", level: 2, children: [] },
+        { id: "s4-3", title: "局限性", level: 2, children: [] },
+      ]},
+      { id: "s5", title: "结论与展望", level: 1, children: [
+        { id: "s5-1", title: "主要结论", level: 2, children: [] },
+        { id: "s5-2", title: "未来研究方向", level: 2, children: [] },
+      ]},
+      { id: "s6", title: "参考文献", level: 1, children: [], description: "引用文献列表" },
+    ],
+  },
 ];
 
 /** 获取所有模板 */
