@@ -76,6 +76,7 @@ export async function evaluateOnline(req: EvalRequest): Promise<TrustMetrics> {
         apiKey: "",
         temperature: 0,
       },
+      undefined, undefined,
       providerApiKeys,
       req.providerBaseUrls,
     );

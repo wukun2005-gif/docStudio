@@ -1,8 +1,15 @@
 /**
- * Provider Registry — 多 provider + fallback 逻辑
- * - 429/quota: 尝试下一个 provider
- * - 5xx/network: 指数退避重试最多 2 次，然后下一个 provider
- * - 401: 不重试，不 fallback
+ * Provider Registry — 12 providers + 三级 fallback
+ *
+ * 三级 Fallback 策略（从 patentExaminator 迁移）：
+ * 1. Model Fallback: 每个 provider 内部有 model fallback 列表
+ * 2. Provider Fallback: 按 providerPreference 依次尝试不同 provider
+ * 3. Retry: 每个请求最多重试 2 次，指数退避
+ *
+ * 错误分类：
+ * - 401 (auth-failed): 不重试，不 fallback
+ * - 429 (quota-exceeded): 不重试当前 provider，尝试下一个
+ * - 5xx/network: 重试，然后 fallback
  */
 import type {
   ProviderAdapter,
@@ -11,11 +18,18 @@ import type {
   EmbeddingRequest,
   EmbeddingResponse,
 } from "./openai.js";
-import { OpenAICompatibleAdapter } from "./openai.js";
+import {
+  OpenAICompatibleAdapter,
+  isReasoningModel,
+  learnThinkingCapability,
+  resolveMaxTokens,
+} from "./openai.js";
+import { PRESET_MODEL_PROVIDERS } from "../../../shared/src/types/provider.js";
 import { logger } from "../lib/logger.js";
 
 const BACKOFF_DELAYS = [500, 1500];
 const MAX_RETRIES = 2;
+const MAX_TOTAL_ATTEMPTS = 8;
 
 export interface AttemptRecord {
   providerId: string;
@@ -52,11 +66,10 @@ export class ProviderRegistry {
   private adapters = new Map<string, ProviderAdapter>();
 
   constructor() {
-    // 注册内置 providers（用户可通过 settings 添加更多）
-    this.register(new GenericProvider("openai", "https://api.openai.com/v1", ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"]));
-    this.register(new GenericProvider("deepseek", "https://api.deepseek.com/v1", ["deepseek-chat", "deepseek-reasoner"]));
-    this.register(new GenericProvider("gemini", "https://generativelanguage.googleapis.com/v1beta/openai", ["gemini-2.0-flash", "gemini-2.5-pro"]));
-    this.register(new GenericProvider("openrouter", "https://openrouter.ai/api/v1", []));
+    // 注册 12 个内置 providers（从 patentExaminator 迁移）
+    for (const preset of PRESET_MODEL_PROVIDERS) {
+      this.register(new GenericProvider(preset.id, preset.baseUrl));
+    }
   }
 
   register(adapter: ProviderAdapter): void {
@@ -68,16 +81,25 @@ export class ProviderRegistry {
   }
 
   /**
-   * 带 fallback 的 chat 请求
+   * 三级 fallback 的 chat 请求
+   *
+   * @param providerPreference - provider 尝试顺序
+   * @param req - chat 请求
+   * @param modelFallbacks - 每个 provider 的 model fallback 列表
+   * @param enableModelFallback - 每个 provider 是否启用 model fallback
+   * @param providerApiKeys - 每个 provider 的 API key
+   * @param providerBaseUrls - 每个 provider 的 base URL
    */
   async runWithFallback(
     providerPreference: string[],
     req: ChatRequest,
+    modelFallbacks?: Partial<Record<string, string[]>>,
+    enableModelFallback?: Partial<Record<string, boolean>>,
     providerApiKeys?: Record<string, string>,
     providerBaseUrls?: Record<string, string>,
   ): Promise<{ response: ChatResponse; attempts: AttemptRecord[] }> {
     const attempts: AttemptRecord[] = [];
-    let lastError: ChatResponse | null = null;
+    let totalAttempts = 0;
 
     for (const pid of providerPreference) {
       const adapter = this.adapters.get(pid);
@@ -86,59 +108,123 @@ export class ProviderRegistry {
         continue;
       }
 
-      const apiKey = providerApiKeys?.[pid] ?? req.apiKey;
-      const baseUrl = providerBaseUrls?.[pid] ?? req.baseUrl;
-      const effectiveReq = { ...req, apiKey, baseUrl };
+      const providerBaseUrl = providerBaseUrls?.[pid];
+      const providerApiKey = providerApiKeys?.[pid];
+      const enabled = enableModelFallback?.[pid] ?? true;
+      const configuredFallbacks = modelFallbacks?.[pid] ?? null;
 
-      // 重试逻辑
-      let lastError: ChatResponse | null = null;
-      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        if (attempt > 0) {
-          await new Promise((r) => setTimeout(r, BACKOFF_DELAYS[attempt - 1]));
+      // 构建请求（合并 provider 级别的 apiKey 和 baseUrl）
+      const buildReq = (base: ChatRequest, overrides: Partial<ChatRequest>): ChatRequest => {
+        const result = { ...base, ...overrides };
+        if (providerApiKey) result.apiKey = providerApiKey;
+        if (providerBaseUrl) result.baseUrl = providerBaseUrl;
+        return result;
+      };
+
+      // Model fallback 路径
+      if (enabled && configuredFallbacks && configuredFallbacks.length > 0) {
+        const models = req.modelId
+          ? [req.modelId, ...configuredFallbacks.filter((m) => m !== req.modelId)]
+          : configuredFallbacks;
+
+        logger.info(`[Registry] ${pid} fallback chain: initialModel=${req.modelId ?? "default"}, models=[${models.join(", ")}]`);
+
+        for (const modelId of models) {
+          totalAttempts++;
+          if (totalAttempts > MAX_TOTAL_ATTEMPTS) {
+            return { response: buildMaxAttemptsError(attempts), attempts };
+          }
+
+          try {
+            const result = await this.executeWithRetry(adapter, buildReq(req, { modelId }));
+            attempts.push(...result.attempts);
+
+            // L3 截断检测
+            const resp = result.response;
+            const isTruncated = resp.text.length < 50 &&
+              !resp.error &&
+              !isReasoningModel(modelId) &&
+              resp.tokenUsage != null &&
+              resp.tokenUsage.output < 100;
+
+            if (isTruncated) {
+              logger.warn(`[ModelAdapt] Possible truncation for ${modelId}, retrying with 4x maxTokens`);
+              learnThinkingCapability(modelId, 1);
+              const retryReq = buildReq(req, { modelId, maxTokens: resolveMaxTokens(modelId, req.maxTokens) });
+              try {
+                const retryResult = await this.executeWithRetry(adapter, retryReq);
+                attempts.push(...retryResult.attempts);
+                return { response: retryResult.response, attempts };
+              } catch {
+                return { response: resp, attempts };
+              }
+            }
+
+            return { response: result.response, attempts };
+          } catch (error) {
+            const errInfo = classifyError(error);
+            const inner = (error as Error & { attempts?: AttemptRecord[] }).attempts;
+            if (inner) attempts.push(...inner);
+            else attempts.push({ providerId: pid, ok: false, errorCode: errInfo.code, message: errInfo.message });
+            if (errInfo.code === "auth-failed") {
+              return { response: buildErrorResponse(errInfo), attempts };
+            }
+          }
         }
-
-        const response = await adapter.chat(effectiveReq);
-
-        if (!response.error) {
-          attempts.push({ providerId: pid, ok: true });
-          return { response, attempts };
-        }
-
-        lastError = response;
-
-        // 401: 不重试
-        if (response.error.code === "401" || response.error.code === "403") {
-          attempts.push({ providerId: pid, ok: false, errorCode: response.error.code, message: response.error.message });
-          break;
-        }
-
-        // 429/quota: 不重试，直接下一个 provider
-        if (response.error.code === "429") {
-          attempts.push({ providerId: pid, ok: false, errorCode: "429", message: response.error.message });
-          break;
-        }
-
-        // 5xx/network: 重试
-        if (!response.error.retryable) {
-          attempts.push({ providerId: pid, ok: false, errorCode: response.error.code, message: response.error.message });
-          break;
-        }
-
-        // 最后一次重试失败
-        if (attempt === MAX_RETRIES) {
-          attempts.push({ providerId: pid, ok: false, errorCode: response.error.code, message: response.error.message });
-        }
+        // All model fallbacks failed, try next provider
+        logger.warn(`[Registry] All models failed for provider=${pid}, trying next`);
+        continue;
       }
 
-      logger.warn(`[Registry] Provider ${pid} failed, trying next...`);
+      // 无 model fallback 路径
+      totalAttempts++;
+      if (totalAttempts > MAX_TOTAL_ATTEMPTS) {
+        return { response: buildMaxAttemptsError(attempts), attempts };
+      }
+
+      try {
+        const result = await this.executeWithRetry(adapter, buildReq(req, {}));
+        attempts.push(...result.attempts);
+
+        // L3 截断检测
+        const resp = result.response;
+        const isTruncated = resp.text.length < 50 &&
+          !resp.error &&
+          !isReasoningModel(req.modelId) &&
+          resp.tokenUsage != null &&
+          resp.tokenUsage.output < 100;
+
+        if (isTruncated) {
+          logger.warn(`[ModelAdapt] Possible truncation for ${req.modelId}, retrying with 4x maxTokens`);
+          learnThinkingCapability(req.modelId, 1);
+          const retryReq = buildReq(req, { maxTokens: resolveMaxTokens(req.modelId, req.maxTokens) });
+          try {
+            const retryResult = await this.executeWithRetry(adapter, retryReq);
+            attempts.push(...retryResult.attempts);
+            return { response: retryResult.response, attempts };
+          } catch {
+            return { response: resp, attempts };
+          }
+        }
+
+        return { response: result.response, attempts };
+      } catch (error) {
+        const errInfo = classifyError(error);
+        const inner = (error as Error & { attempts?: AttemptRecord[] }).attempts;
+        if (inner) attempts.push(...inner);
+        else attempts.push({ providerId: pid, ok: false, errorCode: errInfo.code });
+        if (errInfo.code === "auth-failed") {
+          return { response: buildErrorResponse(errInfo), attempts };
+        }
+      }
     }
 
-    // 所有 provider 都失败
+    const attemptSummary = attempts.map((a) => `${a.providerId}(${a.errorCode ?? "unknown"})`).join(", ");
     return {
-      response: lastError ?? {
+      response: {
         text: "",
         rawResponse: null,
-        error: { code: "all-failed", message: "All providers failed", retryable: false },
+        error: { code: "all-providers-failed", message: `All providers failed: ${attemptSummary}`, retryable: false },
       },
       attempts,
     };
@@ -182,6 +268,117 @@ export class ProviderRegistry {
       attempts,
     };
   }
+
+  /**
+   * 单个 provider 内的重试逻辑
+   */
+  private async executeWithRetry(
+    adapter: ProviderAdapter,
+    req: ChatRequest,
+  ): Promise<{ response: ChatResponse; attempts: AttemptRecord[] }> {
+    const attempts: AttemptRecord[] = [];
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        await sleep(BACKOFF_DELAYS[attempt - 1] ?? 3000);
+      }
+
+      // 客户端断连检测
+      if (req.signal?.aborted) {
+        throw new Error("Request aborted by client");
+      }
+
+      const response = await adapter.chat(req);
+
+      if (!response.error) {
+        attempts.push({ providerId: adapter.id, ok: true });
+        return { response, attempts };
+      }
+
+      lastError = response;
+      const errInfo = classifyError(response);
+      attempts.push({ providerId: adapter.id, ok: false, errorCode: errInfo.code, message: errInfo.message });
+
+      // 401/400: 不重试
+      if (errInfo.code === "auth-failed" || errInfo.code === "bad-request") {
+        throw Object.assign(new Error(errInfo.message), { attempts: [...attempts] });
+      }
+
+      // 429: 不重试，直接 fallback
+      if (errInfo.code === "quota-exceeded") {
+        throw Object.assign(new Error(errInfo.message), { attempts: [...attempts] });
+      }
+
+      // 不可重试的错误
+      if (!errInfo.retryable) {
+        throw Object.assign(new Error(errInfo.message), { attempts: [...attempts] });
+      }
+
+      // 最后一次重试失败
+      if (attempt === MAX_RETRIES) {
+        throw Object.assign(new Error(errInfo.message), { attempts: [...attempts] });
+      }
+    }
+
+    throw lastError;
+  }
+}
+
+// ── 错误分类 ────────────────────────────────────────────────
+
+interface ErrorInfo {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+function classifyError(error: unknown): ErrorInfo {
+  if (error instanceof Error) {
+    const status = (error as Error & { status?: number }).status;
+    if (status === 401) return { code: "auth-failed", message: error.message, retryable: false };
+    if (status === 400) return { code: "bad-request", message: error.message, retryable: false };
+    if (status === 429) return { code: "quota-exceeded", message: error.message, retryable: true };
+    if (status && status >= 500) return { code: "server-error", message: error.message, retryable: true };
+    if (error.name === "AbortError") return { code: "timeout", message: "Request timed out", retryable: true };
+    return { code: "network-error", message: error.message, retryable: true };
+  }
+  // ChatResponse with error field
+  if (typeof error === "object" && error !== null && "error" in error) {
+    const resp = error as ChatResponse;
+    if (resp.error) {
+      const code = resp.error.code;
+      if (code === "401" || code === "403") return { code: "auth-failed", message: resp.error.message, retryable: false };
+      if (code === "429") return { code: "quota-exceeded", message: resp.error.message, retryable: true };
+      return { code, message: resp.error.message, retryable: resp.error.retryable };
+    }
+  }
+  return { code: "unknown-error", message: String(error), retryable: false };
+}
+
+function buildErrorResponse(errInfo: ErrorInfo): ChatResponse {
+  return {
+    text: "",
+    rawResponse: null,
+    error: { code: errInfo.code, message: errInfo.message, retryable: errInfo.retryable },
+  };
+}
+
+function buildMaxAttemptsError(attempts: AttemptRecord[]): ChatResponse {
+  const summary = attempts.map((a) => `${a.providerId}(${a.errorCode ?? "unknown"})`).join(", ");
+  return {
+    text: "",
+    rawResponse: null,
+    error: {
+      code: "max-attempts-reached",
+      message: `Max total attempts (${MAX_TOTAL_ATTEMPTS}) reached: ${summary}`,
+      retryable: false,
+    },
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // 全局单例

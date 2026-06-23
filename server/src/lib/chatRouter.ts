@@ -67,6 +67,7 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
     const { response } = await registry.runWithFallback(
       req.providerPreference ?? ["openai", "deepseek"],
       { modelId: req.modelId ?? "gpt-4o-mini", messages, apiKey: "" },
+      undefined, undefined,
       providerApiKeys,
       req.providerBaseUrls,
     );

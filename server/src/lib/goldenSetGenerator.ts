@@ -165,6 +165,7 @@ async function callLLM(
         temperature: 0.7,
         maxTokens: 1024,
       },
+      undefined, undefined,
       { [providerId]: apiKey },
     );
 

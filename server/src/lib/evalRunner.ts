@@ -106,6 +106,7 @@ async function runRAGQuery(
         maxTokens: 2000,
         temperature: 0.3,
       },
+      undefined, undefined,
       { [config.providerId]: apiKey },
     );
 

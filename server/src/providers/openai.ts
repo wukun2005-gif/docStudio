@@ -2,6 +2,51 @@
  * OpenAI-compatible adapter 基类
  * 大部分 LLM provider 都兼容 OpenAI API 格式
  */
+import { getModelCapabilities } from "./model-capabilities-registry.js";
+
+// ── 推理模型检测 ──────────────────────────────────────────
+
+const REASONING_MODEL_PATTERNS = /mimo|r1\b|o[134]\b|reasoner|thinking|gemini-\d|glm-\d|k2\.[56]|deepseek-v[34]|kimi-k2|gpt-5|doubao-seed-\d/i;
+const REASONING_MAX_TOKENS_MULTIPLIER = 4;
+
+// L1 运行时缓存：modelId → isReasoning（从 API 响应中学到的）
+const thinkingModelCache = new Map<string, boolean>();
+
+/** 从 API 响应中学习：如果模型使用了 thinking tokens，缓存为 thinking 模型 */
+export function learnThinkingCapability(modelId: string, thinkingTokens: number | undefined): void {
+  if (thinkingTokens && thinkingTokens > 0) {
+    thinkingModelCache.set(modelId, true);
+  }
+}
+
+/** 判断模型是否为推理模型 — 三层查询 */
+export function isReasoningModel(modelId: string | undefined): boolean {
+  if (!modelId) return false;
+  // 1. 运行时缓存
+  if (thinkingModelCache.has(modelId)) {
+    return thinkingModelCache.get(modelId)!;
+  }
+  // 2. 静态能力声明
+  const caps = getModelCapabilities(modelId);
+  if (caps.isReasoning) {
+    return true;
+  }
+  // 3. regex 兜底
+  return REASONING_MODEL_PATTERNS.test(modelId);
+}
+
+export function resolveMaxTokens(modelId: string | undefined, requestedMaxTokens?: number): number {
+  const base = requestedMaxTokens ?? 4096;
+  if (isReasoningModel(modelId)) {
+    return base * REASONING_MAX_TOKENS_MULTIPLIER;
+  }
+  return base;
+}
+
+/** 仅用于测试 — 清空运行时缓存 */
+export function clearThinkingCache(): void {
+  thinkingModelCache.clear();
+}
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";

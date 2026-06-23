@@ -157,6 +157,7 @@ async function callJudge(
           },
         },
       },
+      undefined, undefined,
       providerApiKeys,
       config.providerBaseUrls,
     );

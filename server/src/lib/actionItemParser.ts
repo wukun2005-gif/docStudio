@@ -58,6 +58,7 @@ export async function parseActionItems(
         maxTokens: 2000,
         temperature: 0.3,
       },
+      undefined, undefined,
       { [providerId]: apiKey },
     );
 

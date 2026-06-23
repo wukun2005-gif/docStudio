@@ -240,6 +240,7 @@ export async function generateOutline(req: GenerateOutlineRequest): Promise<Outl
         apiKey: "",
         temperature: 0.3,
       },
+      undefined, undefined,
       providerApiKeys,
       req.providerBaseUrls,
     );

@@ -84,6 +84,7 @@ export async function callMultiJudge(
           temperature,
           ...(options?.signal !== undefined && { signal: options.signal }),
         },
+        undefined, undefined,
         { [providerId]: apiKey },
       );
 

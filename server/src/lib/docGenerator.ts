@@ -85,6 +85,7 @@ ${context || "（无上下文）"}
       temperature: 0.7,
       signal: config.signal,
     },
+    undefined, undefined,
     providerApiKeys,
     config.providerBaseUrls,
   );

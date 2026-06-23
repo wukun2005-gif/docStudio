@@ -344,6 +344,7 @@ async function executeStep(
           apiKey,
           maxTokens: 2000,
         },
+        undefined, undefined,
         { [providerId]: apiKey },
       );
 
