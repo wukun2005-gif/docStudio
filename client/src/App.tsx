@@ -2,11 +2,13 @@ import { useState } from "react";
 import Settings from "./components/Settings";
 import KnowledgePanel from "./components/KnowledgePanel";
 import PeoplePanel from "./components/PeoplePanel";
+import GenerationPage from "./components/GenerationPage";
 
-type Page = "home" | "knowledge" | "people" | "settings";
+type Page = "home" | "generate" | "knowledge" | "people" | "settings";
 
 const NAV_ITEMS: Array<{ id: Page; label: string }> = [
   { id: "home", label: "首页" },
+  { id: "generate", label: "生成文档" },
   { id: "knowledge", label: "知识库" },
   { id: "people", label: "People Graph" },
   { id: "settings", label: "设置" },
@@ -36,8 +38,9 @@ export default function App() {
       </nav>
 
       {/* 页面内容 */}
-      <main className="max-w-7xl mx-auto px-4 py-8">
+      <main className={page === "generate" ? "px-4 py-4" : "max-w-7xl mx-auto px-4 py-8"}>
         {page === "home" && <HomePage onNavigate={setPage} />}
+        {page === "generate" && <GenerationPage />}
         {page === "knowledge" && <KnowledgePanel />}
         {page === "people" && <PeoplePanel />}
         {page === "settings" && <Settings />}
@@ -53,16 +56,16 @@ function HomePage({ onNavigate }: { onNavigate: (page: Page) => void }) {
       <p className="text-gray-600 mb-8">连接知识碎片，生成可信文档</p>
       <div className="flex justify-center gap-4">
         <button
-          onClick={() => onNavigate("knowledge")}
+          onClick={() => onNavigate("generate")}
           className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
         >
-          管理知识库
+          开始创作
         </button>
         <button
-          onClick={() => onNavigate("settings")}
+          onClick={() => onNavigate("knowledge")}
           className="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-50"
         >
-          配置 Provider
+          管理知识库
         </button>
       </div>
     </div>

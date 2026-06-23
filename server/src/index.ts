@@ -9,6 +9,8 @@ import { healthRouter } from "./routes/health.js";
 import { settingsRouter } from "./routes/settings.js";
 import { knowledgeRouter } from "./routes/knowledge.js";
 import { peopleRouter } from "./routes/people.js";
+import { chatRouter } from "./routes/chat.js";
+import { generationRouter } from "./routes/generation.js";
 import { getDb, closeDb } from "./lib/db.js";
 import { logger } from "./lib/logger.js";
 import { injectSampleData } from "./lib/sampleDataGenerator.js";
@@ -72,6 +74,8 @@ app.use("/api", healthRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/knowledge", knowledgeRouter);
 app.use("/api/people", peopleRouter);
+app.use("/api/chat", chatRouter);
+app.use("/api/generation", generationRouter);
 
 // 静态文件服务（client build）
 const clientDist = path.resolve(__dirname, "../../client/dist");
