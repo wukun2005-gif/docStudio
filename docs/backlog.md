@@ -30,10 +30,10 @@
 
 | # | Feature | 需求简述 |
 |---|---------|---------|
-| 9 | Query Expansion | 跨语言扩展 + 同义词扩展 + Multi-Query 改写 |
-| 10 | Hybrid Search | BM25 + 向量 + RRF 融合 + MMR 多样性排序 |
-| 11 | Reranker | 三级降级：远程 API → 本地 Cross-Encoder → 启发式加权 |
-| 12 | Groundedness Check | 句子级验证，>= 0.8 pass，< 0.5 触发重生成 |
+| 9 | Query Expansion ✅ | 跨语言扩展 + 同义词扩展 + Multi-Query 改写 |
+| 10 | Hybrid Search ✅ | BM25 + 向量 + RRF 融合 + MMR 多样性排序 |
+| 11 | Reranker ✅ | 三级降级：远程 API → 本地 Cross-Encoder → 启发式加权 |
+| 12 | Groundedness Check ✅ | 句子级验证，>= 0.8 pass，< 0.5 触发重生成 |
 
 ### 文档生成
 
