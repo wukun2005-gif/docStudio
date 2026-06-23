@@ -6,6 +6,7 @@
 import { Router } from "express";
 import crypto from "crypto";
 import { generateDocument, toHtml } from "../lib/docGenerator.js";
+import { exportDocument, type ExportFormat } from "../lib/docExporter.js";
 import { getDb } from "../lib/db.js";
 import { logger } from "../lib/logger.js";
 import type { OutlineSection } from "../lib/narrativeEngine.js";
@@ -83,6 +84,62 @@ generationRouter.get("/:id", (req, res) => {
       return;
     }
     res.json({ ok: true, run });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** GET /api/generation/:id/export/:format — 导出文档 */
+generationRouter.get("/:id/export/:format", (req, res) => {
+  try {
+    const db = getDb();
+    const run = db.prepare("SELECT * FROM generation_runs WHERE id = ?").get(req.params.id) as any;
+    if (!run) {
+      res.status(404).json({ ok: false, error: "Not found" });
+      return;
+    }
+
+    const format = req.params.format as ExportFormat;
+    if (!["docx", "pptx", "xlsx"].includes(format)) {
+      res.status(400).json({ ok: false, error: "Invalid format" });
+      return;
+    }
+
+    const outline = run.outline ? JSON.parse(run.outline) : [];
+    const sections = outline.map((s: any) => ({
+      title: s.title,
+      content: s.description ?? "",
+      level: s.level,
+    }));
+
+    const result = exportDocument(format, run.title, sections);
+
+    res.setHeader("Content-Type", result.contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(run.title)}${result.extension}"`);
+    res.send(result.buffer);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Generation] 导出失败: ${msg}`);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** PUT /api/generation/:id/content — 更新文档内容（在线编辑 Feature #16） */
+generationRouter.put("/:id/content", (req, res) => {
+  try {
+    const { content } = req.body;
+    if (!content) {
+      res.status(400).json({ ok: false, error: "content is required" });
+      return;
+    }
+
+    const db = getDb();
+    db.prepare("UPDATE generation_runs SET content = ?, updated_at = datetime('now','localtime') WHERE id = ?")
+      .run(content, req.params.id);
+
+    logger.info(`[Generation] 文档内容已更新: ${req.params.id}`);
+    res.json({ ok: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ ok: false, error: msg });
