@@ -7,8 +7,12 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { healthRouter } from "./routes/health.js";
 import { settingsRouter } from "./routes/settings.js";
+import { knowledgeRouter } from "./routes/knowledge.js";
+import { peopleRouter } from "./routes/people.js";
 import { getDb, closeDb } from "./lib/db.js";
 import { logger } from "./lib/logger.js";
+import { injectSampleData } from "./lib/sampleDataGenerator.js";
+import { injectDemoPeople } from "./lib/peopleGraph.js";
 
 // 加载 .env
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -66,6 +70,8 @@ app.use(rateLimiter);
 // Routes
 app.use("/api", healthRouter);
 app.use("/api/settings", settingsRouter);
+app.use("/api/knowledge", knowledgeRouter);
+app.use("/api/people", peopleRouter);
 
 // 静态文件服务（client build）
 const clientDist = path.resolve(__dirname, "../../client/dist");
@@ -80,6 +86,10 @@ app.get("*", (_req, res) => {
 function start() {
   // 初始化 DB
   getDb();
+
+  // 注入 sample 数据（首次启动时）
+  injectSampleData();
+  injectDemoPeople();
 
   app.listen(PORT, () => {
     logger.info(`[Server] i-Write server running on http://localhost:${PORT}`);
