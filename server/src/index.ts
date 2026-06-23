@@ -11,6 +11,8 @@ import { knowledgeRouter } from "./routes/knowledge.js";
 import { peopleRouter } from "./routes/people.js";
 import { chatRouter } from "./routes/chat.js";
 import { generationRouter } from "./routes/generation.js";
+import { evaluationRouter } from "./routes/evaluation.js";
+import { provenanceRouter } from "./routes/provenance.js";
 import { getDb, closeDb } from "./lib/db.js";
 import { logger } from "./lib/logger.js";
 import { injectSampleData } from "./lib/sampleDataGenerator.js";
@@ -76,6 +78,8 @@ app.use("/api/knowledge", knowledgeRouter);
 app.use("/api/people", peopleRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/generation", generationRouter);
+app.use("/api/evaluation", evaluationRouter);
+app.use("/api/provenance", provenanceRouter);
 
 // 静态文件服务（client build）
 const clientDist = path.resolve(__dirname, "../../client/dist");

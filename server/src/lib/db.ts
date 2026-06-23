@@ -163,7 +163,7 @@ function migrate(db: Database.Database): void {
       id            TEXT PRIMARY KEY,
       run_id        TEXT NOT NULL REFERENCES generation_runs(id) ON DELETE CASCADE,
       paragraph_idx INTEGER NOT NULL,
-      chunk_id      TEXT REFERENCES kb_chunks(id),
+      chunk_id      TEXT,
       score         REAL DEFAULT 0,
       is_manual     INTEGER DEFAULT 0,
       parent_id     TEXT,
