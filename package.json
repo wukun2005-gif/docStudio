@@ -23,7 +23,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ext .ts,.tsx",
     "verify": "npm run typecheck && npm run lint && npm test",
-    "fake-data": "cd server && npx tsx src/scripts/generateFakeData.ts",
+    "samples": "npx tsx server/src/scripts/generateSamples.ts",
     "eval:run": "cd server && npx tsx src/scripts/runEval.ts",
     "eval:report": "cd server && npx tsx src/scripts/showEvalReport.ts"
   },
@@ -35,6 +35,11 @@
     "vitest": "^3.1.0"
   },
   "dependencies": {
-    "multer": "^2.2.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "docx": "^9.7.1",
+    "jszip": "^3.10.1",
+    "multer": "^2.2.0",
+    "pptxgenjs": "^4.0.1",
+    "xlsx": "^0.18.5"
   }
 }

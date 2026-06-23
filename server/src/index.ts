@@ -44,9 +44,11 @@ app.use((_req, res, next) => {
   next();
 });
 
-// UTF-8 编码
-app.use((_req, res, next) => {
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
+// UTF-8 编码 — 只对 JSON 响应设置，不干扰文件上传
+app.use((req, res, next) => {
+  if (!req.is('multipart/form-data')) {
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+  }
   next();
 });
 
@@ -84,6 +86,19 @@ app.use("/api/evaluation", evaluationRouter);
 app.use("/api/provenance", provenanceRouter);
 app.use("/api/connectors", connectorsRouter);
 app.use("/api/workflows", workflowsRouter);
+
+// 全局错误处理 — 捕获 multer 等错误
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+    res.status(400).json({ ok: false, error: `上传字段名错误: ${err.field}，期望 'files'` });
+    return;
+  }
+  if (err.name === 'MulterError') {
+    res.status(400).json({ ok: false, error: `上传错误: ${err.message}` });
+    return;
+  }
+  next(err);
+});
 
 // 静态文件服务（client build）
 const clientDist = path.resolve(__dirname, "../../client/dist");

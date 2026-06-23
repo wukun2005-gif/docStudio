@@ -1,294 +1,394 @@
-import { useEffect, useState, useMemo } from "react";
-import { useAppStore, type ProviderConfig } from "../store";
-import { useModelCatalog, type ModelInfo } from "../lib/modelCatalog";
+import { useState, useEffect, useCallback } from "react";
+import { useAppStore } from "../store";
+import type { ProviderConfig } from "../store";
+import { PRESET_SEARCH_PROVIDERS, PRESET_KNOWLEDGE_PROVIDERS } from "../../../shared/src/types/provider.js";
+import type { SearchProviderConnection, KnowledgeProviderConnection, SearchProviderId } from "../../../shared/src/types/provider.js";
 
-// 预置 provider 列表（与 server 端 PRESET_MODEL_PROVIDERS 同步）
 const PRESET_PROVIDERS = [
-  { id: "gemini", displayName: "Gemini", desc: "Google AI Studio (免费)", defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta", keyPlaceholder: "AIza..." },
-  { id: "mimo", displayName: "MiMo", desc: "小米 Token Plan", defaultBaseUrl: "https://token-plan-cn.xiaomimimo.com/v1", keyPlaceholder: "sk-..." },
-  { id: "kimi", displayName: "Kimi", desc: "Moonshot / 月之暗面", defaultBaseUrl: "https://api.moonshot.cn/v1", keyPlaceholder: "sk-..." },
-  { id: "glm", displayName: "GLM", desc: "智谱 AI", defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4", keyPlaceholder: "your-glm-key" },
-  { id: "minimax", displayName: "MiniMax", desc: "MiniMax", defaultBaseUrl: "https://api.minimax.chat/v1", keyPlaceholder: "your-minimax-key" },
-  { id: "deepseek", displayName: "DeepSeek", desc: "深度求索", defaultBaseUrl: "https://api.deepseek.com", keyPlaceholder: "sk-..." },
-  { id: "qwen", displayName: "Qwen", desc: "阿里通义千问 (DashScope)", defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", keyPlaceholder: "sk-..." },
-  { id: "bedrock", displayName: "AWS Bedrock", desc: "AWS Bedrock OpenAI-Compatible API", defaultBaseUrl: "https://bedrock-mantle.us-east-1.api.aws/v1", keyPlaceholder: "bedrock-api-key" },
-  { id: "openrouter", displayName: "OpenRouter", desc: "统一 API 聚合数百模型", defaultBaseUrl: "https://openrouter.ai/api/v1", keyPlaceholder: "sk-or-v1-..." },
-  { id: "opencode", displayName: "OpenCode Zen", desc: "OpenCode 官方精选模型网关", defaultBaseUrl: "https://opencode.ai/zen/v1", keyPlaceholder: "opencode-zen-key" },
-  { id: "volcengine", displayName: "火山引擎", desc: "字节跳动 · 火山引擎", defaultBaseUrl: "https://ark.cn-beijing.volces.com/api/v3", keyPlaceholder: "sk-..." },
-  { id: "bailian", displayName: "百炼", desc: "阿里云百炼 (千问+三方模型)", defaultBaseUrl: "https://ws-3vv2b1h4akmem3xz.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", keyPlaceholder: "sk-..." },
-  { id: "siliconflow", displayName: "SiliconFlow (Embedding)", desc: "硅基流动 Embedding API", defaultBaseUrl: "https://api.siliconflow.cn/v1", keyPlaceholder: "sk-..." },
+  { id: "gemini", name: "Gemini (Google)", defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta", keyPlaceholder: "AIza...", desc: "Google Gemini 系列" },
+  { id: "openrouter", name: "OpenRouter", defaultBaseUrl: "https://openrouter.ai/api/v1", keyPlaceholder: "sk-or-...", desc: "多模型聚合平台" },
+  { id: "deepseek", name: "DeepSeek", defaultBaseUrl: "https://api.deepseek.com/v1", keyPlaceholder: "sk-...", desc: "DeepSeek AI" },
+  { id: "qwen", name: "Qwen (通义千问)", defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", keyPlaceholder: "sk-...", desc: "阿里通义千问" },
+  { id: "kimi", name: "Kimi (月之暗面)", defaultBaseUrl: "https://api.moonshot.cn/v1", keyPlaceholder: "sk-...", desc: "月之暗面 Kimi" },
+  { id: "glm", name: "GLM (智谱)", defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4", keyPlaceholder: "...", desc: "智谱 GLM" },
+  { id: "minimax", name: "MiniMax", defaultBaseUrl: "https://api.minimax.chat/v1", keyPlaceholder: "eyJhb...", desc: "MiniMax AI" },
+  { id: "opencode", name: "OpenCode", defaultBaseUrl: "https://opencode.ai/v1", keyPlaceholder: "sk-...", desc: "OpenCode AI" },
+  { id: "mimo", name: "MiMo (Xiaomi)", defaultBaseUrl: "https://api.xiaomi.com/v1", keyPlaceholder: "tp-...", desc: "小米 MiMo" },
+  { id: "volcengine", name: "Volcengine (火山引擎)", defaultBaseUrl: "https://ark.cn-beijing.volces.com/api/v3", keyPlaceholder: "ark-...", desc: "火山引擎豆包" },
+  { id: "bailian", name: "Bailian (百炼/阿里)", defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", keyPlaceholder: "sk-...", desc: "阿里百炼" },
+  { id: "bedrock", name: "AWS Bedrock", defaultBaseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", keyPlaceholder: "AWS access key ID", desc: "Amazon Bedrock", needsRegion: true, regionPlaceholder: "us-east-1" },
+  { id: "custom", name: "Custom (OpenAI Compatible)", defaultBaseUrl: "", keyPlaceholder: "sk-...", desc: "自定义 OpenAI 兼容端点" },
 ];
 
+type TabId = "llm" | "search" | "knowledge";
+
+interface FormProvider {
+  providerId: string;
+  name: string;
+  enabled: boolean;
+  apiKey: string;
+  baseUrl: string;
+  modelIds: string[];
+  defaultModelId: string;
+  modelFallbacks: string[];
+  enableModelFallback: boolean;
+}
+
 export default function Settings() {
-  const { providers, enableProviderFallback, loading, error, loadSettings, saveProviders } = useAppStore();
-  const { catalog, loading: catalogLoading } = useModelCatalog();
-  const [localProviders, setLocalProviders] = useState<ProviderConfig[]>([]);
-  const [localFallback, setLocalFallback] = useState(true);
-  const [saveStatus, setSaveStatus] = useState<string | null>(null);
+  const { providers, enableProviderFallback, searchProviders: savedSearch, knowledgeProviders: savedKnowledge, knowledgeEnabled: savedKnowledgeEnabled, loadSettings, saveProviders, saveSearchProviders, saveKnowledgeConfig } = useAppStore();
+  const [activeTab, setActiveTab] = useState<TabId>("llm");
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [formState, setFormState] = useState<Record<string, FormProvider>>({});
+  const [searchFormState, setSearchFormState] = useState<Record<string, SearchProviderConnection>>({});
+  const [knowledgeFormState, setKnowledgeFormState] = useState<Record<string, KnowledgeProviderConnection>>({});
+  const [knowledgeEnabled, setKnowledgeEnabled] = useState(false);
 
   useEffect(() => { loadSettings(); }, [loadSettings]);
 
   useEffect(() => {
-    // 合并预置 providers 和已配置 providers
-    const merged: ProviderConfig[] = PRESET_PROVIDERS.map((preset) => {
-      const existing = providers.find((p) => p.providerId === preset.id);
-      return existing ?? {
-        providerId: preset.id,
-        apiKey: "",
-        baseUrl: preset.defaultBaseUrl,
-        defaultModelId: "",
-        modelIds: [],
-        modelFallbacks: [],
-        enabled: false,
-        enableModelFallback: false,
+    const map: Record<string, FormProvider> = {};
+    PRESET_PROVIDERS.forEach(p => {
+      const saved = providers.find(c => c.providerId === p.id);
+      map[p.id] = {
+        providerId: p.id, name: p.name, enabled: saved?.enabled ?? false,
+        apiKey: saved?.apiKey || saved?.apiKeyRef || "", baseUrl: saved?.baseUrl || p.defaultBaseUrl,
+        modelIds: saved?.modelIds || [], defaultModelId: saved?.defaultModelId || "",
+        modelFallbacks: saved?.modelFallbacks || [], enableModelFallback: saved?.enableModelFallback ?? false,
       };
     });
-    setLocalProviders(merged);
-    setLocalFallback(enableProviderFallback);
-  }, [providers, enableProviderFallback]);
+    providers.filter(c => !PRESET_PROVIDERS.find(p => p.id === c.providerId)).forEach(c => {
+      map[c.providerId] = {
+        providerId: c.providerId, name: c.providerId, enabled: c.enabled,
+        apiKey: c.apiKey || c.apiKeyRef || "", baseUrl: c.baseUrl || "",
+        modelIds: c.modelIds || [], defaultModelId: c.defaultModelId || "",
+        modelFallbacks: c.modelFallbacks || [], enableModelFallback: c.enableModelFallback ?? false,
+      };
+    });
+    setFormState(map);
+  }, [providers]);
+
+  useEffect(() => {
+    const map: Record<string, SearchProviderConnection> = {};
+    PRESET_SEARCH_PROVIDERS.forEach(p => {
+      const saved = savedSearch?.find(s => s.providerId === p.id);
+      map[p.id] = saved || { providerId: p.id as SearchProviderId, name: p.displayName, apiKeyRef: "", baseUrl: p.baseUrl, enabled: false };
+    });
+    setSearchFormState(map);
+  }, [savedSearch]);
+
+  useEffect(() => {
+    setKnowledgeEnabled(savedKnowledgeEnabled || false);
+    const map: Record<string, KnowledgeProviderConnection> = {};
+    PRESET_KNOWLEDGE_PROVIDERS.forEach(p => {
+      const key = `${p.providerType}-${p.providerId}`;
+      const saved = savedKnowledge?.find(k => k.providerType === p.providerType && k.providerId === p.providerId);
+      map[key] = saved || {
+        providerType: p.providerType, providerId: p.providerId, displayName: p.displayName,
+        baseUrl: p.baseUrl, apiKeyRef: "", modelId: p.defaultModelId, availableModels: p.queryModels, enabled: false,
+      };
+    });
+    setKnowledgeFormState(map);
+  }, [savedKnowledge, savedKnowledgeEnabled]);
+
+  const showToast = (type: "success" | "error", message: string) => {
+    setToast({ type, message });
+    setTimeout(() => setToast(null), 2000);
+  };
+
+  const handleQueryModels = useCallback(async (providerId: string) => {
+    const provider = formState[providerId];
+    if (!provider?.apiKey) return;
+    try {
+      const res = await fetch(`/api/settings/providers/${providerId}/models`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ apiKey: provider.apiKey, baseUrl: provider.baseUrl }),
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "查询失败");
+      const models: string[] = data.models || [];
+      setFormState(prev => {
+        const current = prev[providerId];
+        if (!current) return prev;
+        return { ...prev, [providerId]: { ...current, modelIds: models, defaultModelId: models[0] || current.defaultModelId } };
+      });
+      showToast("success", `已查询到 ${models.length} 个模型`);
+    } catch (e: any) {
+      showToast("error", `查询失败: ${e.message}`);
+    }
+  }, [formState]);
+
+  const handleVerifySearchKey = useCallback(async (providerId: string) => {
+    const config = searchFormState[providerId];
+    if (!config) return;
+    try {
+      const body: any = { providerId, apiKey: config.apiKeyRef, baseUrl: config.baseUrl };
+      if (providerId === "epo" && (config as any).apiKey2Ref) {
+        body.apiKey = `${config.apiKeyRef}:${(config as any).apiKey2Ref}`;
+      }
+      const res = await fetch("/api/settings/verify-search-key", {
+        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include",
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      showToast(data.ok ? "success" : "error", data.ok ? "验证成功" : `验证失败: ${data.error || "未知错误"}`);
+    } catch (e: any) {
+      showToast("error", `验证失败: ${e.message}`);
+    }
+  }, [searchFormState]);
+
+  const handleTestKnowledge = useCallback(async (key: string) => {
+    const config = knowledgeFormState[key];
+    if (!config) return;
+    try {
+      const res = await fetch("/api/settings/knowledge/providers/test", {
+        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include",
+        body: JSON.stringify({ providerType: config.providerType, providerId: config.providerId, baseUrl: config.baseUrl, apiKey: config.apiKeyRef, modelId: config.modelId }),
+      });
+      const data = await res.json();
+      showToast(data.ok ? "success" : "error", data.ok ? "连接成功" : `连接失败: ${data.error || "未知错误"}`);
+    } catch (e: any) {
+      showToast("error", `连接失败: ${e.message}`);
+    }
+  }, [knowledgeFormState]);
 
   const handleSave = async () => {
-    await saveProviders(localProviders, localFallback);
-    setSaveStatus("保存成功");
-    setTimeout(() => setSaveStatus(null), 3000);
+    const list: ProviderConfig[] = Object.values(formState).map(c => ({
+      providerId: c.providerId, enabled: c.enabled,
+      apiKey: c.apiKey.trim(), apiKeyRef: c.apiKey.trim(),
+      baseUrl: c.baseUrl.replace(/\/+$/, ""),
+      modelIds: c.modelIds, defaultModelId: c.defaultModelId,
+      modelFallbacks: c.modelFallbacks, enableModelFallback: c.enableModelFallback,
+    }));
+    await saveProviders(list, enableProviderFallback);
+    showToast("success", "已保存");
+    await loadSettings();
   };
 
-  const updateProvider = (idx: number, field: keyof ProviderConfig, value: string | boolean | string[]) => {
-    setLocalProviders((prev) => {
-      const next = [...prev];
-      next[idx] = { ...next[idx], [field]: value };
-      return next;
-    });
+  const handleSaveSearch = async () => {
+    await saveSearchProviders(Object.values(searchFormState));
+    showToast("success", "已保存");
   };
 
-  const setDefaultModel = (idx: number, modelId: string) => {
-    setLocalProviders((prev) => {
-      const next = [...prev];
-      next[idx] = { ...next[idx], defaultModelId: modelId };
-      return next;
-    });
+  const handleSaveKnowledge = async () => {
+    await saveKnowledgeConfig(Object.values(knowledgeFormState), knowledgeEnabled);
+    showToast("success", "已保存");
   };
 
-  const toggleModelFallback = (idx: number, modelId: string) => {
-    setLocalProviders((prev) => {
-      const next = [...prev];
-      const p = { ...next[idx] };
-      const fallbacks = [...(p.modelFallbacks ?? [])];
-      const i = fallbacks.indexOf(modelId);
-      if (i >= 0) fallbacks.splice(i, 1);
-      else fallbacks.push(modelId);
-      p.modelFallbacks = fallbacks;
-      next[idx] = p;
-      return next;
-    });
+  const updateField = (id: string, field: keyof FormProvider, value: any) => {
+    setFormState(prev => ({ ...prev, [id]: { ...prev[id], [field]: value } }));
   };
 
-  if (loading && providers.length === 0) {
-    return <div className="text-center py-8 text-gray-500">加载中...</div>;
-  }
+  const tabs: { id: TabId; label: string }[] = [
+    { id: "llm", label: "模型 Providers" },
+    { id: "search", label: "搜索 Providers" },
+    { id: "knowledge", label: "知识库" },
+  ];
 
   return (
     <div className="max-w-4xl mx-auto">
-      <h2 className="text-2xl font-bold mb-6">设置</h2>
+      {toast && (
+        <div className={`fixed top-5 right-5 z-50 px-5 py-2.5 rounded-md text-white text-sm shadow-lg ${toast.type === "success" ? "bg-green-600" : "bg-red-600"}`}>
+          {toast.message}
+        </div>
+      )}
 
-      {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg">{error}</div>}
+      <h2 className="text-2xl font-bold mb-4">设置</h2>
 
-      {/* 全局 Provider 回退开关 */}
-      <section className="mb-6">
-        <label className="flex items-center gap-3 p-4 bg-gray-50 rounded-lg cursor-pointer">
-          <input
-            type="checkbox"
-            checked={localFallback}
-            onChange={(e) => setLocalFallback(e.target.checked)}
-            className="rounded w-5 h-5"
-          />
-          <div>
-            <span className="font-medium">启用 Provider 回退</span>
-            <p className="text-sm text-gray-500">当首选 Provider 失败时，自动尝试下一个已启用的 Provider</p>
+      {/* Tab 导航 */}
+      <div className="flex border-b mb-6">
+        {tabs.map(tab => (
+          <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+            className={`px-6 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${activeTab === tab.id ? "border-blue-500 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ===== 模型 Providers Tab ===== */}
+      {activeTab === "llm" && (
+        <div>
+          <div className="flex items-center gap-4 mb-4">
+            <h3 className="text-lg font-semibold">LLM Provider 配置</h3>
+            <button onClick={handleSave} className="ml-auto px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">保存</button>
           </div>
-        </label>
-      </section>
-
-      {/* Provider 配置 */}
-      <section className="mb-8">
-        <h3 className="text-lg font-semibold mb-4">LLM Provider 配置</h3>
-        {catalogLoading && <p className="text-sm text-gray-500 mb-2">加载模型目录...</p>}
-        <div className="space-y-3">
-          {localProviders.map((p, idx) => {
-            const preset = PRESET_PROVIDERS.find((pr) => pr.id === p.providerId);
-            const models = catalog[p.providerId] ?? [];
-            const isExpanded = expandedProvider === p.providerId;
-            const configuredKey = p.apiKeyRef ?? p.apiKey;
-
-            return (
-              <div key={p.providerId} className="border rounded-lg bg-white overflow-hidden">
-                {/* Provider 头部 */}
-                <div
-                  className="flex items-center justify-between p-4 cursor-pointer hover:bg-gray-50"
-                  onClick={() => setExpandedProvider(isExpanded ? null : p.providerId)}
-                >
-                  <div className="flex items-center gap-3">
-                    <input
-                      type="checkbox"
-                      checked={p.enabled}
-                      onChange={(e) => {
-                        e.stopPropagation();
-                        updateProvider(idx, "enabled", e.target.checked);
-                      }}
-                      className="rounded w-4 h-4"
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                    <div>
-                      <span className="font-medium">{preset?.displayName ?? p.providerId}</span>
-                      <span className="text-sm text-gray-500 ml-2">{preset?.desc}</span>
+          <div className="space-y-3">
+            {Object.values(formState).map(c => {
+              const preset = PRESET_PROVIDERS.find(p => p.id === c.providerId);
+              const isExpanded = expandedProvider === c.providerId;
+              return (
+                <div key={c.providerId} className="border rounded-lg bg-white overflow-hidden">
+                  <div className="flex items-center justify-between p-4 cursor-pointer hover:bg-gray-50" onClick={() => setExpandedProvider(isExpanded ? null : c.providerId)}>
+                    <div className="flex items-center gap-3">
+                      <div className={`w-2.5 h-2.5 rounded-full ${c.enabled ? "bg-green-500" : "bg-gray-300"}`} />
+                      <span className="font-medium">{c.name}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {c.apiKey && <span className="text-xs text-green-600 bg-green-50 px-2 py-0.5 rounded">已配置</span>}
+                      {!c.apiKey && <span className="text-xs text-amber-600 bg-amber-50 px-2 py-0.5 rounded">需配置Key</span>}
+                      {c.modelIds.length > 0 && <span className="text-xs text-gray-500">{c.modelIds.length} 模型</span>}
+                      <svg className={`w-4 h-4 text-gray-400 transition-transform ${isExpanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    {configuredKey && <span className="text-xs text-green-600 bg-green-50 px-2 py-1 rounded">已配置</span>}
-                    {p.defaultModelId && <span className="text-xs text-blue-600 bg-blue-50 px-2 py-1 rounded">{p.defaultModelId}</span>}
-                    <svg className={`w-4 h-4 text-gray-400 transition-transform ${isExpanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
-                  </div>
-                </div>
-
-                {/* Provider 详情 */}
-                {isExpanded && (
-                  <div className="border-t p-4 space-y-4 bg-gray-50/50">
-                    <div className="grid grid-cols-2 gap-4">
+                  {isExpanded && (
+                    <div className="border-t p-4 space-y-4 bg-gray-50/50">
+                      <div className="flex items-center gap-4">
+                        <label className="flex items-center gap-2 text-sm">
+                          <input type="checkbox" checked={c.enabled} onChange={e => updateField(c.providerId, "enabled", e.target.checked)} className="rounded" />
+                          启用
+                        </label>
+                        <button onClick={handleSave} className="ml-auto px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">保存</button>
+                      </div>
                       <div>
                         <label className="block text-sm text-gray-600 mb-1">API Key</label>
-                        <input
-                          type="password"
-                          value={configuredKey ?? ""}
-                          onChange={(e) => updateProvider(idx, "apiKey", e.target.value)}
-                          placeholder={preset?.keyPlaceholder ?? "sk-..."}
-                          className="w-full border rounded px-3 py-2 text-sm"
-                        />
+                        <input type="password" value={c.apiKey} onChange={e => updateField(c.providerId, "apiKey", e.target.value)} placeholder={preset?.keyPlaceholder || "sk-..."} className="w-full border rounded px-3 py-2 text-sm" />
                       </div>
                       <div>
                         <label className="block text-sm text-gray-600 mb-1">Base URL</label>
-                        <input
-                          type="text"
-                          value={p.baseUrl ?? ""}
-                          onChange={(e) => updateProvider(idx, "baseUrl", e.target.value)}
-                          placeholder={preset?.defaultBaseUrl}
-                          className="w-full border rounded px-3 py-2 text-sm"
-                        />
+                        <input type="text" value={c.baseUrl} onChange={e => updateField(c.providerId, "baseUrl", e.target.value)} placeholder={preset?.defaultBaseUrl || "https://api.example.com/v1"} className="w-full border rounded px-3 py-2 text-sm" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="text-sm text-gray-600">可用模型</span>
+                          <button onClick={() => handleQueryModels(c.providerId)} disabled={!c.apiKey}
+                            className={`text-xs px-2.5 py-1 rounded ${c.apiKey ? "bg-blue-100 text-blue-700 hover:bg-blue-200" : "bg-gray-100 text-gray-400 cursor-not-allowed"}`}>
+                            查询可用模型
+                          </button>
+                        </div>
+                        {c.modelIds.length > 0 ? (
+                          <div className="flex flex-wrap gap-1.5">
+                            {c.modelIds.map(m => (
+                              <button key={m} onClick={() => updateField(c.providerId, "defaultModelId", m)}
+                                className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${c.defaultModelId === m ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-600 border-gray-300 hover:border-blue-400"}`}>
+                                {m}{c.defaultModelId === m ? " ✓" : ""}
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-400">点击"查询可用模型"获取</span>
+                        )}
                       </div>
                     </div>
-
-                    {/* 模型选择 */}
-                    {models.length > 0 && (
-                      <div>
-                        <div className="flex items-center justify-between mb-2">
-                          <label className="text-sm text-gray-600">默认模型</label>
-                          <label className="flex items-center gap-2 text-sm">
-                            <input
-                              type="checkbox"
-                              checked={p.enableModelFallback ?? false}
-                              onChange={(e) => updateProvider(idx, "enableModelFallback", e.target.checked)}
-                              className="rounded w-3.5 h-3.5"
-                            />
-                            <span className="text-gray-500">启用模型回退</span>
-                          </label>
-                        </div>
-                        <ModelSelector
-                          models={models}
-                          defaultModelId={p.defaultModelId ?? ""}
-                          modelFallbacks={p.modelFallbacks ?? []}
-                          onSetDefault={(id) => setDefaultModel(idx, id)}
-                          onToggleFallback={(id) => toggleModelFallback(idx, id)}
-                        />
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
-      </section>
+      )}
 
-      {/* 保存按钮 */}
-      <div className="flex items-center gap-4 sticky bottom-0 bg-white py-4 border-t">
-        <button
-          onClick={handleSave}
-          disabled={loading}
-          className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-        >
-          {loading ? "保存中..." : "保存设置"}
-        </button>
-        {saveStatus && <span className="text-green-600 text-sm">{saveStatus}</span>}
-      </div>
-    </div>
-  );
-}
+      {/* ===== 搜索 Providers Tab ===== */}
+      {activeTab === "search" && (
+        <div>
+          <div className="flex items-center gap-4 mb-4">
+            <h3 className="text-lg font-semibold">搜索 Providers</h3>
+            <button onClick={handleSaveSearch} className="ml-auto px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">保存</button>
+          </div>
+          <div className="space-y-3">
+            {Object.values(searchFormState).map(c => {
+              const preset = PRESET_SEARCH_PROVIDERS.find(p => p.id === c.providerId);
+              return (
+                <div key={c.providerId} className="border rounded-lg bg-white p-4">
+                  <div className="flex items-center mb-3">
+                    <div className={`w-2.5 h-2.5 rounded-full ${c.enabled ? "bg-green-500" : "bg-gray-300"} mr-3`} />
+                    <span className="font-medium flex-1">{c.name}</span>
+                    <label className="flex items-center gap-2 text-sm text-gray-600">
+                      <input type="checkbox" checked={c.enabled} onChange={e => setSearchFormState(prev => ({ ...prev, [c.providerId]: { ...prev[c.providerId], enabled: e.target.checked } }))} className="rounded" />
+                      启用
+                    </label>
+                  </div>
+                  {preset && <p className="text-xs text-gray-500 mb-3 ml-6">{preset.desc}</p>}
+                  {c.providerId === "epo" ? (
+                    <div className="ml-6 space-y-3">
+                      <div>
+                        <label className="block text-sm text-gray-600 mb-1">Consumer Key</label>
+                        <input type="password" value={c.apiKeyRef || ""} onChange={e => setSearchFormState(prev => ({ ...prev, [c.providerId]: { ...prev[c.providerId], apiKeyRef: e.target.value } }))} placeholder="your-consumer-key" className="w-full border rounded px-3 py-2 text-sm" />
+                      </div>
+                      <div>
+                        <label className="block text-sm text-gray-600 mb-1">Consumer Secret</label>
+                        <input type="password" value={(c as any).apiKey2Ref || ""} onChange={e => setSearchFormState(prev => ({ ...prev, [c.providerId]: { ...prev[c.providerId], apiKey2Ref: e.target.value } } as any))} placeholder="your-consumer-secret" className="w-full border rounded px-3 py-2 text-sm" />
+                      </div>
+                      <p className="text-xs text-gray-400">格式: Consumer Key + Consumer Secret</p>
+                    </div>
+                  ) : (
+                    <div className="ml-6 space-y-3">
+                      <div>
+                        <label className="block text-sm text-gray-600 mb-1">API Key</label>
+                        <input type="password" value={c.apiKeyRef || ""} onChange={e => setSearchFormState(prev => ({ ...prev, [c.providerId]: { ...prev[c.providerId], apiKeyRef: e.target.value } }))} placeholder={preset?.keyPlaceholder || "API Key"} className="w-full border rounded px-3 py-2 text-sm" />
+                      </div>
+                      {c.providerId === "serper" && (
+                        <div>
+                          <label className="block text-sm text-gray-600 mb-1">Base URL</label>
+                          <input type="text" value={c.baseUrl || ""} onChange={e => setSearchFormState(prev => ({ ...prev, [c.providerId]: { ...prev[c.providerId], baseUrl: e.target.value } }))} placeholder={preset?.baseUrl} className="w-full border rounded px-3 py-2 text-sm" />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  <div className="ml-6 mt-3 flex gap-2">
+                    <button onClick={handleSaveSearch} className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">保存</button>
+                    <button onClick={() => handleVerifySearchKey(c.providerId)} disabled={!c.apiKeyRef} className="px-3 py-1 border border-gray-300 rounded text-sm hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">验证 Key</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
-// ── 模型选择器组件 ──────────────────────────────────────────
-
-function ModelSelector({
-  models,
-  defaultModelId,
-  modelFallbacks,
-  onSetDefault,
-  onToggleFallback,
-}: {
-  models: ModelInfo[];
-  defaultModelId: string;
-  modelFallbacks: string[];
-  onSetDefault: (id: string) => void;
-  onToggleFallback: (id: string) => void;
-}) {
-  return (
-    <div className="border rounded overflow-hidden">
-      <table className="w-full text-sm">
-        <thead className="bg-gray-100 text-gray-600">
-          <tr>
-            <th className="text-left px-3 py-2 w-8"></th>
-            <th className="text-left px-3 py-2">模型</th>
-            <th className="text-left px-3 py-2">推荐</th>
-            <th className="text-left px-3 py-2">上下文</th>
-            <th className="text-left px-3 py-2">输出</th>
-            <th className="text-left px-3 py-2 w-16">回退</th>
-          </tr>
-        </thead>
-        <tbody>
-          {models.map((m) => {
-            const isDefault = m.id === defaultModelId;
-            const isFallback = modelFallbacks.includes(m.id);
-            return (
-              <tr key={m.id} className={`border-t hover:bg-blue-50/50 ${isDefault ? "bg-blue-50" : ""}`}>
-                <td className="px-3 py-2">
-                  <button
-                    onClick={() => onSetDefault(m.id)}
-                    className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${isDefault ? "border-blue-500 bg-blue-500" : "border-gray-300"}`}
-                    title="设为默认"
-                  >
-                    {isDefault && <div className="w-2 h-2 rounded-full bg-white" />}
-                  </button>
-                </td>
-                <td className="px-3 py-2 font-mono text-xs">
-                  {m.id}
-                  {m.isReasoning && <span className="ml-1 text-purple-600 text-[10px]">思考</span>}
-                  {m.supportsVision && <span className="ml-1 text-green-600 text-[10px]">视觉</span>}
-                </td>
-                <td className="px-3 py-2 text-xs text-gray-500 max-w-[200px] truncate">{m.recommendation ?? ""}</td>
-                <td className="px-3 py-2 text-xs text-gray-500">{m.contextWindow ? `${Math.round(m.contextWindow / 1024)}K` : ""}</td>
-                <td className="px-3 py-2 text-xs text-gray-500">{m.maxOutputTokens ? `${Math.round(m.maxOutputTokens / 1024)}K` : ""}</td>
-                <td className="px-3 py-2 text-center">
-                  <input
-                    type="checkbox"
-                    checked={isFallback}
-                    onChange={() => onToggleFallback(m.id)}
-                    className="rounded w-3.5 h-3.5"
-                    title={isFallback ? "从回退列表移除" : "加入回退列表"}
-                  />
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+      {/* ===== 知识库 Tab ===== */}
+      {activeTab === "knowledge" && (
+        <div>
+          <div className="flex items-center gap-4 mb-4">
+            <h3 className="text-lg font-semibold">知识库</h3>
+            <label className="flex items-center gap-2 ml-auto text-sm text-gray-600">
+              <input type="checkbox" checked={knowledgeEnabled} onChange={e => setKnowledgeEnabled(e.target.checked)} className="rounded" />
+              启用知识库
+            </label>
+            <button onClick={handleSaveKnowledge} className="px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">保存</button>
+          </div>
+          <div className="space-y-3">
+            {Object.entries(knowledgeFormState).map(([key, c]) => {
+              const preset = PRESET_KNOWLEDGE_PROVIDERS.find(p => p.providerType === c.providerType && p.providerId === c.providerId);
+              return (
+                <div key={key} className="border rounded-lg bg-white p-4">
+                  <div className="flex items-center mb-3">
+                    <div className={`w-2.5 h-2.5 rounded-full ${c.enabled ? "bg-green-500" : "bg-gray-300"} mr-3`} />
+                    <span className="font-medium flex-1">{c.displayName}</span>
+                    <label className="flex items-center gap-2 text-sm text-gray-600">
+                      <input type="checkbox" checked={c.enabled} onChange={e => setKnowledgeFormState(prev => ({ ...prev, [key]: { ...prev[key], enabled: e.target.checked } }))} className="rounded" />
+                      启用
+                    </label>
+                  </div>
+                  {preset && <p className="text-xs text-gray-500 mb-3 ml-6">{preset.desc}</p>}
+                  <div className="ml-6 space-y-3">
+                    <div>
+                      <label className="block text-sm text-gray-600 mb-1">API Key</label>
+                      <input type="password" value={c.apiKeyRef || ""} onChange={e => setKnowledgeFormState(prev => ({ ...prev, [key]: { ...prev[key], apiKeyRef: e.target.value } }))} placeholder="sk-..." className="w-full border rounded px-3 py-2 text-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-gray-600 mb-1">Base URL</label>
+                      <input type="text" value={c.baseUrl || ""} onChange={e => setKnowledgeFormState(prev => ({ ...prev, [key]: { ...prev[key], baseUrl: e.target.value } }))} placeholder={preset?.baseUrl} className="w-full border rounded px-3 py-2 text-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-gray-600 mb-1">模型</label>
+                      <select value={c.modelId || ""} onChange={e => setKnowledgeFormState(prev => ({ ...prev, [key]: { ...prev[key], modelId: e.target.value } }))} className="w-full border rounded px-3 py-2 text-sm">
+                        {(c.availableModels || []).map(m => <option key={m} value={m}>{m}</option>)}
+                        {!(c.availableModels || []).includes(c.modelId) && c.modelId && <option value={c.modelId}>{c.modelId}</option>}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="ml-6 mt-3 flex gap-2">
+                    <button onClick={handleSaveKnowledge} className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">保存</button>
+                    <button onClick={() => handleTestKnowledge(key)} disabled={!c.apiKeyRef} className="px-3 py-1 border border-gray-300 rounded text-sm hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">测试连接</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

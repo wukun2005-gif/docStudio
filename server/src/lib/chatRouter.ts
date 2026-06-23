@@ -4,6 +4,8 @@
  */
 import { registry } from "../providers/registry.js";
 import { getApiKey } from "../security/keyStore.js";
+import { readSettingsFromDb } from "./settingsReader.js";
+import { generateOutline, type OutlineSection } from "./narrativeEngine.js";
 import { logger } from "./logger.js";
 
 export interface ChatRequest {
@@ -18,13 +20,13 @@ export interface ChatRequest {
 export interface ChatResponse {
   type: "direct_answer" | "outline_request" | "clarification";
   content: string;
-  suggestedOutline?: Array<{ title: string; description?: string }>;
+  suggestedOutline?: OutlineSection[];
   followUpQuestions?: string[];
 }
 
 /** 判断用户意图 */
 async function classifyIntent(message: string): Promise<"simple" | "document" | "unclear"> {
-  const documentKeywords = ["生成", "写", "文档", "报告", "周报", "总结", "方案", "PPT", "Excel", "大纲"];
+  const documentKeywords = ["生成", "写", "文档", "报告", "周报", "总结", "方案", "PPT", "Excel", "大纲", "邮件", "信"];
   const hasDocumentKeyword = documentKeywords.some((kw) => message.includes(kw));
 
   if (hasDocumentKeyword && message.length > 10) return "document";
@@ -51,9 +53,14 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
   }
 
   if (intent === "simple") {
-    // 简单问答，直接调用 LLM
+    const dbSettings = readSettingsFromDb();
+    const defaultProviders = dbSettings.providerPreference?.length
+      ? dbSettings.providerPreference
+      : ["mimo"];
+    const providers = req.providerPreference ?? defaultProviders;
+
     const providerApiKeys: Record<string, string> = {};
-    for (const pid of req.providerPreference ?? []) {
+    for (const pid of providers) {
       const key = req.apiKey ?? getApiKey(pid);
       if (key) providerApiKeys[pid] = key;
     }
@@ -65,8 +72,8 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
     ];
 
     const { response } = await registry.runWithFallback(
-      req.providerPreference ?? ["openai", "deepseek"],
-      { modelId: req.modelId ?? "gpt-4o-mini", messages, apiKey: "" },
+      providers,
+      { modelId: req.modelId ?? dbSettings.modelId ?? "mimo-v2-pro", messages, apiKey: "" },
       undefined, undefined,
       providerApiKeys,
       req.providerBaseUrls,
@@ -78,14 +85,34 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
     };
   }
 
-  // intent === "document" — 需要生成文档
-  return {
-    type: "outline_request",
-    content: `我理解你想生成文档。让我为你创建一个大纲，你可以调整后再一键生成。`,
-    suggestedOutline: [
-      { title: "概述", description: "文档背景和目标" },
-      { title: "主要内容", description: "核心信息和数据" },
-      { title: "总结", description: "结论和下一步" },
-    ],
-  };
+  // intent === "document" — 调用 LLM 生成大纲（而非硬编码）
+  logger.info(`[ChatRouter] Generating outline for: "${req.message.slice(0, 80)}"`);
+
+  try {
+    const outline = await generateOutline({
+      userRequest: req.message,
+      providerPreference: req.providerPreference,
+      modelId: req.modelId,
+      apiKey: req.apiKey,
+      providerBaseUrls: req.providerBaseUrls,
+    });
+
+    return {
+      type: "outline_request",
+      content: `我理解你想生成文档。让我为你创建一个大纲，你可以调整后再一键生成。`,
+      suggestedOutline: outline,
+    };
+  } catch (err) {
+    logger.error(`[ChatRouter] Outline generation failed: ${err}`);
+    // Fallback: 返回默认大纲
+    return {
+      type: "outline_request",
+      content: `我理解你想生成文档。让我为你创建一个大纲，你可以调整后再一键生成。`,
+      suggestedOutline: [
+        { id: "s1", title: "概述", level: 1, description: "文档背景和目标", children: [] },
+        { id: "s2", title: "主要内容", level: 1, description: "核心信息和数据", children: [] },
+        { id: "s3", title: "总结", level: 1, description: "结论和下一步", children: [] },
+      ],
+    };
+  }
 }

@@ -16,7 +16,7 @@ export const generationRouter = Router();
 /** POST /api/generation/generate — 一键生成文档 */
 generationRouter.post("/generate", async (req, res) => {
   try {
-    const { title, outline, format, providerPreference, modelId, apiKey, providerBaseUrls } = req.body;
+    const { title, outline, format, providerPreference, modelId, apiKey, providerBaseUrls, userRequest } = req.body;
 
     if (!title || !outline) {
       res.status(400).json({ ok: false, error: "title and outline are required" });
@@ -39,6 +39,7 @@ generationRouter.post("/generate", async (req, res) => {
       modelId,
       apiKey,
       providerBaseUrls,
+      userRequest,
     });
 
     // 更新记录

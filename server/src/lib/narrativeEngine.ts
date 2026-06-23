@@ -5,6 +5,7 @@
  */
 import { registry } from "../providers/registry.js";
 import { getApiKey } from "../security/keyStore.js";
+import { readSettingsFromDb } from "./settingsReader.js";
 import { logger } from "./logger.js";
 
 // ── 叙事模板 ──────────────────────────────────────────
@@ -188,6 +189,12 @@ export async function generateOutline(req: GenerateOutlineRequest): Promise<Outl
 
   const systemPrompt = `你是一个文档大纲生成助手。根据用户的需求，生成结构化的文档大纲。
 
+首先判断文档类型，然后生成对应格式的大纲：
+- 邮件：称呼 → 正文段落（背景、内容、请求） → 落款
+- 报告/周报：摘要 → 正文各部分 → 结论/下一步
+- 方案：背景 → 目标 → 方案详情 → 实施计划 → 预期效果
+- 会议纪要：会议信息 → 议题讨论 → 决议 → Action Items
+
 输出 JSON 格式：
 {
   "outline": [
@@ -204,6 +211,7 @@ export async function generateOutline(req: GenerateOutlineRequest): Promise<Outl
 }
 
 要求：
+- 根据文档类型生成合适的结构（不要对邮件用"概述/主要内容/总结"这种通用结构）
 - 大纲层次清晰，一般 2-3 层
 - 每个章节有简短描述
 - id 使用 s1, s1-1, s1-2 格式
@@ -223,16 +231,20 @@ export async function generateOutline(req: GenerateOutlineRequest): Promise<Outl
 请根据需求生成文档大纲。`;
 
   try {
+    const dbSettings = readSettingsFromDb();
+    const defaultProviders = dbSettings.providerPreference?.length ? dbSettings.providerPreference : ["mimo"];
+    const providers = req.providerPreference ?? defaultProviders;
+
     const providerApiKeys: Record<string, string> = {};
-    for (const pid of req.providerPreference ?? []) {
+    for (const pid of providers) {
       const key = req.apiKey ?? getApiKey(pid);
       if (key) providerApiKeys[pid] = key;
     }
 
     const { response } = await registry.runWithFallback(
-      req.providerPreference ?? ["openai", "deepseek"],
+      providers,
       {
-        modelId: req.modelId ?? "gpt-4o-mini",
+        modelId: req.modelId ?? dbSettings.modelId ?? "mimo-v2-pro",
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },

@@ -1,14 +1,5 @@
 # CLAUDE.md — i-Write 开发指南
 
-## 项目概述
-
-i-Write 是一个跨平台可信文档生成工作台。连接用户所有平台的知识碎片，按用户定义的叙事逻辑生成文档，并用可量化的评估体系告诉用户：这份文档有多可信、每条事实来自哪里。
-
-**两种使用模式**：
-1. **Web 应用模式**：在 i-Write 中直接生成文档
-2. **Office Add-in 模式**：在 Word/Excel/PowerPoint 中通过侧边栏插件生成文档（类似 Claude for Excel）
-
----
 
 ## 核心原则：两类 Key 严格隔离
 
@@ -56,35 +47,6 @@ i-Write 是一个跨平台可信文档生成工作台。连接用户所有平台
 - client 端唯一允许的本地状态：UI 状态（展开/折叠、选中项、loading 状态）
 - 依赖方向：`shared ← client`、`shared ← server`、`client ↛ server`（仅通过 `/api/*` HTTP）
 
----
-
-## 核心原则：RAG Pipeline 架构
-
-RAG 管道是产品的核心，必须遵循以下架构：
-
-```
-Query Expansion → Hybrid Search → Reranker → Cross-Source Fusion → Groundedness Check
-```
-
-每个阶段都有独立模块，可以单独测试和替换。参考 patentExaminator 的实现：
-- `server/src/lib/queryExpand.ts` — 查询扩展
-- `server/src/lib/hybridSearch.ts` — 混合检索（BM25 + 向量 + RRF）
-- `server/src/lib/reranker.ts` — 重排序
-- `server/src/lib/groundednessCheck.ts` — Groundedness 验证
-
----
-
-## 核心原则：离线评估体系
-
-评估是产品的差异化核心，Metrics 定义必须严格：
-
-| 维度 | 指标 | 计算方式 |
-|------|------|---------|
-| 检索质量 | NDCG@K, Recall@K | LLM-as-Judge 评分 0-3 |
-| 事实准确性 | Faithfulness, Groundedness | Multi-Judge 原子声明验证 |
-| 引用质量 | Citation Precision, Citation Recall | LLM-as-Judge + NLI |
-| 文档质量 | Coherence, Fluency, Completeness | G-Eval (LLM + CoT) |
-| 端到端 | Answer Correctness, Fact Coverage | Multi-Judge 对比 Golden Set |
 
 ---
 
@@ -111,9 +73,11 @@ GITHUB_TOKEN=your_github_token
 
 ---
 
-## API Key 传递方式
+## API Key 传递方式（自动测试）
 
-所有 API key 都通过**请求体**传递，不通过 header，不通过 keyStore：
+**本节仅适用于自动测试脚本。** APP 生产环境的 key 由用户在设置页配置，存入 keyStore，APP 运行时从 keyStore 读取。
+
+自动测试时，所有 API key 都通过**请求体**传递，不通过 header，不通过 keyStore：
 
 | 用途 | 请求体字段 | 示例 |
 |------|-----------|------|
@@ -124,89 +88,6 @@ GITHUB_TOKEN=your_github_token
 | GitHub Token | `githubToken` | `{ "githubToken": "ghp_xxx" }` |
 
 ---
-
-## 项目结构
-
-```
-docStudio/
-├── server/                    # 后端
-│   ├── src/
-│   │   ├── index.ts           # Express 入口
-│   │   ├── lib/
-│   │   │   ├── queryExpand.ts       # 查询扩展
-│   │   │   ├── hybridSearch.ts      # 混合检索
-│   │   │   ├── reranker.ts          # 重排序
-│   │   │   ├── groundednessCheck.ts # Groundedness 验证
-│   │   │   ├── knowledgeDb.ts       # 知识库 SQLite
-│   │   │   ├── docGenerator.ts      # 文档生成引擎
-│   │   │   ├── narrativeEngine.ts   # 叙事引擎
-│   │   │   ├── provenanceTree.ts    # 生成树
-│   │   │   ├── evalMetrics.ts       # 评估指标
-│   │   │   ├── evalRunner.ts        # 评估运行器
-│   │   │   ├── multiJudge.ts        # Multi-Judge
-│   │   │   ├── goldenSetGenerator.ts# Golden Set 生成
-│   │   │   ├── fakeDataGenerator.ts # Fake 数据生成
-│   │   │   ├── metricsCollector.ts  # Metrics 采集
-│   │   │   ├── providers/           # LLM Provider 注册
-│   │   │   └── connectors/          # 知识源连接器
-│   │   ├── routes/            # API 路由
-│   │   └── types/             # 类型定义
-│   └── data/                  # SQLite 数据文件
-├── client/                    # 前端
-│   ├── src/
-│   │   ├── App.tsx
-│   │   ├── components/
-│   │   │   ├── KnowledgePanel.tsx    # 知识源管理
-│   │   │   ├── NarrativeEditor.tsx   # 叙事引擎编辑器
-│   │   │   ├── ProvenanceTree.tsx    # 生成树可视化
-│   │   │   ├── EvalDashboard.tsx     # 评估 Dashboard
-│   │   │   ├── DocumentViewer.tsx    # 文档查看器
-│   │   │   └── Settings.tsx          # 设置页
-│   │   └── store/             # 状态管理
-│   └── index.html
-├── shared/                    # 共享类型
-│   └── src/types/
-├── office-addin/              # Office Add-in
-│   ├── manifest.xml
-│   ├── src/
-│   │   ├── taskpane/          # 侧边栏 UI
-│   │   └── commands/          # 命令处理
-│   └── assets/
-├── fake-data/                 # Fake 知识库数据
-│   ├── documents/             # 伪造的文档
-│   ├── emails/                # 伪造的邮件
-│   ├── presentations/         # 伪造的 PPT
-│   ├── spreadsheets/          # 伪造的 Excel
-│   └── chats/                 # 伪造的聊天记录
-├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── e2e/
-├── docs/                      # 文档
-│   ├── discuss.md
-│   └── mvp.md
-├── CLAUDE.md                  # 本文件
-├── package.json
-├── tsconfig.json
-└── .env
-```
-
----
-
-## 常用命令
-
-```bash
-npm run dev              # 启动开发服务器（前端 + 后端）
-npm test                 # 运行单元测试
-npm run test:integration # 运行集成测试
-npm run test:e2e         # 运行 E2E 测试
-npm run typecheck        # TypeScript 类型检查
-npm run lint             # ESLint 检查
-npm run verify           # 完整验证（typecheck + lint + 测试 + E2E）
-npm run fake-data        # 生成 fake 知识库数据
-npm run eval:run         # 运行离线评估
-npm run eval:report      # 查看评估报告
-```
 
 ---
 
@@ -228,11 +109,11 @@ npm run eval:report      # 查看评估报告
 ✅ **正确做法**：所有评估指标在 server 端计算，前端只展示结果
 
 ❌ **错误做法**：Fake 数据写死在代码里
-✅ **正确做法**：Fake 数据通过 `fakeDataGenerator.ts` 生成，存入 SQLite
+✅ **正确做法**：示例数据通过 `fakeDataGenerator.ts` 生成，存入 SQLite
 
 ---
 
 ## 相关文档
 
-- [docs/discuss.md](./docs/discuss.md) — 产品讨论记录
-- [docs/mvp.md](./docs/mvp.md) — MVP 方案文档
+- [docs/discuss.md](./docs/PRD.md) — 产品PRD
+- [docs/mvp.md](./docs/design.md) — design doc

@@ -16,6 +16,12 @@ export interface DbSettings {
   providerBaseUrls?: Record<string, string>;
   providerApiKeys?: Record<string, string>;
   enableProviderFallback?: boolean;
+  // Knowledge / RAG 配置
+  knowledgeEnabled?: boolean;
+  knowledgeEmbedding?: { baseUrl: string; apiKey: string; modelId: string };
+  knowledgeReranker?: { baseUrl: string; apiKey: string; modelId: string };
+  // Search providers
+  searchProviders?: Array<{ providerId: string; apiKey: string; baseUrl?: string; enabled: boolean }>;
 }
 
 let cachedSettings: DbSettings | null = null;
@@ -101,6 +107,20 @@ function parseAppSettings(settings: AppSettings): DbSettings {
     if (p.apiKeyRef) providerApiKeys[p.providerId] = p.apiKeyRef;
   }
 
+  // Knowledge embedding / reranker
+  const knowledgeProviders = settings.knowledgeProviders ?? [];
+  const embProvider = knowledgeProviders.find(
+    (p) => p.providerType === "embedding" && p.enabled && p.apiKeyRef
+  );
+  const rerankerProvider = knowledgeProviders.find(
+    (p) => p.providerType === "reranker" && p.enabled && p.apiKeyRef
+  );
+
+  // Search providers
+  const searchProviders = (settings.searchProviders ?? [])
+    .filter((p) => p.enabled && p.apiKeyRef)
+    .map((p) => ({ providerId: p.providerId, apiKey: p.apiKeyRef, baseUrl: p.baseUrl, enabled: p.enabled }));
+
   return {
     providerPreference,
     modelId,
@@ -109,6 +129,10 @@ function parseAppSettings(settings: AppSettings): DbSettings {
     providerBaseUrls,
     providerApiKeys,
     enableProviderFallback: settings.enableProviderFallback ?? true,
+    knowledgeEnabled: settings.knowledge?.enabled ?? false,
+    ...(embProvider ? { knowledgeEmbedding: { baseUrl: embProvider.baseUrl, apiKey: embProvider.apiKeyRef, modelId: embProvider.modelId } } : {}),
+    ...(rerankerProvider ? { knowledgeReranker: { baseUrl: rerankerProvider.baseUrl, apiKey: rerankerProvider.apiKeyRef, modelId: rerankerProvider.modelId } } : {}),
+    ...(searchProviders.length > 0 ? { searchProviders } : {}),
   };
 }
 

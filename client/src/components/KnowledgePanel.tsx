@@ -111,12 +111,12 @@ export default function KnowledgePanel() {
         >
           <div className="text-4xl mb-2">📁</div>
           <p className="text-gray-600 mb-2">拖拽文件到这里，或点击选择</p>
-          <p className="text-sm text-gray-400">支持 PDF、DOCX、TXT、HTML、Markdown</p>
+          <p className="text-sm text-gray-400">支持 PDF、DOCX、TXT、HTML、Markdown、EML、JSON、XLSX、PPTX</p>
           <input
             ref={fileInputRef}
             type="file"
             multiple
-            accept=".pdf,.docx,.doc,.txt,.md,.markdown,.html,.htm"
+            accept=".pdf,.docx,.doc,.txt,.md,.markdown,.html,.htm,.eml,.json,.xlsx,.pptx"
             className="hidden"
             onChange={(e) => handleUpload(e.target.files)}
           />

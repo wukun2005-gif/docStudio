@@ -86,6 +86,8 @@ function migrate(db: Database.Database): void {
       chunk_index   INTEGER NOT NULL,
       token_count   INTEGER DEFAULT 0,
       metadata      TEXT,                   -- JSON: { page, section, ... }
+      embedded      INTEGER DEFAULT 0,      -- 0=未 embedding, 1=已 embedding
+      text_hash     TEXT,                   -- MD5 hash 用于断点续传
       created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     );
     CREATE INDEX IF NOT EXISTS idx_chunks_source ON kb_chunks(source_id);
@@ -171,6 +173,23 @@ function migrate(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_provenance_run ON provenance_nodes(run_id);
   `);
+
+  // 增量迁移：添加缺失的列
+  try {
+    const chunkCols = db.prepare("PRAGMA table_info(kb_chunks)").all() as Array<{ name: string }>;
+    const colNames = new Set(chunkCols.map((c) => c.name));
+    if (!colNames.has("embedded")) {
+      db.exec("ALTER TABLE kb_chunks ADD COLUMN embedded INTEGER DEFAULT 0");
+      logger.info("[DB] Migration: added kb_chunks.embedded");
+    }
+    if (!colNames.has("text_hash")) {
+      db.exec("ALTER TABLE kb_chunks ADD COLUMN text_hash TEXT");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_chunks_text_hash ON kb_chunks(text_hash)");
+      logger.info("[DB] Migration: added kb_chunks.text_hash");
+    }
+  } catch (e) {
+    // 表可能还不存在，CREATE TABLE 已经处理了
+  }
 
   // 设置版本号
   if (versionRow < 1) {

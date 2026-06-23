@@ -49,8 +49,34 @@ export function clearThinkingCache(): void {
 }
 
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  tool_call_id?: string;
+  name?: string;
+  /** tool_calls returned by assistant (for OpenAI API compatibility) */
+  tool_calls?: ToolCall[];
+}
+
+export interface ToolDefinition {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: {
+      type: "object";
+      properties: Record<string, { type: string; description: string; enum?: string[] }>;
+      required?: string[];
+    };
+  };
+}
+
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
 }
 
 export interface ChatRequest {
@@ -69,6 +95,10 @@ export interface ChatRequest {
   };
   /** 流式输出 */
   stream?: boolean;
+  /** Tool definitions for function calling */
+  tools?: ToolDefinition[];
+  /** Tool choice strategy */
+  tool_choice?: "auto" | "none" | "required";
 }
 
 export interface ChatResponse {
@@ -77,6 +107,8 @@ export interface ChatResponse {
   thinkingTokens?: number;
   rawResponse: unknown;
   error?: { code: string; message: string; retryable: boolean };
+  /** Tool calls returned by the model */
+  toolCalls?: ToolCall[];
 }
 
 export interface StreamChunk {
@@ -145,6 +177,10 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
     if (req.responseFormat) {
       body.response_format = req.responseFormat;
     }
+    if (req.tools && req.tools.length > 0) {
+      body.tools = req.tools;
+      if (req.tool_choice) body.tool_choice = req.tool_choice;
+    }
 
     try {
       const res = await fetch(url, {
@@ -172,16 +208,18 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
       }
 
       const data = (await res.json()) as {
-        choices: Array<{ message: { content: string } }>;
+        choices: Array<{ message: { content: string; tool_calls?: ToolCall[] } }>;
         usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
       };
 
+      const msg = data.choices?.[0]?.message;
       return {
-        text: data.choices?.[0]?.message?.content ?? "",
+        text: msg?.content ?? "",
         tokenUsage: data.usage
           ? { input: data.usage.prompt_tokens, output: data.usage.completion_tokens, total: data.usage.total_tokens }
           : undefined,
         rawResponse: data,
+        toolCalls: msg?.tool_calls,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

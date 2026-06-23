@@ -222,6 +222,7 @@ export interface HybridSearchConfig {
   vectorWeight?: number;
   limit?: number;
   useQueryExpansion?: boolean;
+  queryEmbedding?: number[];
 }
 
 /**
@@ -255,12 +256,13 @@ export function hybridSearch(
   const bm25Results = bm25.search(expanded.combined, limit * 2);
   logger.info(`[HybridSearch] BM25: ${bm25Results.length} results`);
 
-  // 3. 向量检索（如果有 vectors）
+  // 3. 向量检索（如果有 queryEmbedding）
   const allVectors = getAllVectors();
   let vectorResults: Array<{ id: string; score: number }> = [];
-  if (allVectors.length > 0) {
-    // 需要 query embedding — 这里用 BM25 结果的分数作为 fallback
-    // 实际应在调用方传入 queryEmbedding
+  if (allVectors.length > 0 && config.queryEmbedding) {
+    vectorResults = vectorSearch(config.queryEmbedding, allVectors, limit * 2);
+    logger.info(`[HybridSearch] Vector search: ${vectorResults.length} results from ${allVectors.length} vectors`);
+  } else if (allVectors.length > 0) {
     logger.info(`[HybridSearch] Vector search: ${allVectors.length} vectors available (skipped, no query embedding)`);
   }
 

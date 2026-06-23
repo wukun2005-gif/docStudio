@@ -30,11 +30,19 @@ export function getAllSources(): Array<{
   chunkCount: number; status: string; createdAt: string; updatedAt: string;
 }> {
   const db = getDb();
-  return db.prepare("SELECT * FROM kb_sources ORDER BY created_at DESC").all() as Array<{
-    id: string; name: string; type: string;
-    filePath?: string; url?: string; contentHash?: string;
-    chunkCount: number; status: string; createdAt: string; updatedAt: string;
-  }>;
+  const rows = db.prepare("SELECT * FROM kb_sources ORDER BY created_at DESC").all() as any[];
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    type: r.type,
+    filePath: r.file_path,
+    url: r.url,
+    contentHash: r.content_hash,
+    chunkCount: r.chunk_count,
+    status: r.status,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  }));
 }
 
 export function getSourceById(id: string): {
@@ -208,4 +216,64 @@ export function chunkText(text: string, maxChunkSize: number = 500, overlap: num
   }
 
   return chunks;
+}
+
+// ── Embedding State ───────────────────────────────────
+
+/** 标记 chunk 已 embedding */
+export function markChunkEmbedded(chunkId: string): void {
+  const db = getDb();
+  db.prepare("UPDATE kb_chunks SET embedded = 1 WHERE id = ?").run(chunkId);
+}
+
+/** 批量标记 chunks 已 embedding */
+export function markChunksEmbedded(chunkIds: string[]): void {
+  if (chunkIds.length === 0) return;
+  const db = getDb();
+  const stmt = db.prepare("UPDATE kb_chunks SET embedded = 1 WHERE id = ?");
+  const tx = db.transaction(() => {
+    for (const id of chunkIds) {
+      stmt.run(id);
+    }
+  });
+  tx();
+}
+
+/** 设置 chunk 的 text_hash */
+export function updateChunkTextHash(chunkId: string, textHash: string): void {
+  const db = getDb();
+  db.prepare("UPDATE kb_chunks SET text_hash = ? WHERE id = ?").run(textHash, chunkId);
+}
+
+/** 批量设置 text_hash */
+export function updateChunksTextHash(ids: string[], hashes: string[]): void {
+  const db = getDb();
+  const stmt = db.prepare("UPDATE kb_chunks SET text_hash = ? WHERE id = ?");
+  const tx = db.transaction(() => {
+    for (let i = 0; i < ids.length; i++) {
+      stmt.run(hashes[i], ids[i]);
+    }
+  });
+  tx();
+}
+
+/** 根据 text_hash 查找已 embedding 的 chunks（用于断点续传） */
+export function findEmbeddedHashes(hashes: string[]): Set<string> {
+  if (hashes.length === 0) return new Set();
+  const db = getDb();
+  const placeholders = hashes.map(() => "?").join(",");
+  const rows = db.prepare(
+    `SELECT text_hash FROM kb_chunks WHERE text_hash IN (${placeholders}) AND embedded = 1`
+  ).all(...hashes) as Array<{ text_hash: string }>;
+  return new Set(rows.map((r) => r.text_hash));
+}
+
+/** 获取未 embedding 的 chunks */
+export function getUnembeddedChunks(): Array<{
+  id: string; sourceId: string; content: string; chunkIndex: number;
+}> {
+  const db = getDb();
+  return db.prepare(
+    "SELECT id, source_id as sourceId, content, chunk_index as chunkIndex FROM kb_chunks WHERE embedded = 0 ORDER BY LENGTH(content)"
+  ).all() as any[];
 }

@@ -1,0 +1,19 @@
+From: 李四 (后端) <lisi@company.com>
+To: 张三 (Tech Lead) <zhangsan@company.com>
+Date: 2026-06-17（周二）11:15
+Subject: [紧急] Azure AD redirect_uri 配置问题
+MIME-Version: 1.0
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+张三，
+
+遇到一个问题：Azure AD 要求 redirect_uri 必须完全匹配，但我们的开发环境（localhost:3000）和生产环境（app.i-write.com）用的是同一个 Azure AD App Registration。
+
+目前的解决方案：
+1. 在 Azure AD 中配置多个 redirect_uri（开发 + 生产）
+2. 用环境变量区分不同环境的 redirect_uri
+
+你觉得方案 1 可行吗？还是需要创建两个 App Registration？
+
+李四

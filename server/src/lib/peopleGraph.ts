@@ -1,6 +1,8 @@
 /**
  * People Graph — 组织架构 + 人际关系图谱
  * Feature #4: 高权重信号影响文档生成
+ *
+ * 人员与 Sample 数据（EML 邮件）对齐
  */
 import { getDb } from "./db.js";
 import { logger } from "./logger.js";
@@ -141,51 +143,76 @@ export function getPersonContext(personId: string): string {
   return parts.join(" | ");
 }
 
-/** 注入 demo People Graph 数据 */
+/**
+ * 注入 demo People Graph 数据
+ * 人员与 EML 邮件、Sample 数据完全对齐
+ */
 export function injectDemoPeople(): void {
   const people = getAllPeople();
   if (people.length > 0) return;
 
   logger.info("[PeopleGraph] 注入 demo 组织架构数据...");
 
-  const ceo = { id: "p-ceo", name: "张明", title: "CEO", department: "管理层" };
-  const cto = { id: "p-cto", name: "李华", title: "CTO", department: "管理层" };
-  const pm = { id: "p-pm", name: "王芳", title: "产品总监", department: "产品部" };
-  const tl = { id: "p-tl", name: "陈强", title: "技术负责人", department: "技术部" };
-  const fe = { id: "p-fe", name: "赵丽", title: "前端工程师", department: "技术部" };
-  const be = { id: "p-be", name: "刘伟", title: "后端工程师", department: "技术部" };
-  const ds = { id: "p-ds", name: "孙娜", title: "数据科学家", department: "技术部" };
+  // 与 EML 邮件人名一致
+  const zhangsan = { id: "p-zhangsan", name: "张三", title: "技术负责人", department: "技术部" };
+  const lisi     = { id: "p-lisi",     name: "李四", title: "后端工程师",   department: "技术部" };
+  const wangwu   = { id: "p-wangwu",   name: "王五", title: "前端工程师",   department: "技术部" };
+  const zhaoliu  = { id: "p-zhaoliu",  name: "赵六", title: "测试工程师",   department: "技术部" };
+  const sunqi    = { id: "p-sunqi",    name: "孙七", title: "产品经理",     department: "产品部" };
 
   const peopleData = [
-    { ...ceo, attributes: { communicationStyle: "formal" as const, relationships: [
-      { targetPersonId: "p-cto", type: "direct_report" as const, strength: 0.9 },
-      { targetPersonId: "p-pm", type: "direct_report" as const, strength: 0.8 },
-    ]}},
-    { ...cto, attributes: { communicationStyle: "technical" as const, relationships: [
-      { targetPersonId: "p-ceo", type: "manager" as const, strength: 0.9 },
-      { targetPersonId: "p-tl", type: "direct_report" as const, strength: 0.9 },
-    ]}},
-    { ...pm, attributes: { communicationStyle: "formal" as const, relationships: [
-      { targetPersonId: "p-ceo", type: "manager" as const, strength: 0.8 },
-      { targetPersonId: "p-tl", type: "cross_team" as const, strength: 0.7 },
-    ]}},
-    { ...tl, attributes: { communicationStyle: "technical" as const, relationships: [
-      { targetPersonId: "p-cto", type: "manager" as const, strength: 0.9 },
-      { targetPersonId: "p-fe", type: "direct_report" as const, strength: 0.8 },
-      { targetPersonId: "p-be", type: "direct_report" as const, strength: 0.8 },
-      { targetPersonId: "p-ds", type: "direct_report" as const, strength: 0.7 },
-    ]}},
-    { ...fe, attributes: { communicationStyle: "casual" as const, relationships: [
-      { targetPersonId: "p-tl", type: "manager" as const, strength: 0.8 },
-      { targetPersonId: "p-be", type: "peer" as const, strength: 0.9 },
-    ]}},
-    { ...be, attributes: { communicationStyle: "technical" as const, relationships: [
-      { targetPersonId: "p-tl", type: "manager" as const, strength: 0.8 },
-      { targetPersonId: "p-fe", type: "peer" as const, strength: 0.9 },
-    ]}},
-    { ...ds, attributes: { communicationStyle: "technical" as const, relationships: [
-      { targetPersonId: "p-tl", type: "manager" as const, strength: 0.7 },
-    ]}},
+    {
+      ...zhangsan,
+      attributes: {
+        communicationStyle: "technical" as const,
+        relationships: [
+          { targetPersonId: "p-lisi",   type: "direct_report" as const, strength: 0.9 },
+          { targetPersonId: "p-wangwu", type: "direct_report" as const, strength: 0.8 },
+          { targetPersonId: "p-zhaoliu", type: "direct_report" as const, strength: 0.8 },
+          { targetPersonId: "p-sunqi",  type: "cross_team" as const,    strength: 0.7 },
+        ],
+      },
+    },
+    {
+      ...lisi,
+      attributes: {
+        communicationStyle: "technical" as const,
+        relationships: [
+          { targetPersonId: "p-zhangsan", type: "manager" as const, strength: 0.9 },
+          { targetPersonId: "p-wangwu",   type: "peer" as const,    strength: 0.8 },
+        ],
+      },
+    },
+    {
+      ...wangwu,
+      attributes: {
+        communicationStyle: "casual" as const,
+        relationships: [
+          { targetPersonId: "p-zhangsan", type: "manager" as const, strength: 0.8 },
+          { targetPersonId: "p-lisi",     type: "peer" as const,    strength: 0.9 },
+          { targetPersonId: "p-zhaoliu",  type: "peer" as const,    strength: 0.7 },
+        ],
+      },
+    },
+    {
+      ...zhaoliu,
+      attributes: {
+        communicationStyle: "technical" as const,
+        relationships: [
+          { targetPersonId: "p-zhangsan", type: "manager" as const, strength: 0.8 },
+          { targetPersonId: "p-wangwu",   type: "peer" as const,    strength: 0.7 },
+        ],
+      },
+    },
+    {
+      ...sunqi,
+      attributes: {
+        communicationStyle: "formal" as const,
+        relationships: [
+          { targetPersonId: "p-zhangsan", type: "cross_team" as const, strength: 0.7 },
+        ],
+      },
+    },
   ];
 
   for (const p of peopleData) {
