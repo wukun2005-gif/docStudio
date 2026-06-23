@@ -13,6 +13,8 @@ import { chatRouter } from "./routes/chat.js";
 import { generationRouter } from "./routes/generation.js";
 import { evaluationRouter } from "./routes/evaluation.js";
 import { provenanceRouter } from "./routes/provenance.js";
+import { connectorsRouter } from "./routes/connectors.js";
+import { workflowsRouter } from "./routes/workflows.js";
 import { getDb, closeDb } from "./lib/db.js";
 import { logger } from "./lib/logger.js";
 import { injectSampleData } from "./lib/sampleDataGenerator.js";
@@ -80,6 +82,8 @@ app.use("/api/chat", chatRouter);
 app.use("/api/generation", generationRouter);
 app.use("/api/evaluation", evaluationRouter);
 app.use("/api/provenance", provenanceRouter);
+app.use("/api/connectors", connectorsRouter);
+app.use("/api/workflows", workflowsRouter);
 
 // 静态文件服务（client build）
 const clientDist = path.resolve(__dirname, "../../client/dist");

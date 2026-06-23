@@ -78,45 +78,45 @@
 
 | # | Feature | 需求简述 |
 |---|---------|---------|
-| 28 | MS OAuth 登录 | 真实 Microsoft 账号登录 |
-| 29 | OneDrive/SharePoint 连接器 | 自动拉取用户 Office 文档 + 排除功能 |
-| 30 | GitHub 连接器 | OAuth 登录，读取 repo 代码/Issues/PR |
-| 31 | arXiv 连接器 | 公开 API 搜索和导入论文 |
-| 32 | Outlook 连接器 | 读取邮件内容作为知识源 |
-| 33 | Teams 连接器 | 读取 Teams 聊天记录 |
+| 28 | MS OAuth 登录 ✅ | 真实 Microsoft 账号登录 |
+| 29 | OneDrive/SharePoint 连接器 ✅ | 自动拉取用户 Office 文档 + 排除功能 |
+| 30 | GitHub 连接器 ✅ | OAuth 登录，读取 repo 代码/Issues/PR |
+| 31 | arXiv 连接器 ✅ | 公开 API 搜索和导入论文 |
+| 32 | Outlook 连接器 ✅ | 读取邮件内容作为知识源 |
+| 33 | Teams 连接器 ✅ | 读取 Teams 聊天记录 |
 
 ### Office Add-in
 
 | # | Feature | 需求简述 |
 |---|---------|---------|
-| 34 | Word Add-in | 侧边栏集成，共享后端 |
-| 35 | Excel Add-in | 同一套代码，读取 Excel 数据生成文档 |
-| 36 | PowerPoint Add-in | 同一套代码，生成 PPT |
+| 34 | Word Add-in ✅ | 侧边栏集成，共享后端 |
+| 35 | Excel Add-in ✅ | 同一套代码，读取 Excel 数据生成文档 |
+| 36 | PowerPoint Add-in ✅ | 同一套代码，生成 PPT |
 
 ### 离线评估平台
 
 | # | Feature | 需求简述 |
 |---|---------|---------|
-| 37 | Golden Set 生成 | 自动生成问题 + 期望答案 |
-| 38 | Multi-Judge 评估 | 2 个 LLM judge 独立评分 |
-| 39 | 10+ 指标评估 | NDCG / Recall / Faithfulness / Groundedness / Citation / Coherence / Fluency / Completeness |
-| 40 | 评估报告管理 | 历史报告列表 + 对比功能 |
+| 37 | Golden Set 生成 ✅ | 自动生成问题 + 期望答案 |
+| 38 | Multi-Judge 评估 ✅ | 2 个 LLM judge 独立评分 |
+| 39 | 10+ 指标评估 ✅ | NDCG / Recall / Faithfulness / Groundedness / Citation / Coherence / Fluency / Completeness |
+| 40 | 评估报告管理 ✅ | 历史报告列表 + 对比功能 |
 
 ### Proactive Generation
 
 | # | Feature | 需求简述 |
 |---|---------|---------|
-| 41 | Action Item 解析 | 从 Teams 会议纪要中提取 Action Item |
-| 42 | 智能知识源发现 | 根据 Action Item 自动搜索相关知识源 |
-| 43 | 主动生成与建议 | 质量达标后主动建议用户，支持查看/编辑/忽略 |
+| 41 | Action Item 解析 ✅ | 从 Teams 会议纪要中提取 Action Item |
+| 42 | 智能知识源发现 ✅ | 根据 Action Item 自动搜索相关知识源 |
+| 43 | 主动生成与建议 ✅ | 质量达标后主动建议用户，支持查看/编辑/忽略 |
 
 ### Workflow
 
 | # | Feature | 需求简述 |
 |---|---------|---------|
-| 44 | Workflow 定义 | 用户通过可视化编辑器或 Chat Box 定义多步骤流程 |
-| 45 | Workflow 执行 | 按步骤自动执行，步骤间数据传递 |
-| 46 | Workflow 触发 | 支持手动触发和自动触发（检测数据更新） |
+| 44 | Workflow 定义 ✅ | 用户通过可视化编辑器或 Chat Box 定义多步骤流程 |
+| 45 | Workflow 执行 ✅ | 按步骤自动执行，步骤间数据传递 |
+| 46 | Workflow 触发 ✅ | 支持手动触发和自动触发（检测数据更新） |
 
 ---
 

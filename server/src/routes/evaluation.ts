@@ -126,3 +126,139 @@ evaluationRouter.get("/insights/quality", (_req, res) => {
     res.status(500).json({ ok: false, error: msg });
   }
 });
+
+// ── Golden Set（Feature #37）────────────────────────────
+
+/** POST /api/evaluation/golden-set/generate — 生成 Golden Set */
+evaluationRouter.post("/golden-set/generate", async (req, res) => {
+  try {
+    const { providerId, modelId, apiKey, questionCount } = req.body;
+    if (!providerId || !modelId || !apiKey) {
+      res.status(400).json({ ok: false, error: "providerId, modelId, apiKey are required" });
+      return;
+    }
+    const { generateGoldenSet } = await import("../lib/goldenSetGenerator.js");
+    const questions = await generateGoldenSet(providerId, modelId, apiKey, questionCount);
+    res.json({ ok: true, generated: questions.length, questions });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Evaluation] Golden Set generation error: ${msg}`);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** GET /api/evaluation/golden-set — 获取 Golden Set */
+evaluationRouter.get("/golden-set", (_req, res) => {
+  try {
+    const { getGoldenSet, getGoldenSetStats } = require("../lib/goldenSetGenerator.js");
+    const questions = getGoldenSet();
+    const stats = getGoldenSetStats();
+    res.json({ ok: true, questions, stats });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** DELETE /api/evaluation/golden-set — 清空 Golden Set */
+evaluationRouter.delete("/golden-set", (_req, res) => {
+  try {
+    const { clearGoldenSet } = require("../lib/goldenSetGenerator.js");
+    clearGoldenSet();
+    res.json({ ok: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+// ── 离线评估（Feature #38-39）───────────────────────────
+
+/** POST /api/evaluation/offline/run — 运行离线评估 */
+evaluationRouter.post("/offline/run", async (req, res) => {
+  try {
+    const { configs, judgeApiKeys } = req.body;
+    if (!configs || !Array.isArray(configs)) {
+      res.status(400).json({ ok: false, error: "configs array is required" });
+      return;
+    }
+    const { runEvaluation } = await import("../lib/evalRunner.js");
+    const report = await runEvaluation(configs, { judgeApiKeys });
+    res.json({ ok: true, report });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Evaluation] Offline evaluation error: ${msg}`);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** GET /api/evaluation/offline/reports — 获取离线评估报告列表 */
+evaluationRouter.get("/offline/reports", (_req, res) => {
+  try {
+    const { getReports } = require("../lib/evalRunner.js");
+    const reports = getReports();
+    res.json({ ok: true, reports });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** GET /api/evaluation/offline/reports/:id — 获取单个报告 */
+evaluationRouter.get("/offline/reports/:id", (req, res) => {
+  try {
+    const { getReportById } = require("../lib/evalRunner.js");
+    const report = getReportById(req.params.id);
+    if (!report) {
+      res.status(404).json({ ok: false, error: "Report not found" });
+      return;
+    }
+    res.json({ ok: true, report });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** DELETE /api/evaluation/offline/reports/:id — 删除报告 */
+evaluationRouter.delete("/offline/reports/:id", (req, res) => {
+  try {
+    const { deleteReport } = require("../lib/evalRunner.js");
+    const deleted = deleteReport(req.params.id);
+    if (!deleted) {
+      res.status(404).json({ ok: false, error: "Report not found" });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+// ── Metrics Collector（Feature #40）─────────────────────
+
+/** GET /api/evaluation/metrics/stats — 获取指标统计 */
+evaluationRouter.get("/metrics/stats", (_req, res) => {
+  try {
+    const { metricsCollector } = require("../lib/metricsCollector.js");
+    const stats = metricsCollector.getStats();
+    res.json({ ok: true, stats });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** GET /api/evaluation/metrics/recent — 获取最近指标 */
+evaluationRouter.get("/metrics/recent", (req, res) => {
+  try {
+    const { metricsCollector } = require("../lib/metricsCollector.js");
+    const limit = parseInt(req.query.limit as string) || 50;
+    const records = metricsCollector.getRecent(limit);
+    res.json({ ok: true, records });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
