@@ -1,0 +1,37 @@
+{
+  "name": "doc-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Document Studio — 跨平台可信文档生成工作台",
+  "workspaces": [
+    "shared",
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm run dev",
+    "build": "npm run build:shared && npm run build:server && npm run build:client",
+    "build:shared": "cd shared && npm run build",
+    "build:server": "cd server && npm run build",
+    "build:client": "cd client && npm run build",
+    "test": "npm run test:unit",
+    "test:unit": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:e2e": "node tests/e2e.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --ext .ts,.tsx",
+    "verify": "npm run typecheck && npm run lint && npm test",
+    "fake-data": "cd server && npx tsx src/scripts/generateFakeData.ts",
+    "eval:run": "cd server && npx tsx src/scripts/runEval.ts",
+    "eval:report": "cd server && npx tsx src/scripts/showEvalReport.ts"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.1.0",
+    "eslint": "^9.0.0",
+    "@types/node": "^22.0.0"
+  }
+}
