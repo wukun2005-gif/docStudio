@@ -64,8 +64,8 @@ AI 可以生成文档，但用户对 AI 生成的内容**缺乏信任**：
  │     格式、排版、遣词造句交给 AI                            │
  │     你专注内容深度和表达质量                               │
  ├──────────────────────────────────────────────────────────┤
- │  ⑤ 全平台知识连接                                        │
- │     同时连接 OneDrive、GitHub、arXiv、Teams、Outlook      │
+ │  ⑤ 知识连接                                        │
+ │     同时连接 OneDrive、GitHub、arXiv、Teams、Outlook 等不同类型文档      │
  │     AI 自动检索你的知识，无需手动整理                      │
  └──────────────────────────────────────────────────────────┘
 ```
@@ -114,7 +114,7 @@ AI 可以生成文档，但用户对 AI 生成的内容**缺乏信任**：
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │           知识源（多源统一检索）                      │   │
 │  │  📁 本地文件  ☁️ OneDrive  🔀 GitHub  📧 Outlook     │   │
-│  │  💬 Teams     🔬 arXiv     📊 SharePoint             │   │
+│  │  💬 Teams     🔬 arXiv   Excel  Word Powerpoint     │   │
 │  └─────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -143,19 +143,6 @@ AI 可以生成文档，但用户对 AI 生成的内容**缺乏信任**：
 - **Multi-Judge**：2-3 个 LLM judge 独立打分，取算术平均，消除单模型偏差
 - **10+ 指标**：NDCG@K、Faithfulness、Recall@K、Answer Correctness、Fact Coverage 等
 - **历史对比**：每次评估保留报告，横向对比不同配置的质量趋势
-
----
-
-## 技术栈
-
-| 层 | 技术 |
-|----|------|
-| 前端 | React + TypeScript + Vite |
-| 后端 | Node.js + Express + TypeScript |
-| 数据 | SQLite（better-sqlite3） |
-| AI | OpenAI-compatible API（支持 12+ Provider） |
-| 文档生成 | docx + pptxgenjs + exceljs |
-| 评估 | 自研 Golden Set + Multi-Judge 平台 |
 
 ---
 
