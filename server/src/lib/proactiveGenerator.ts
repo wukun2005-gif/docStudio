@@ -5,6 +5,7 @@
  *
  * 质量达标后主动建议用户，支持查看/编辑/忽略。
  */
+import { localIso } from "../../../shared/src/datetime.js";
 import { parseActionItems, type ActionItem } from "./actionItemParser.js";
 import { discoverRelevantSources, type DiscoveredSource } from "./knowledgeDiscovery.js";
 import { generateDocument, type GenerateDocRequest } from "./docGenerator.js";
@@ -46,7 +47,7 @@ export async function processMeetingNotes(
       actionItem: item,
       discoveredSources: [],
       status: "pending",
-      createdAt: new Date().toISOString(),
+      createdAt: localIso(),
     };
 
     try {

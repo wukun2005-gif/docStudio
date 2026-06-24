@@ -44,19 +44,18 @@ export default function OutlineEditor({ outline, onChange, onGenerate }: Outline
   }
 
   return (
-    <div className="bg-white rounded-lg border shadow-sm">
-      <div className="px-4 py-3 border-b flex items-center justify-between">
-        <h3 className="font-semibold">文档大纲</h3>
+    <div className="bg-white">
+      <div className="px-4 py-2 flex items-center justify-between">
         <div className="flex gap-2">
           <button
             onClick={() => handleAdd()}
-            className="px-3 py-1 text-sm border rounded hover:bg-gray-50"
+            className="px-2.5 py-1 text-xs border rounded hover:bg-gray-50 transition-colors"
           >
             + 添加章节
           </button>
           <button
             onClick={onGenerate}
-            className="px-4 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+            className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
           >
             🚀 一键生成
           </button>
@@ -117,7 +116,7 @@ function OutlineItem({
   return (
     <div>
       <div
-        className="px-4 py-2 flex items-center gap-2 hover:bg-gray-50"
+        className="group px-4 py-2 flex items-center gap-2 hover:bg-gray-50"
         style={{ paddingLeft: `${16 + depth * 24}px` }}
       >
         <span className="text-gray-400 text-xs w-8">{section.id}</span>
@@ -174,7 +173,7 @@ function OutlineItem({
 // ── 大纲操作工具函数 ──────────────────────────────────
 
 function addSection(outline: OutlineSection[], parentId: string | null, title: string): OutlineSection[] {
-  const newId = `s${Date.now()}`;
+  const newId = `s${Math.random().toString(36).slice(2, 6)}`;
   const newSection: OutlineSection = { id: newId, title, level: 1, children: [] };
 
   if (!parentId) {

@@ -1,31 +1,138 @@
-import { useState, useRef, useEffect } from "react";
-
-interface Message {
-  role: "user" | "assistant";
-  content: string;
-  type?: string;
-  followUpQuestions?: string[];
-}
+/**
+ * Chat 对话组件 — 嵌入右侧面板，支持会话管理 + 按 case 隔离历史
+ */
+import { useState, useRef, useEffect, useMemo } from "react";
+import { localIso } from "../../../shared/src/datetime.js";
+import { useChatStore } from "../store/chatStore.js";
+import { useCaseStore } from "../store/caseStore.js";
+import {
+  getSessionsByCaseId,
+  getMessagesBySessionId,
+} from "../lib/chatRepo.js";
+import type { ChatSession, ChatMessage } from "../../../shared/src/types/chat.js";
 
 interface ChatBoxProps {
+  collapsed?: boolean;
   onOutlineRequest?: (outline: Array<{ title: string; description?: string }>) => void;
 }
 
-export default function ChatBox({ onOutlineRequest }: ChatBoxProps) {
-  const [messages, setMessages] = useState<Message[]>([]);
+export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  const {
+    sessions,
+    messages,
+    activeSessionId,
+    loadSessions,
+    addSession,
+    removeSession,
+    renameSession,
+    loadMessages,
+    addMessage,
+    setActiveSessionId,
+  } = useChatStore();
+
+  const currentCase = useCaseStore((s) => s.currentCase);
+
+  // ── 按 caseId 加载 sessions + messages（照搬 patentExaminator）──
+  useEffect(() => {
+    const caseId = currentCase?.id;
+    if (!caseId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const storedSessions = await getSessionsByCaseId(caseId);
+        if (cancelled) return;
+        loadSessions(storedSessions);
+        const allMessages: ChatMessage[] = [];
+        for (const s of storedSessions) {
+          const msgs = await getMessagesBySessionId(s.id);
+          allMessages.push(...msgs);
+        }
+        if (!cancelled) loadMessages(allMessages);
+      } catch (e) {
+        console.error("Failed to load chat history", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [currentCase?.id]);
+
+  // ── Case 内 session 过滤 ─────────────────────────
+  const caseSessions = useMemo(
+    () => sessions.filter((s) => s.caseId === currentCase?.id),
+    [sessions, currentCase?.id],
+  );
+
+  // ── effectiveSessionId：优先 activeSessionId，fallback 到第一个 ──
+  const effectiveSessionId = useMemo(() => {
+    if (activeSessionId && caseSessions.some((s) => s.id === activeSessionId)) return activeSessionId;
+    return caseSessions[0]?.id ?? null;
+  }, [activeSessionId, caseSessions]);
+
+  // ── 当前 session 的 messages ──────────────────────
+  const sessionMessages = useMemo(
+    () => messages.filter((m) => m.sessionId === effectiveSessionId),
+    [messages, effectiveSessionId],
+  );
+
+  // ── Auto scroll ─────────────────────────────────────
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [sessionMessages.length]);
 
+  // ── Create new session ──────────────────────────────
+  function handleNewSession() {
+    const id = crypto.randomUUID();
+    const now = localIso();
+    const session: ChatSession = {
+      id,
+      title: "新对话",
+      caseId: currentCase?.id,
+      createdAt: now,
+      updatedAt: now,
+    };
+    addSession(session);
+    setActiveSessionId(id);
+  }
+
+  // ── Send message ────────────────────────────────────
   async function handleSend() {
     if (!input.trim() || loading) return;
 
-    const userMessage: Message = { role: "user", content: input };
-    setMessages((prev) => [...prev, userMessage]);
+    let sessionId = effectiveSessionId;
+    if (!sessionId) {
+      const id = crypto.randomUUID();
+      const now = localIso();
+      const session: ChatSession = {
+        id,
+        title: input.slice(0, 30),
+        caseId: currentCase?.id,
+        createdAt: now,
+        updatedAt: now,
+      };
+      addSession(session);
+      setActiveSessionId(id);
+      sessionId = id;
+    }
+
+    const userMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      sessionId,
+      role: "user",
+      content: input,
+      createdAt: localIso(),
+    };
+    addMessage(userMessage);
+
+    // 如果有 case，同步更新 userRequest
+    if (currentCase && !currentCase.userRequest) {
+      useCaseStore.getState().updateUserRequest(input);
+    }
+
     setInput("");
     setLoading(true);
 
@@ -35,26 +142,48 @@ export default function ChatBox({ onOutlineRequest }: ChatBoxProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: input,
-          conversationHistory: messages.map((m) => ({ role: m.role, content: m.content })),
+          conversationHistory: sessionMessages.map((m) => ({ role: m.role, content: m.content })),
         }),
       });
       const data = await res.json();
 
       if (data.ok) {
-        const assistantMessage: Message = {
+        const assistantMessage: ChatMessage = {
+          id: crypto.randomUUID(),
+          sessionId,
           role: "assistant",
           content: data.content,
           type: data.type,
           followUpQuestions: data.followUpQuestions,
+          createdAt: localIso(),
         };
-        setMessages((prev) => [...prev, assistantMessage]);
+        addMessage(assistantMessage);
 
-        if (data.type === "outline_request" && data.suggestedOutline && onOutlineRequest) {
-          onOutlineRequest(data.suggestedOutline);
+        if (sessionMessages.length === 0) {
+          const title = input.length > 30 ? input.slice(0, 30) + "..." : input;
+          renameSession(sessionId, title);
+          if (currentCase && !currentCase.title) {
+            useCaseStore.getState().updateTitle(title);
+          }
+        }
+
+        if (data.type === "outline_request" && data.suggestedOutline) {
+          if (onOutlineRequest) {
+            onOutlineRequest(data.suggestedOutline);
+          } else {
+            // 跨组件通信：通过 window event
+            window.dispatchEvent(new CustomEvent("outline-request", { detail: data.suggestedOutline }));
+          }
         }
       }
-    } catch (err) {
-      setMessages((prev) => [...prev, { role: "assistant", content: "请求失败，请重试。" }]);
+    } catch {
+      addMessage({
+        id: crypto.randomUUID(),
+        sessionId,
+        role: "assistant",
+        content: "请求失败，请重试。",
+        createdAt: localIso(),
+      });
     } finally {
       setLoading(false);
     }
@@ -64,31 +193,124 @@ export default function ChatBox({ onOutlineRequest }: ChatBoxProps) {
     setInput(question);
   }
 
+  function handleRenameStart(session: ChatSession) {
+    setEditingId(session.id);
+    setEditTitle(session.title);
+  }
+
+  function handleRenameConfirm(id: string) {
+    if (editTitle.trim()) {
+      renameSession(id, editTitle.trim());
+    }
+    setEditingId(null);
+  }
+
+  // 折叠模式：图标栏
+  if (collapsed) {
+    return (
+      <div className="flex flex-col items-center py-3 gap-2 h-full">
+        <div className="w-8 h-8 rounded flex items-center justify-center text-gray-500">
+          💬
+        </div>
+        <div className="w-6 border-t my-1" />
+        {caseSessions.slice(0, 10).map((s) => (
+          <button
+            key={s.id}
+            onClick={() => setActiveSessionId(s.id)}
+            className={`w-8 h-8 rounded flex items-center justify-center text-xs font-medium transition-colors ${
+              activeSessionId === s.id
+                ? "bg-blue-100 text-blue-700"
+                : "text-gray-500 hover:bg-gray-100"
+            }`}
+            title={s.title}
+          >
+            {s.title[0] || "💬"}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-full">
+      {/* Session tabs */}
+      <div className="border-b px-2 py-1.5 flex items-center gap-1 overflow-x-auto shrink-0">
+        {caseSessions.map((s) => (
+          <div
+            key={s.id}
+            className={`flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer shrink-0 transition-colors ${
+              activeSessionId === s.id
+                ? "bg-blue-100 text-blue-700 font-medium"
+                : "text-gray-500 hover:bg-gray-100"
+            }`}
+            onClick={() => setActiveSessionId(s.id)}
+          >
+            {editingId === s.id ? (
+              <input
+                autoFocus
+                value={editTitle}
+                onChange={(e) => setEditTitle(e.target.value)}
+                onBlur={() => handleRenameConfirm(s.id)}
+                onKeyDown={(e) => e.key === "Enter" && handleRenameConfirm(s.id)}
+                className="bg-transparent border-b border-blue-400 outline-none w-20 text-xs"
+                onClick={(e) => e.stopPropagation()}
+              />
+            ) : (
+              <span
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  handleRenameStart(s);
+                }}
+                className="truncate max-w-[80px]"
+              >
+                {s.title}
+              </span>
+            )}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                removeSession(s.id);
+              }}
+              className="text-gray-400 hover:text-red-500 ml-0.5"
+              title="删除"
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        <button
+          onClick={handleNewSession}
+          className="px-2 py-1 text-xs text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded"
+          title="新对话"
+        >
+          +
+        </button>
+      </div>
+
       {/* 消息列表 */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {messages.length === 0 && (
-          <div className="text-center text-gray-400 py-8">
-            <p className="text-lg mb-2">👋 你好！我是 i-Write 文档助手</p>
-            <p className="text-sm">告诉我你想生成什么文档，我来帮你。</p>
+      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        {sessionMessages.length === 0 && (
+          <div className="text-center text-gray-400 py-12">
+            <p className="text-2xl mb-2">👋</p>
+            <p className="text-sm font-medium text-gray-600">你好！我是 i-Write 文档助手</p>
+            <p className="text-xs mt-1">告诉我你想生成什么文档，我来帮你。</p>
           </div>
         )}
-        {messages.map((msg, idx) => (
-          <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-            <div className={`max-w-[80%] rounded-lg px-4 py-2 ${
+        {sessionMessages.map((msg) => (
+          <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+            <div className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
               msg.role === "user"
                 ? "bg-blue-600 text-white"
-                : "bg-white border shadow-sm"
+                : "bg-gray-100 text-gray-800"
             }`}>
-              <div className="whitespace-pre-wrap">{msg.content}</div>
+              <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
               {msg.followUpQuestions && msg.followUpQuestions.length > 0 && (
                 <div className="mt-2 space-y-1">
                   {msg.followUpQuestions.map((q, i) => (
                     <button
                       key={i}
                       onClick={() => handleFollowUp(q)}
-                      className="block w-full text-left text-sm text-blue-600 hover:bg-blue-50 rounded px-2 py-1"
+                      className="block w-full text-left text-xs text-blue-600 hover:bg-blue-50 rounded px-2 py-1"
                     >
                       💬 {q}
                     </button>
@@ -100,8 +322,8 @@ export default function ChatBox({ onOutlineRequest }: ChatBoxProps) {
         ))}
         {loading && (
           <div className="flex justify-start">
-            <div className="bg-white border rounded-lg px-4 py-2 shadow-sm">
-              <span className="animate-pulse">思考中...</span>
+            <div className="bg-gray-100 rounded-lg px-3 py-2 text-sm">
+              <span className="animate-pulse text-gray-500">思考中...</span>
             </div>
           </div>
         )}
@@ -109,7 +331,7 @@ export default function ChatBox({ onOutlineRequest }: ChatBoxProps) {
       </div>
 
       {/* 输入框 */}
-      <div className="border-t p-4">
+      <div className="border-t p-3 shrink-0">
         <div className="flex gap-2">
           <input
             type="text"
@@ -117,13 +339,13 @@ export default function ChatBox({ onOutlineRequest }: ChatBoxProps) {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
             placeholder="输入你的需求..."
-            className="flex-1 border rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             disabled={loading}
           />
           <button
             onClick={handleSend}
             disabled={loading || !input.trim()}
-            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm transition-colors"
           >
             发送
           </button>

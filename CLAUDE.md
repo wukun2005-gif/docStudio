@@ -113,6 +113,94 @@ GITHUB_TOKEN=your_github_token
 
 ---
 
+## 核心原则：LLM 模型自适应
+
+**adapter 层必须消费 ModelCapabilities，自动适配不同 LLM 模型的参数差异。照搬 patentExaminator 方案。**
+
+自适应维度：
+1. **Temperature 范围钳制** — 查询模型声明的 range，将请求 temperature 钳制到合法区间；若模型不支持 temperature（如 DeepSeek 思考模式、Kimi K2.6），不发送该字段
+2. **System Prompt 路由** — 根据 `systemPromptMode` 决定传递方式：`"message"`（默认）= 作为 messages 中的 system 角色；`"parameter"`（Gemini）= 作为 `systemInstruction` 参数
+3. **Structured Output 门控** — 检查 `supportsStructuredOutput`，不支持时降级为 `json_object`
+4. **Function Calling 门控** — 检查 `supportsFunctionCalling`，不支持时不发送 tools
+5. **推理模型 maxTokens 乘数** — 推理模型自动 4x maxTokens
+6. **Thinking Tokens 自动学习** — 从 API 响应中提取 `reasoning_tokens`，缓存到 L1 运行时缓存
+
+能力查询路径：`getModelCapabilities(modelId)` → 精确匹配 → 最长前缀匹配 → 保守默认值
+
+❌ **错误做法**：
+- 硬编码 temperature=0.7，不查询模型能力
+- 所有模型都用 messages 传递 system prompt
+- 不检查能力就发送 response_format / tools
+
+✅ **正确做法**：
+- 每次 LLM 调用前查询 `getModelCapabilities()`
+- 根据能力声明调整请求参数
+- 运行时从响应中学习模型能力（如 thinking tokens）
+
+---
+
+## 核心原则：数据库审计日志
+
+**所有数据库写操作（INSERT/UPDATE/DELETE）必须记录审计日志，照搬 patentExaminator 方案。**
+
+审计日志记录在 `audit_log` 表中，包含：
+- `timestamp` — 操作时间（本地时间）
+- `table_name` — 操作的表名
+- `operation` — INSERT | UPDATE | DELETE
+- `record_id` — 操作的记录 ID
+- `old_data` — 更新/删除前的数据（JSON）
+- `new_data` — 插入/更新后的数据（JSON）
+- `source` — 来源标记（模块名/路由名）
+
+✅ **正确做法**：
+```typescript
+import { logAudit } from "./auditLog.js";
+
+// 写操作前查询旧数据
+const oldRow = db.prepare("SELECT * FROM table WHERE id = ?").get(id);
+
+// 执行写操作
+db.prepare("INSERT INTO table ...").run(...);
+
+// 记录审计
+logAudit({
+  table: "table_name",
+  operation: "INSERT",
+  recordId: id,
+  oldData: oldRow,        // UPDATE/DELETE 时提供
+  newData: newData,       // INSERT/UPDATE 时提供
+  source: "module_name",  // 来源标记
+});
+```
+
+❌ **错误做法**：
+- 写操作不记录审计日志
+- 审计失败导致业务操作失败（审计异常必须吞掉，仅 warn 日志）
+
+---
+
+## 核心原则：所有时间使用本地时间
+
+**所有用户和开发者可见的 datetime 都必须用本地时间，不能用 UTC。**
+
+覆盖范围：
+1. **Server 日志** — `logger.ts` 的 timestamp
+2. **数据库字段** — SQLite 的 `datetime('now','localtime')`
+3. **文件名中的时间戳**
+4. **前端展示的所有时间** — session 创建时间、消息时间等
+5. **导出文档中的时间** — 生成时间、导出时间
+
+✅ **正确做法**：
+- JS 端用 `localIso()` 或 `localShort()`（来自 `@i-write/shared`）
+- SQLite 用 `datetime('now','localtime')`
+- 展示用 `toLocaleString("zh-CN")`
+
+❌ **错误做法**：
+- `new Date().toISOString()` — 返回 UTC，禁止在用户可见场景使用
+- `datetime('now')` — SQLite UTC，禁止使用
+
+---
+
 ## 相关文档
 
 - [docs/discuss.md](./docs/PRD.md) — 产品PRD

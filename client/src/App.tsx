@@ -3,6 +3,10 @@ import Settings from "./components/Settings";
 import KnowledgePanel from "./components/KnowledgePanel";
 import PeoplePanel from "./components/PeoplePanel";
 import GenerationPage from "./components/GenerationPage";
+import CaseList from "./components/CaseList";
+import ChatBox from "./components/ChatBox";
+import { useCaseStore } from "./store/caseStore.js";
+import type { OutlineSection } from "../../shared/src/types/generation.js";
 
 type Page = "home" | "generate" | "knowledge" | "people" | "settings";
 
@@ -16,57 +20,135 @@ const NAV_ITEMS: Array<{ id: Page; label: string }> = [
 
 export default function App() {
   const [page, setPage] = useState<Page>("home");
+  const [leftCollapsed, setLeftCollapsed] = useState(true);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
+  const currentCase = useCaseStore((s) => s.currentCase);
+
+  const showSidePanels = page === "generate" || page === "home";
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="h-screen bg-gray-50 flex flex-col">
       {/* 顶部导航 */}
-      <nav className="bg-white shadow-sm border-b">
-        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
-          <h1 className="text-xl font-bold text-gray-800">i-Write</h1>
-          <div className="flex gap-2">
+      <nav className="bg-white shadow-sm border-b shrink-0 z-10">
+        <div className="px-4 py-2 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            {showSidePanels && (
+              <button
+                onClick={() => setLeftCollapsed(!leftCollapsed)}
+                className="p-1.5 rounded hover:bg-gray-100 text-gray-500"
+                title={leftCollapsed ? "展开文档列表" : "收起文档列表"}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  {leftCollapsed ? (
+                    <path d="M3 12h18M3 6h18M3 18h18" />
+                  ) : (
+                    <>
+                      <rect x="3" y="3" width="18" height="18" rx="2" />
+                      <line x1="9" y1="3" x2="9" y2="21" />
+                    </>
+                  )}
+                </svg>
+              </button>
+            )}
+            <h1 className="text-lg font-bold text-gray-800">i-Write</h1>
+          </div>
+          <div className="flex gap-1">
             {NAV_ITEMS.map((item) => (
               <button
                 key={item.id}
                 onClick={() => setPage(item.id)}
-                className={`px-3 py-1 rounded text-sm ${page === item.id ? "bg-blue-100 text-blue-700" : "text-gray-600 hover:bg-gray-100"}`}
+                className={`px-3 py-1.5 rounded text-sm transition-colors ${
+                  page === item.id ? "bg-blue-100 text-blue-700 font-medium" : "text-gray-600 hover:bg-gray-100"
+                }`}
               >
                 {item.label}
               </button>
             ))}
           </div>
+          {showSidePanels && (
+            <button
+              onClick={() => setRightCollapsed(!rightCollapsed)}
+              className="p-1.5 rounded hover:bg-gray-100 text-gray-500"
+              title={rightCollapsed ? "展开对话面板" : "收起对话面板"}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              </svg>
+            </button>
+          )}
         </div>
       </nav>
 
-      {/* 页面内容 */}
-      <main className={page === "generate" ? "px-4 py-4" : "max-w-7xl mx-auto px-4 py-8"}>
-        {page === "home" && <HomePage onNavigate={setPage} />}
-        {page === "generate" && <GenerationPage />}
-        {page === "knowledge" && <KnowledgePanel />}
-        {page === "people" && <PeoplePanel />}
-        {page === "settings" && <Settings />}
-      </main>
+      {/* 三栏布局 */}
+      <div className="flex-1 flex min-h-0" ref={(el) => {
+        if (el) console.log("[App] main layout width:", el.offsetWidth, "children:", el.children.length);
+      }}>
+        {/* 左侧：Case 列表 */}
+        {showSidePanels && (
+          <CaseList collapsed={leftCollapsed} onToggle={() => setLeftCollapsed(!leftCollapsed)} />
+        )}
+
+        {/* 中间：主内容区 */}
+        <main className="flex-1 overflow-hidden min-w-0" ref={(el) => {
+          if (el) console.log("[App] main content width:", el.offsetWidth, "clientWidth:", el.clientWidth);
+        }}>
+          {page === "home" && !currentCase && <HomePage onNavigate={setPage} />}
+          {page === "home" && currentCase && <GenerationPage />}
+          {page === "generate" && <GenerationPage />}
+          {page === "knowledge" && (
+            <div className="h-full overflow-auto px-6 py-6">
+              <KnowledgePanel />
+            </div>
+          )}
+          {page === "people" && (
+            <div className="h-full overflow-auto px-6 py-6">
+              <PeoplePanel />
+            </div>
+          )}
+          {page === "settings" && (
+            <div className="h-full overflow-auto px-6 py-6">
+              <Settings />
+            </div>
+          )}
+        </main>
+
+        {/* 右侧：Chat 面板 */}
+        {showSidePanels && (
+          <div className={`${rightCollapsed ? "w-12" : "w-[360px]"} shrink-0 border-l bg-white overflow-hidden flex flex-col transition-all`}>
+            <ChatBox collapsed={rightCollapsed} />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
 function HomePage({ onNavigate }: { onNavigate: (page: Page) => void }) {
+  const { cases } = useCaseStore();
+
   return (
-    <div className="text-center py-20">
-      <h2 className="text-3xl font-bold text-gray-800 mb-4">i-Write — 可信文档生成工作台</h2>
-      <p className="text-gray-600 mb-8">连接知识碎片，生成可信文档</p>
-      <div className="flex justify-center gap-4">
-        <button
-          onClick={() => onNavigate("generate")}
-          className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-        >
-          开始创作
-        </button>
-        <button
-          onClick={() => onNavigate("knowledge")}
-          className="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-50"
-        >
-          管理知识库
-        </button>
+    <div className="h-full flex items-center justify-center">
+      <div className="text-center max-w-lg">
+        <h2 className="text-3xl font-bold text-gray-800 mb-3">i-Write</h2>
+        <p className="text-lg text-gray-500 mb-2">可信文档生成工作台</p>
+        <p className="text-sm text-gray-400 mb-8">连接知识碎片，生成可信文档</p>
+        <div className="flex justify-center gap-3">
+          <button
+            onClick={() => onNavigate("generate")}
+            className="px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium"
+          >
+            开始创作
+          </button>
+          <button
+            onClick={() => onNavigate("knowledge")}
+            className="px-6 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors text-sm"
+          >
+            管理知识库
+          </button>
+        </div>
+        {cases.length > 0 && (
+          <p className="text-xs text-gray-400 mt-6">← 左侧选择已有文档继续编辑</p>
+        )}
       </div>
     </div>
   );

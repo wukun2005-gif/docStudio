@@ -160,17 +160,32 @@ function rrfFusion(
     .sort((a, b) => b.score - a.score);
 }
 
-// ── MMR 多样性排序 ──────────────────────────────────────
+// ── MMR 多样性排序（照搬 patentExaminator mmrDiversityRank） ───
 
-/** Maximal Marginal Relevance */
-function mmrRerank(
-  candidates: Array<{ id: string; score: number; embedding?: number[] }>,
+/** Jaccard 相似度（基于 token 集合） */
+function jaccardSimilarity(textA: string, textB: string): number {
+  const tokensA = new Set(tokenize(textA));
+  const tokensB = new Set(tokenize(textB));
+  if (tokensA.size === 0 || tokensB.size === 0) return 0;
+  let intersection = 0;
+  for (const t of tokensA) {
+    if (tokensB.has(t)) intersection++;
+  }
+  const union = tokensA.size + tokensB.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+/** MMR 多样性排序（Jaccard 相似度，照搬 patentExaminator） */
+function mmrDiversityRank(
+  candidates: Array<{ id: string; score: number; text: string }>,
   lambda: number = 0.7,
-  limit: number = 10,
+  limit: number = 5,
 ): Array<{ id: string; score: number }> {
-  if (candidates.length <= limit) return candidates;
+  if (candidates.length <= limit) {
+    return candidates.map((c) => ({ id: c.id, score: c.score }));
+  }
 
-  const selected: typeof candidates = [];
+  const selected: Array<{ id: string; score: number; text: string }> = [];
   const remaining = [...candidates];
 
   // 第一个：最高分
@@ -183,15 +198,11 @@ function mmrRerank(
     for (let i = 0; i < remaining.length; i++) {
       const relevance = remaining[i].score;
 
-      // 与已选集合的最大相似度
+      // 与已选集合的最大 Jaccard 相似度
       let maxSim = 0;
-      if (remaining[i].embedding && selected[0].embedding) {
-        for (const s of selected) {
-          if (s.embedding) {
-            const sim = cosineSimilarity(remaining[i].embedding!, s.embedding!);
-            maxSim = Math.max(maxSim, sim);
-          }
-        }
+      for (const s of selected) {
+        const sim = jaccardSimilarity(remaining[i].text, s.text);
+        maxSim = Math.max(maxSim, sim);
       }
 
       const mmrScore = lambda * relevance - (1 - lambda) * maxSim;
@@ -204,7 +215,7 @@ function mmrRerank(
     selected.push(remaining.splice(bestIdx, 1)[0]);
   }
 
-  return selected;
+  return selected.map((c) => ({ id: c.id, score: c.score }));
 }
 
 // ── 完整混合检索流程 ──────────────────────────────────────
@@ -274,10 +285,21 @@ export function hybridSearch(
   const fused = rrfFusion(rankings);
   logger.info(`[HybridSearch] RRF fusion: ${fused.length} results`);
 
-  // 5. 构建结果
+  // 5. MMR 多样性排序（照搬 patentExaminator: Jaccard 相似度, lambda=0.7, topK=limit）
   const chunkMap = new Map(allChunks.map((c) => [c.id, c]));
-  const results: SearchResult[] = fused
-    .slice(0, limit)
+  const mmrCandidates = fused
+    .slice(0, limit * 2) // 取多一些候选给 MMR 做选择
+    .map((item) => {
+      const chunk = chunkMap.get(item.id);
+      return { id: item.id, score: item.score, text: chunk?.content ?? "" };
+    })
+    .filter((c) => c.text.length > 0);
+
+  const diversified = mmrDiversityRank(mmrCandidates, 0.7, limit);
+  logger.info(`[HybridSearch] MMR diversity: ${mmrCandidates.length} → ${diversified.length} results`);
+
+  // 6. 构建结果
+  const results: SearchResult[] = diversified
     .map((item) => {
       const chunk = chunkMap.get(item.id);
       if (!chunk) return null;

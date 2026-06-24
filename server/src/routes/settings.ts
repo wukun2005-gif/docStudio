@@ -14,6 +14,7 @@ import { registry } from "../providers/registry.js";
 import { validateExternalUrl, BlockedUrlError } from "../lib/urlValidation.js";
 import { PRESET_MODEL_PROVIDERS, PRESET_SEARCH_PROVIDERS } from "../../../shared/src/types/provider.js";
 import { logger } from "../lib/logger.js";
+import { logAudit } from "../lib/auditLog.js";
 import type { AppSettings, ProviderConnection, ProviderId, SearchProviderId } from "../../../shared/src/types/provider.js";
 
 export const settingsRouter = Router();
@@ -64,6 +65,10 @@ settingsRouter.put("/:key", (req, res) => {
   try {
     const db = getDb();
     const value = typeof req.body.value === "string" ? req.body.value : JSON.stringify(req.body.value);
+
+    // 查询旧数据用于审计
+    const oldRow = db.prepare("SELECT value FROM user_settings WHERE key = ?").get(req.params.key) as { value: string } | undefined;
+
     db.prepare(
       "INSERT INTO user_settings (key, value, updated_at) VALUES (?, ?, datetime('now','localtime')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
     ).run(req.params.key, value);
@@ -82,6 +87,15 @@ settingsRouter.put("/:key", (req, res) => {
       clearSettingsCache();
     }
 
+    logAudit({
+      table: "user_settings",
+      operation: oldRow ? "UPDATE" : "INSERT",
+      recordId: req.params.key,
+      oldData: oldRow ? oldRow.value : undefined,
+      newData: value,
+      source: "settings",
+    });
+
     logger.info(`[Settings] 更新: ${req.params.key}`);
     res.json({ ok: true });
   } catch (err) {
@@ -95,6 +109,8 @@ settingsRouter.put("/:key", (req, res) => {
 settingsRouter.delete("/:key", (req, res) => {
   try {
     const db = getDb();
+    // 查询旧数据用于审计
+    const oldRow = db.prepare("SELECT value FROM user_settings WHERE key = ?").get(req.params.key) as { value: string } | undefined;
     db.prepare("DELETE FROM user_settings WHERE key = ?").run(req.params.key);
 
     if (req.params.key.startsWith("provider_")) {
@@ -102,6 +118,14 @@ settingsRouter.delete("/:key", (req, res) => {
       removeApiKey(providerId);
       clearSettingsCache();
     }
+
+    logAudit({
+      table: "user_settings",
+      operation: "DELETE",
+      recordId: req.params.key,
+      oldData: oldRow ? oldRow.value : undefined,
+      source: "settings",
+    });
 
     res.json({ ok: true });
   } catch (err) {

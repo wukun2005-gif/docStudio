@@ -189,11 +189,13 @@ export async function generateOutline(req: GenerateOutlineRequest): Promise<Outl
 
   const systemPrompt = `你是一个文档大纲生成助手。根据用户的需求，生成结构化的文档大纲。
 
-首先判断文档类型，然后生成对应格式的大纲：
-- 邮件：称呼 → 正文段落（背景、内容、请求） → 落款
-- 报告/周报：摘要 → 正文各部分 → 结论/下一步
-- 方案：背景 → 目标 → 方案详情 → 实施计划 → 预期效果
-- 会议纪要：会议信息 → 议题讨论 → 决议 → Action Items
+**核心原则：大纲是文档实际内容的结构，不是文档格式的模板。**
+
+判断文档类型后，生成以内容为导向的大纲：
+- 邮件：不要用"称呼/正文/落款"这种格式结构。应该用邮件实际要表达的内容点作为章节，如"问候与近况"、"本周产品进展"、"竞品分析"、"下一步计划"等
+- 报告/周报：不要用"概述/正文/总结"。应该用报告的具体主题作为章节
+- 方案：用方案的实际模块作为章节，如"用户认证方案"、"支付流程设计"等
+- 会议纪要：用实际议题作为章节，不要用"议题讨论/决议"这种模板
 
 输出 JSON 格式：
 {
@@ -202,7 +204,7 @@ export async function generateOutline(req: GenerateOutlineRequest): Promise<Outl
       "id": "s1",
       "title": "章节标题",
       "level": 1,
-      "description": "章节描述（可选）",
+      "description": "该章节要写什么具体内容",
       "children": [
         { "id": "s1-1", "title": "子章节", "level": 2, "children": [], "description": "描述" }
       ]
@@ -211,9 +213,9 @@ export async function generateOutline(req: GenerateOutlineRequest): Promise<Outl
 }
 
 要求：
-- 根据文档类型生成合适的结构（不要对邮件用"概述/主要内容/总结"这种通用结构）
+- **章节标题必须是文档内容的主题，不是文档格式的元素**
 - 大纲层次清晰，一般 2-3 层
-- 每个章节有简短描述
+- 每个章节有简短描述，说明该章节具体要写什么
 - id 使用 s1, s1-1, s1-2 格式
 - 直接输出 JSON，不要 markdown 代码块`;
 
@@ -241,6 +243,8 @@ export async function generateOutline(req: GenerateOutlineRequest): Promise<Outl
       if (key) providerApiKeys[pid] = key;
     }
 
+    logger.info(`[NarrativeEngine] 开始调用 LLM 生成大纲: providers=[${providers.join(", ")}], model=${req.modelId ?? dbSettings.modelId ?? "mimo-v2-pro"}`);
+
     const { response } = await registry.runWithFallback(
       providers,
       {
@@ -251,17 +255,21 @@ export async function generateOutline(req: GenerateOutlineRequest): Promise<Outl
         ],
         apiKey: "",
         temperature: 0.3,
+        timeoutMs: 60_000,
       },
       undefined, undefined,
       providerApiKeys,
       req.providerBaseUrls,
     );
 
+    logger.info(`[NarrativeEngine] LLM 调用完成, error=${response.error ? response.error.message : "none"}, text长度=${response.text?.length ?? 0}`);
+
     if (response.error) {
       throw new Error(`LLM error: ${response.error.message}`);
     }
 
     const parsed = JSON.parse(response.text) as { outline: OutlineSection[] };
+    logger.info(`[NarrativeEngine] 大纲解析成功, ${parsed.outline.length} 个章节`);
     return parsed.outline;
   } catch (err) {
     logger.error(`[NarrativeEngine] 大纲生成失败: ${err instanceof Error ? err.message : String(err)}`);

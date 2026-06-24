@@ -1,0 +1,133 @@
+{
+  "metadata": {
+    "name": "i-Write 项目团队",
+    "description": "i-Write 产品开发团队的组织架构和人际关系图谱",
+    "version": "1.0.0",
+    "lastUpdated": "2024-01-15T10:00:00Z"
+  },
+  "nodes": [
+    {
+      "id": "zhangming",
+      "name": "张明",
+      "role": "CEO",
+      "department": "管理层",
+      "title": "CEO",
+      "email": "zhangming@company.com"
+    },
+    {
+      "id": "lihua",
+      "name": "李华",
+      "role": "CTO",
+      "department": "管理层",
+      "title": "CTO",
+      "email": "lihua@company.com"
+    },
+    {
+      "id": "wangfang",
+      "name": "王芳",
+      "role": "产品总监",
+      "department": "产品部",
+      "title": "产品总监",
+      "email": "wangfang@company.com"
+    },
+    {
+      "id": "chenqiang",
+      "name": "陈强",
+      "role": "技术负责人",
+      "department": "技术部",
+      "title": "技术负责人",
+      "email": "chenqiang@company.com"
+    },
+    {
+      "id": "liuwei",
+      "name": "刘伟",
+      "role": "后端工程师",
+      "department": "技术部",
+      "title": "后端工程师",
+      "email": "liuwei@company.com"
+    },
+    {
+      "id": "sunna",
+      "name": "孙娜",
+      "role": "数据科学家",
+      "department": "技术部",
+      "title": "数据科学家",
+      "email": "sunna@company.com"
+    },
+    {
+      "id": "zhaoli",
+      "name": "赵丽",
+      "role": "前端工程师",
+      "department": "技术部",
+      "title": "前端工程师",
+      "email": "zhaoli@company.com"
+    }
+  ],
+  "edges": [
+    {
+      "source": "chenqiang",
+      "target": "lihua",
+      "type": "reporting",
+      "label": "直接汇报"
+    },
+    {
+      "source": "wangfang",
+      "target": "zhangming",
+      "type": "reporting",
+      "label": "直接汇报"
+    },
+    {
+      "source": "liuwei",
+      "target": "chenqiang",
+      "type": "reporting",
+      "label": "直接汇报"
+    },
+    {
+      "source": "sunna",
+      "target": "chenqiang",
+      "type": "reporting",
+      "label": "直接汇报"
+    },
+    {
+      "source": "zhaoli",
+      "target": "chenqiang",
+      "type": "reporting",
+      "label": "直接汇报"
+    },
+    {
+      "source": "wangfang",
+      "target": "chenqiang",
+      "type": "collaboration",
+      "label": "产品技术协作"
+    },
+    {
+      "source": "zhaoli",
+      "target": "liuwei",
+      "type": "collaboration",
+      "label": "前后端协作"
+    },
+    {
+      "source": "sunna",
+      "target": "liuwei",
+      "type": "collaboration",
+      "label": "数据后端协作"
+    }
+  ],
+  "groups": [
+    {
+      "id": "management",
+      "name": "管理层",
+      "members": ["zhangming", "lihua"]
+    },
+    {
+      "id": "product",
+      "name": "产品部",
+      "members": ["wangfang"]
+    },
+    {
+      "id": "tech",
+      "name": "技术部",
+      "members": ["chenqiang", "liuwei", "sunna", "zhaoli"]
+    }
+  ]
+}

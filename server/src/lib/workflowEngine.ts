@@ -8,8 +8,10 @@
  * 用户定义多步骤流程，按步骤自动执行，步骤间数据传递。
  */
 import crypto from "crypto";
+import { localIso } from "../../../shared/src/datetime.js";
 import { getDb } from "./db.js";
 import { logger } from "./logger.js";
+import { logAudit } from "./auditLog.js";
 import { generateDocument } from "./docGenerator.js";
 import { registry } from "../providers/registry.js";
 
@@ -196,11 +198,20 @@ export function createWorkflow(
     triggerType,
     triggerConfig,
     status: "draft",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    createdAt: localIso(),
+    updatedAt: localIso(),
   };
 
   saveWorkflow(workflow);
+
+  logAudit({
+    table: "workflows",
+    operation: "INSERT",
+    recordId: workflow.id,
+    newData: workflow,
+    source: "workflow",
+  });
+
   return workflow;
 }
 
@@ -211,18 +222,42 @@ export function updateWorkflow(id: string, updates: Partial<Pick<Workflow, "name
   const updated: Workflow = {
     ...existing,
     ...updates,
-    updatedAt: new Date().toISOString(),
+    updatedAt: localIso(),
   };
 
   saveWorkflow(updated);
+
+  logAudit({
+    table: "workflows",
+    operation: "UPDATE",
+    recordId: id,
+    oldData: existing,
+    newData: updated,
+    source: "workflow",
+  });
+
   return updated;
 }
 
 export function deleteWorkflow(id: string): boolean {
   ensureWorkflowTable();
   const db = getDb();
+  // 查询旧数据用于审计
+  const oldRow = db.prepare("SELECT * FROM workflows WHERE id = ?").get(id) as any;
+
   db.prepare("DELETE FROM workflow_runs WHERE workflow_id = ?").run(id);
   const result = db.prepare("DELETE FROM workflows WHERE id = ?").run(id);
+
+  if (result.changes > 0) {
+    logAudit({
+      table: "workflows",
+      operation: "DELETE",
+      recordId: id,
+      oldData: oldRow,
+      source: "workflow",
+    });
+  }
+
   return result.changes > 0;
 }
 
@@ -255,7 +290,7 @@ export async function executeWorkflow(
     workflowId,
     status: "running",
     stepResults: options?.input ?? {},
-    startedAt: new Date().toISOString(),
+    startedAt: localIso(),
   };
 
   saveWorkflowRun(run);
@@ -285,11 +320,11 @@ export async function executeWorkflow(
     }
 
     run.status = "done";
-    run.finishedAt = new Date().toISOString();
+    run.finishedAt = localIso();
   } catch (err) {
     run.status = "error";
     run.error = err instanceof Error ? err.message : String(err);
-    run.finishedAt = new Date().toISOString();
+    run.finishedAt = localIso();
   }
 
   saveWorkflowRun(run);

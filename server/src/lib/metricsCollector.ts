@@ -5,8 +5,10 @@
  * 用于历史趋势分析和质量洞察。
  */
 import crypto from "crypto";
+import { localIso } from "../../../shared/src/datetime.js";
 import { getDb } from "./db.js";
 import { logger } from "./logger.js";
+import { logAudit } from "./auditLog.js";
 
 export interface MetricsRecord {
   id: string;
@@ -27,7 +29,7 @@ class MetricsCollector {
     try {
       const db = getDb();
       const id = crypto.randomUUID();
-      const now = new Date().toISOString();
+      const now = localIso();
 
       db.prepare(`
         INSERT INTO generation_runs (id, title, config, status, created_at, updated_at)
@@ -48,6 +50,14 @@ class MetricsCollector {
         }),
         data.success ? "done" : "error",
       );
+
+      logAudit({
+        table: "generation_runs",
+        operation: "INSERT",
+        recordId: id,
+        newData: data,
+        source: "metrics",
+      });
     } catch (err) {
       // Fire-and-forget: never throw, just log
       logger.warn(`[MetricsCollector] Failed to record: ${err}`);

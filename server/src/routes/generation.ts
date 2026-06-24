@@ -7,8 +7,10 @@ import { Router } from "express";
 import crypto from "crypto";
 import { generateDocument, toHtml } from "../lib/docGenerator.js";
 import { exportDocument, type ExportFormat } from "../lib/docExporter.js";
+import { buildProvenanceTree, getProvenanceByRunId } from "../lib/provenanceTree.js";
 import { getDb } from "../lib/db.js";
 import { logger } from "../lib/logger.js";
+import { logAudit } from "../lib/auditLog.js";
 import type { OutlineSection } from "../lib/narrativeEngine.js";
 
 export const generationRouter = Router();
@@ -30,7 +32,15 @@ generationRouter.post("/generate", async (req, res) => {
     db.prepare(`INSERT INTO generation_runs (id, title, outline, format, status) VALUES (?, ?, ?, ?, ?)`)
       .run(runId, title, JSON.stringify(outline), format ?? "html", "generating");
 
-    // 生成文档
+    logAudit({
+      table: "generation_runs",
+      operation: "INSERT",
+      recordId: runId,
+      newData: { title, format: format ?? "html", status: "generating" },
+      source: "generation",
+    });
+
+    // 生成文档（超时由 registry 120s + docGenerator 180s 逐层保障）
     const result = await generateDocument({
       title,
       outline: outline as OutlineSection[],
@@ -46,6 +56,28 @@ generationRouter.post("/generate", async (req, res) => {
     const htmlContent = toHtml(result);
     db.prepare(`UPDATE generation_runs SET content = ?, status = 'done', trust_score = ?, updated_at = datetime('now','localtime') WHERE id = ?`)
       .run(htmlContent, result.trustScore, runId);
+
+    logAudit({
+      table: "generation_runs",
+      operation: "UPDATE",
+      recordId: runId,
+      newData: { status: "done", trustScore: result.trustScore },
+      source: "generation",
+    });
+
+    // 构建生成树（段落级来源追溯）
+    try {
+      const paragraphs = result.sections.flatMap((s, sIdx) =>
+        s.sources.length > 0
+          ? [{ idx: sIdx, sources: s.sources.map((src) => ({ chunkId: src.chunkId, score: src.score })) }]
+          : [],
+      );
+      if (paragraphs.length > 0) {
+        buildProvenanceTree(runId, paragraphs);
+      }
+    } catch (treeErr) {
+      logger.warn(`[Generation] 生成树构建失败（不影响生成）: ${treeErr}`);
+    }
 
     logger.info(`[Generation] 文档生成完成: ${title}`);
 
@@ -69,6 +101,17 @@ generationRouter.get("/history", (_req, res) => {
     const db = getDb();
     const runs = db.prepare("SELECT id, title, format, status, trust_score, created_at FROM generation_runs ORDER BY created_at DESC LIMIT 50").all();
     res.json({ ok: true, runs });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** GET /api/generation/:id/tree — 获取生成树 */
+generationRouter.get("/:id/tree", (req, res) => {
+  try {
+    const tree = getProvenanceByRunId(req.params.id);
+    res.json({ ok: true, tree });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ ok: false, error: msg });
@@ -138,6 +181,13 @@ generationRouter.put("/:id/content", (req, res) => {
     const db = getDb();
     db.prepare("UPDATE generation_runs SET content = ?, updated_at = datetime('now','localtime') WHERE id = ?")
       .run(content, req.params.id);
+
+    logAudit({
+      table: "generation_runs",
+      operation: "UPDATE",
+      recordId: req.params.id,
+      source: "generation",
+    });
 
     logger.info(`[Generation] 文档内容已更新: ${req.params.id}`);
     res.json({ ok: true });

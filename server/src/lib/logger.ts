@@ -1,6 +1,7 @@
 /**
- * 简单的日志模块
+ * 简单的日志模块 — 使用本地时间
  */
+import { localShort } from "../../../shared/src/datetime.js";
 
 type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -18,7 +19,7 @@ function shouldLog(level: LogLevel): boolean {
 }
 
 function timestamp(): string {
-  return new Date().toISOString();
+  return localShort();
 }
 
 export const logger = {

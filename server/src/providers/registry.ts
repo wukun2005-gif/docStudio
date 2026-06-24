@@ -30,6 +30,7 @@ import { logger } from "../lib/logger.js";
 const BACKOFF_DELAYS = [500, 1500];
 const MAX_RETRIES = 2;
 const MAX_TOTAL_ATTEMPTS = 8;
+const TIMEOUT_MS = 120_000;
 
 export interface AttemptRecord {
   providerId: string;
@@ -104,6 +105,7 @@ export class ProviderRegistry {
     for (const pid of providerPreference) {
       const adapter = this.adapters.get(pid);
       if (!adapter) {
+        logger.warn(`[Registry] Provider ${pid} not found, skipping`);
         attempts.push({ providerId: pid, ok: false, errorCode: "adapter-not-found", message: `Provider not found: ${pid}` });
         continue;
       }
@@ -112,6 +114,8 @@ export class ProviderRegistry {
       const providerApiKey = providerApiKeys?.[pid];
       const enabled = enableModelFallback?.[pid] ?? true;
       const configuredFallbacks = modelFallbacks?.[pid] ?? null;
+
+      logger.info(`[Registry] 尝试 provider=${pid}, hasApiKey=${!!providerApiKey}, baseUrl=${providerBaseUrl ?? "default"}`);
 
       // 构建请求（合并 provider 级别的 apiKey 和 baseUrl）
       const buildReq = (base: ChatRequest, overrides: Partial<ChatRequest>): ChatRequest => {
@@ -270,7 +274,7 @@ export class ProviderRegistry {
   }
 
   /**
-   * 单个 provider 内的重试逻辑
+   * 单个 provider 内的重试逻辑（照搬 patentExaminator: AbortController + setTimeout 超时包装）
    */
   private async executeWithRetry(
     adapter: ProviderAdapter,
@@ -278,46 +282,98 @@ export class ProviderRegistry {
   ): Promise<{ response: ChatResponse; attempts: AttemptRecord[] }> {
     const attempts: AttemptRecord[] = [];
     let lastError: unknown;
+    let lastErrInfo: ErrorInfo | undefined;
+
+    const clientSignal = req.signal;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
+        logger.info(`[Registry] 重试 attempt=${attempt}/${MAX_RETRIES}, delay=${BACKOFF_DELAYS[attempt - 1] ?? 3000}ms`);
         await sleep(BACKOFF_DELAYS[attempt - 1] ?? 3000);
       }
 
       // 客户端断连检测
-      if (req.signal?.aborted) {
+      if (clientSignal?.aborted) {
         throw new Error("Request aborted by client");
       }
 
-      const response = await adapter.chat(req);
+      // 照搬 patentExaminator: 每次尝试创建独立的 AbortController + setTimeout
+      const timeoutController = new AbortController();
+      const timeout = setTimeout(() => timeoutController.abort(), req.timeoutMs ?? TIMEOUT_MS);
 
-      if (!response.error) {
-        attempts.push({ providerId: adapter.id, ok: true });
-        return { response, attempts };
-      }
+      // 客户端 abort 传播到 timeout controller
+      const onClientAbort = () => timeoutController.abort();
+      clientSignal?.addEventListener("abort", onClientAbort);
 
-      lastError = response;
-      const errInfo = classifyError(response);
-      attempts.push({ providerId: adapter.id, ok: false, errorCode: errInfo.code, message: errInfo.message });
+      logger.info(`[Registry] 调用 LLM: provider=${adapter.id}, model=${req.modelId ?? "default"}, attempt=${attempt + 1}/${MAX_RETRIES + 1}, timeout=${req.timeoutMs ?? TIMEOUT_MS}ms`);
+      const startTime = Date.now();
 
-      // 401/400: 不重试
-      if (errInfo.code === "auth-failed" || errInfo.code === "bad-request") {
-        throw Object.assign(new Error(errInfo.message), { attempts: [...attempts] });
-      }
+      try {
+        const response = await adapter.chat({ ...req, signal: timeoutController.signal });
+        const duration = Date.now() - startTime;
+        logger.info(`[Registry] LLM 响应: provider=${adapter.id}, duration=${duration}ms, error=${response.error ? response.error.message : "none"}, text长度=${response.text?.length ?? 0}`);
 
-      // 429: 不重试，直接 fallback
-      if (errInfo.code === "quota-exceeded") {
-        throw Object.assign(new Error(errInfo.message), { attempts: [...attempts] });
-      }
+        if (!response.error) {
+          attempts.push({ providerId: adapter.id, ok: true });
+          clearTimeout(timeout);
+          clientSignal?.removeEventListener("abort", onClientAbort);
+          return { response, attempts };
+        }
 
-      // 不可重试的错误
-      if (!errInfo.retryable) {
-        throw Object.assign(new Error(errInfo.message), { attempts: [...attempts] });
+        lastError = response;
+        lastErrInfo = classifyError(response);
+        attempts.push({ providerId: adapter.id, ok: false, errorCode: lastErrInfo.code, message: lastErrInfo.message });
+
+        // 超时日志（照搬 patentExaminator）
+        if (lastErrInfo.code === "timeout") {
+          const timeoutMs = req.timeoutMs ?? TIMEOUT_MS;
+          logger.warn(`[Registry] ${adapter.id} attempt ${attempt + 1}/${MAX_RETRIES + 1} timed out after ${timeoutMs}ms, model=${req.modelId ?? "default"}`);
+        }
+
+        // 401/400: 不重试
+        if (lastErrInfo.code === "auth-failed" || lastErrInfo.code === "bad-request") {
+          throw Object.assign(new Error(lastErrInfo.message), { attempts: [...attempts] });
+        }
+
+        // 429: 不重试，直接 fallback
+        if (lastErrInfo.code === "quota-exceeded") {
+          throw Object.assign(new Error(lastErrInfo.message), { attempts: [...attempts] });
+        }
+
+        // 不可重试的错误
+        if (!lastErrInfo.retryable) {
+          throw Object.assign(new Error(lastErrInfo.message), { attempts: [...attempts] });
+        }
+      } catch (error) {
+        lastError = error;
+        lastErrInfo = classifyError(error);
+        attempts.push({ providerId: adapter.id, ok: false, errorCode: lastErrInfo.code, message: lastErrInfo.message });
+
+        // 超时日志（照搬 patentExaminator）
+        if (lastErrInfo.code === "timeout") {
+          const timeoutMs = req.timeoutMs ?? TIMEOUT_MS;
+          logger.warn(`[Registry] ${adapter.id} attempt ${attempt + 1}/${MAX_RETRIES + 1} timed out after ${timeoutMs}ms, model=${req.modelId ?? "default"}`);
+        }
+
+        // 客户端断连 — 不浪费重试
+        if (clientSignal?.aborted) {
+          (error as Error & { attempts: AttemptRecord[] }).attempts = [...attempts];
+          throw error;
+        }
+
+        if (lastErrInfo.code === "auth-failed" || lastErrInfo.code === "quota-exceeded" || lastErrInfo.code === "bad-request") {
+          (error as Error & { attempts: AttemptRecord[] }).attempts = [...attempts];
+          throw error;
+        }
+      } finally {
+        clearTimeout(timeout);
+        clientSignal?.removeEventListener("abort", onClientAbort);
       }
 
       // 最后一次重试失败
       if (attempt === MAX_RETRIES) {
-        throw Object.assign(new Error(errInfo.message), { attempts: [...attempts] });
+        (lastError as Error & { attempts: AttemptRecord[] }).attempts = [...attempts];
+        throw lastError;
       }
     }
 
@@ -341,6 +397,10 @@ function classifyError(error: unknown): ErrorInfo {
     if (status === 429) return { code: "quota-exceeded", message: error.message, retryable: true };
     if (status && status >= 500) return { code: "server-error", message: error.message, retryable: true };
     if (error.name === "AbortError") return { code: "timeout", message: "Request timed out", retryable: true };
+    // 检测超时相关的错误消息（fetch abort 时 error.name 可能不是 AbortError）
+    if (error.message.includes("This operation was aborted") || error.message.includes("timed out")) {
+      return { code: "timeout", message: error.message, retryable: true };
+    }
     return { code: "network-error", message: error.message, retryable: true };
   }
   // ChatResponse with error field
@@ -350,6 +410,10 @@ function classifyError(error: unknown): ErrorInfo {
       const code = resp.error.code;
       if (code === "401" || code === "403") return { code: "auth-failed", message: resp.error.message, retryable: false };
       if (code === "429") return { code: "quota-exceeded", message: resp.error.message, retryable: true };
+      // 检测超时：network 错误中包含超时关键词
+      if (code === "network" && (resp.error.message.includes("aborted") || resp.error.message.includes("timed out"))) {
+        return { code: "timeout", message: resp.error.message, retryable: true };
+      }
       return { code, message: resp.error.message, retryable: resp.error.retryable };
     }
   }

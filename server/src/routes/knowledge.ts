@@ -7,6 +7,10 @@ import { Router } from "express";
 import multer from "multer";
 import crypto from "crypto";
 import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import {
   addSource,
   getAllSources,
@@ -30,8 +34,10 @@ import { hybridSearch } from "../lib/hybridSearch.js";
 import { rerank, type RerankInput } from "../lib/reranker.js";
 import { readSettingsFromDb } from "../lib/settingsReader.js";
 import { logger } from "../lib/logger.js";
+import { getDb } from "../lib/db.js";
 
 export const knowledgeRouter = Router();
+const db = getDb();
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -488,6 +494,80 @@ knowledgeRouter.get("/sources", (_req, res) => {
   try {
     const sources = getAllSources();
     res.json({ ok: true, sources });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** GET /api/knowledge/sources/:id — 获取单个知识源详情（含 chunks） */
+knowledgeRouter.get("/sources/:id", (req, res) => {
+  try {
+    const source = db.prepare("SELECT * FROM kb_sources WHERE id = ?").get(req.params.id);
+    if (!source) {
+      return res.status(404).json({ ok: false, error: "知识源不存在" });
+    }
+    const chunks = db.prepare("SELECT id, content, chunk_index FROM kb_chunks WHERE source_id = ? ORDER BY chunk_index").all(req.params.id);
+    res.json({ ok: true, source, chunks });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** GET /api/knowledge/sources/:id/file — 下载/预览知识源原始文件 */
+knowledgeRouter.get("/sources/:id/file", (req, res) => {
+  try {
+    const source = db.prepare("SELECT name, file_path, type FROM kb_sources WHERE id = ?").get(req.params.id) as { name: string; file_path: string; type: string } | undefined;
+    if (!source) {
+      return res.status(404).json({ ok: false, error: "知识源不存在" });
+    }
+    if (!source.file_path) {
+      return res.status(404).json({ ok: false, error: "该知识源无原始文件" });
+    }
+
+    // 在 samples 目录下查找文件（可能在子目录中）
+    const samplesDir = path.resolve(__dirname, "../../../samples");
+    const subDirs = ["documents", "emails", "charts", "presentations", "spreadsheets"];
+    let filePath = "";
+
+    for (const subDir of subDirs) {
+      const candidate = path.join(samplesDir, subDir, source.file_path);
+      if (fs.existsSync(candidate)) {
+        filePath = candidate;
+        break;
+      }
+    }
+
+    // 也检查 samples 根目录
+    if (!filePath) {
+      const candidate = path.join(samplesDir, source.file_path);
+      if (fs.existsSync(candidate)) {
+        filePath = candidate;
+      }
+    }
+
+    if (!filePath || !fs.existsSync(filePath)) {
+      return res.status(404).json({ ok: false, error: "文件不存在" });
+    }
+
+    // 设置 Content-Disposition 为 inline 让浏览器预览，而不是下载
+    const ext = path.extname(filePath).toLowerCase();
+    const mimeTypes: Record<string, string> = {
+      ".pdf": "application/pdf",
+      ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      ".txt": "text/plain",
+      ".md": "text/markdown",
+      ".html": "text/html",
+      ".csv": "text/csv",
+    };
+    const contentType = mimeTypes[ext] || "application/octet-stream";
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(source.name)}"`);
+    res.sendFile(filePath);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ ok: false, error: msg });

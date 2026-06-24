@@ -4,8 +4,10 @@
  */
 import Database from "better-sqlite3";
 import crypto from "crypto";
+import { localIso } from "../../../shared/src/datetime.js";
 import { logger } from "./logger.js";
 import { getDb } from "./db.js";
+import { logAudit } from "./auditLog.js";
 
 // ── Sources ─────────────────────────────────────────
 
@@ -15,13 +17,25 @@ export function addSource(source: {
   chunkCount: number; status: string;
 }): void {
   const db = getDb();
-  const now = new Date().toISOString();
+  const now = localIso();
+  // 查询旧数据用于审计
+  const oldRow = db.prepare("SELECT * FROM kb_sources WHERE id = ?").get(source.id) as any;
+
   db.prepare(`INSERT OR REPLACE INTO kb_sources
     (id, name, type, file_path, url, content_hash, chunk_count, status, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(source.id, source.name, source.type,
       source.filePath ?? null, source.url ?? null, source.contentHash ?? null,
       source.chunkCount, source.status, now, now);
+
+  logAudit({
+    table: "kb_sources",
+    operation: oldRow ? "UPDATE" : "INSERT",
+    recordId: source.id,
+    oldData: oldRow,
+    newData: source,
+    source: "knowledge",
+  });
 }
 
 export function getAllSources(): Array<{
@@ -56,12 +70,35 @@ export function getSourceById(id: string): {
 
 export function deleteSource(id: string): void {
   const db = getDb();
+  // 查询旧数据用于审计
+  const oldRow = db.prepare("SELECT * FROM kb_sources WHERE id = ?").get(id) as any;
+
   db.prepare("DELETE FROM kb_sources WHERE id = ?").run(id);
+
+  logAudit({
+    table: "kb_sources",
+    operation: "DELETE",
+    recordId: id,
+    oldData: oldRow,
+    source: "knowledge",
+  });
 }
 
 export function updateSourceStatus(id: string, status: string): void {
   const db = getDb();
+  // 查询旧数据用于审计
+  const oldRow = db.prepare("SELECT * FROM kb_sources WHERE id = ?").get(id) as any;
+
   db.prepare("UPDATE kb_sources SET status = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(status, id);
+
+  logAudit({
+    table: "kb_sources",
+    operation: "UPDATE",
+    recordId: id,
+    oldData: oldRow,
+    newData: { ...oldRow, status },
+    source: "knowledge",
+  });
 }
 
 export function findDuplicateByHash(contentHash: string): string | undefined {
@@ -82,8 +119,20 @@ export function addChunks(chunks: Array<{
     VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))`);
   const tx = db.transaction(() => {
     for (const c of chunks) {
+      // 查询旧数据用于审计
+      const oldRow = db.prepare("SELECT * FROM kb_chunks WHERE id = ?").get(c.id) as any;
+
       stmt.run(c.id, c.sourceId, c.content, c.chunkIndex,
         c.tokenCount ?? 0, c.metadata ? JSON.stringify(c.metadata) : null);
+
+      logAudit({
+        table: "kb_chunks",
+        operation: oldRow ? "UPDATE" : "INSERT",
+        recordId: c.id,
+        oldData: oldRow,
+        newData: c,
+        source: "knowledge",
+      });
     }
   });
   tx();
@@ -96,8 +145,13 @@ export function getChunksBySourceId(sourceId: string): Array<{
   const db = getDb();
   const rows = db.prepare("SELECT * FROM kb_chunks WHERE source_id = ? ORDER BY chunk_index").all(sourceId) as any[];
   return rows.map((r) => ({
-    ...r,
+    id: r.id,
+    sourceId: r.source_id,
+    content: r.content,
+    chunkIndex: r.chunk_index,
+    tokenCount: r.token_count,
     metadata: r.metadata ? JSON.parse(r.metadata) : undefined,
+    createdAt: r.created_at,
   }));
 }
 
@@ -108,7 +162,11 @@ export function getAllChunks(): Array<{
   const db = getDb();
   const rows = db.prepare("SELECT * FROM kb_chunks ORDER BY source_id, chunk_index").all() as any[];
   return rows.map((r) => ({
-    ...r,
+    id: r.id,
+    sourceId: r.source_id,
+    content: r.content,
+    chunkIndex: r.chunk_index,
+    tokenCount: r.token_count,
     metadata: r.metadata ? JSON.parse(r.metadata) : undefined,
   }));
 }
@@ -120,7 +178,14 @@ export function getChunkById(id: string): {
   const db = getDb();
   const row = db.prepare("SELECT * FROM kb_chunks WHERE id = ?").get(id) as any;
   if (!row) return undefined;
-  return { ...row, metadata: row.metadata ? JSON.parse(row.metadata) : undefined };
+  return {
+    id: row.id,
+    sourceId: row.source_id,
+    content: row.content,
+    chunkIndex: row.chunk_index,
+    tokenCount: row.token_count,
+    metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+  };
 }
 
 // ── Vectors ─────────────────────────────────────────
@@ -133,7 +198,19 @@ export function addVectors(vectors: Array<{
     (chunk_id, embedding, model_id) VALUES (?, ?, ?)`);
   const tx = db.transaction(() => {
     for (const v of vectors) {
+      // 查询旧数据用于审计
+      const oldRow = db.prepare("SELECT chunk_id, model_id FROM kb_vectors WHERE chunk_id = ?").get(v.chunkId) as any;
+
       stmt.run(v.chunkId, Buffer.from(new Float64Array(v.embedding).buffer), v.modelId);
+
+      logAudit({
+        table: "kb_vectors",
+        operation: oldRow ? "UPDATE" : "INSERT",
+        recordId: v.chunkId,
+        oldData: oldRow ? { chunkId: oldRow.chunk_id, modelId: oldRow.model_id } : undefined,
+        newData: { chunkId: v.chunkId, modelId: v.modelId },
+        source: "knowledge",
+      });
     }
   });
   tx();
@@ -179,7 +256,20 @@ export function getStats(): { sourceCount: number; chunkCount: number; vectorCou
 
 export function clearKnowledgeDb(): void {
   const db = getDb();
+  // 查询旧数据用于审计
+  const sources = db.prepare("SELECT id FROM kb_sources").all() as Array<{ id: string }>;
+
   db.exec("DELETE FROM kb_vectors; DELETE FROM kb_chunks; DELETE FROM kb_sources;");
+
+  // 记录审计：每个被删除的 source
+  for (const s of sources) {
+    logAudit({
+      table: "kb_sources",
+      operation: "DELETE",
+      recordId: s.id,
+      source: "knowledge",
+    });
+  }
 }
 
 // ── Utilities ───────────────────────────────────────
@@ -223,7 +313,18 @@ export function chunkText(text: string, maxChunkSize: number = 500, overlap: num
 /** 标记 chunk 已 embedding */
 export function markChunkEmbedded(chunkId: string): void {
   const db = getDb();
+  const oldRow = db.prepare("SELECT * FROM kb_chunks WHERE id = ?").get(chunkId) as any;
+
   db.prepare("UPDATE kb_chunks SET embedded = 1 WHERE id = ?").run(chunkId);
+
+  logAudit({
+    table: "kb_chunks",
+    operation: "UPDATE",
+    recordId: chunkId,
+    oldData: oldRow,
+    newData: { ...oldRow, embedded: 1 },
+    source: "knowledge",
+  });
 }
 
 /** 批量标记 chunks 已 embedding */
@@ -233,7 +334,16 @@ export function markChunksEmbedded(chunkIds: string[]): void {
   const stmt = db.prepare("UPDATE kb_chunks SET embedded = 1 WHERE id = ?");
   const tx = db.transaction(() => {
     for (const id of chunkIds) {
+      const oldRow = db.prepare("SELECT * FROM kb_chunks WHERE id = ?").get(id) as any;
       stmt.run(id);
+      logAudit({
+        table: "kb_chunks",
+        operation: "UPDATE",
+        recordId: id,
+        oldData: oldRow,
+        newData: { ...oldRow, embedded: 1 },
+        source: "knowledge",
+      });
     }
   });
   tx();
@@ -242,7 +352,18 @@ export function markChunksEmbedded(chunkIds: string[]): void {
 /** 设置 chunk 的 text_hash */
 export function updateChunkTextHash(chunkId: string, textHash: string): void {
   const db = getDb();
+  const oldRow = db.prepare("SELECT * FROM kb_chunks WHERE id = ?").get(chunkId) as any;
+
   db.prepare("UPDATE kb_chunks SET text_hash = ? WHERE id = ?").run(textHash, chunkId);
+
+  logAudit({
+    table: "kb_chunks",
+    operation: "UPDATE",
+    recordId: chunkId,
+    oldData: oldRow,
+    newData: { ...oldRow, text_hash: textHash },
+    source: "knowledge",
+  });
 }
 
 /** 批量设置 text_hash */
@@ -251,7 +372,16 @@ export function updateChunksTextHash(ids: string[], hashes: string[]): void {
   const stmt = db.prepare("UPDATE kb_chunks SET text_hash = ? WHERE id = ?");
   const tx = db.transaction(() => {
     for (let i = 0; i < ids.length; i++) {
+      const oldRow = db.prepare("SELECT * FROM kb_chunks WHERE id = ?").get(ids[i]) as any;
       stmt.run(hashes[i], ids[i]);
+      logAudit({
+        table: "kb_chunks",
+        operation: "UPDATE",
+        recordId: ids[i],
+        oldData: oldRow,
+        newData: { ...oldRow, text_hash: hashes[i] },
+        source: "knowledge",
+      });
     }
   });
   tx();

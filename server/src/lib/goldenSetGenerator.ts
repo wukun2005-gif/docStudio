@@ -9,6 +9,7 @@
 import crypto from "crypto";
 import { getDb } from "./db.js";
 import { logger } from "./logger.js";
+import { logAudit } from "./auditLog.js";
 import { registry } from "../providers/registry.js";
 import { getAllSources, getChunksBySourceId } from "./knowledgeDb.js";
 
@@ -312,7 +313,21 @@ export function getGoldenSetStats(): { total: number; byCategory: Record<string,
 
 export function clearGoldenSet(): void {
   const db = getDb();
+  // 查询旧数据用于审计
+  const oldRows = db.prepare("SELECT id FROM golden_set").all() as Array<{ id: string }>;
+
   db.prepare("DELETE FROM golden_set").run();
+
+  // 记录审计：每个被删除的记录
+  for (const row of oldRows) {
+    logAudit({
+      table: "golden_set",
+      operation: "DELETE",
+      recordId: row.id,
+      source: "golden_set",
+    });
+  }
+
   logger.info("[GoldenSet] Cleared golden set");
 }
 

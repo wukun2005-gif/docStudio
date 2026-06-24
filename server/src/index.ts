@@ -15,6 +15,7 @@ import { evaluationRouter } from "./routes/evaluation.js";
 import { provenanceRouter } from "./routes/provenance.js";
 import { connectorsRouter } from "./routes/connectors.js";
 import { workflowsRouter } from "./routes/workflows.js";
+import { dataRouter } from "./routes/data.js";
 import { getDb, closeDb } from "./lib/db.js";
 import { logger } from "./lib/logger.js";
 import { injectSampleData } from "./lib/sampleDataGenerator.js";
@@ -81,11 +82,23 @@ app.use("/api/settings", settingsRouter);
 app.use("/api/knowledge", knowledgeRouter);
 app.use("/api/people", peopleRouter);
 app.use("/api/chat", chatRouter);
+app.use("/api/data", dataRouter);
 app.use("/api/generation", generationRouter);
 app.use("/api/evaluation", evaluationRouter);
 app.use("/api/provenance", provenanceRouter);
 app.use("/api/connectors", connectorsRouter);
 app.use("/api/workflows", workflowsRouter);
+
+// 知识库文件服务 — 提供 samples 目录下的原始文件下载/预览
+const samplesDir = path.resolve(__dirname, "../../samples");
+app.use("/api/knowledge/files", express.static(samplesDir, {
+  setHeaders: (res, filePath) => {
+    // 对于 PDF/图片等文件，允许浏览器内联预览
+    if (/\.(pdf|png|jpg|jpeg|gif|svg)$/i.test(filePath)) {
+      res.setHeader("Content-Disposition", "inline");
+    }
+  },
+}));
 
 // 全局错误处理 — 捕获 multer 等错误
 app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {

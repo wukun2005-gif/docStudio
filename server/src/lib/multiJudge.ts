@@ -57,11 +57,14 @@ export async function callMultiJudge(
     temperature?: number;
     maxTokens?: number;
     signal?: AbortSignal;
+    /** LLM 调用超时（毫秒），照搬 patentExaminator */
+    timeoutMs?: number;
   }
 ): Promise<JudgeOutput[]> {
   const judgeCfgs = options?.judgeConfigs ?? DEFAULT_JUDGE_CONFIGS;
   const temperature = options?.temperature ?? 0;
   const maxTokens = options?.maxTokens ?? 2000;
+  const timeoutMs = options?.timeoutMs ?? 300_000; // 照搬 patentExaminator: thinking 模型推理时间长
 
   const judgeTasks = judgeCfgs.map(async (cfg): Promise<JudgeOutput> => {
     const { providerId, modelId } = cfg;
@@ -82,6 +85,7 @@ export async function callMultiJudge(
           apiKey,
           maxTokens,
           temperature,
+          timeoutMs,
           ...(options?.signal !== undefined && { signal: options.signal }),
         },
         undefined, undefined,

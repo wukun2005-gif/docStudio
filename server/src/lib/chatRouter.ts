@@ -73,7 +73,7 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
 
     const { response } = await registry.runWithFallback(
       providers,
-      { modelId: req.modelId ?? dbSettings.modelId ?? "mimo-v2-pro", messages, apiKey: "" },
+      { modelId: req.modelId ?? dbSettings.modelId ?? "mimo-v2-pro", messages, apiKey: "", timeoutMs: 60_000 },
       undefined, undefined,
       providerApiKeys,
       req.providerBaseUrls,

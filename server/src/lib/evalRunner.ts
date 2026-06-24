@@ -8,6 +8,7 @@
  * 计算检索质量和生成质量指标，生成评估报告。
  */
 import crypto from "crypto";
+import { localIso } from "../../../shared/src/datetime.js";
 import { getDb } from "./db.js";
 import { logger } from "./logger.js";
 import { getGoldenSet, type GoldenQuestion } from "./goldenSetGenerator.js";
@@ -274,7 +275,7 @@ function buildReport(
 
   return {
     runId,
-    timestamp: new Date().toISOString(),
+    timestamp: localIso(),
     configs: configSummaries,
     questionCount,
     questionBreakdown: results,
@@ -318,7 +319,7 @@ export async function runEvaluation(
     const runId = `eval-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}-${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}`;
     return {
       runId,
-      timestamp: now.toISOString(),
+      timestamp: localIso(now),
       configs: configs.map(c => ({
         label: c.label,
         avgRecall: 0, avgNdcg: 0, avgFaithfulness: 0, avgGroundedness: 0,

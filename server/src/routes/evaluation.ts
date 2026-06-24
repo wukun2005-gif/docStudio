@@ -7,6 +7,7 @@ import crypto from "crypto";
 import { evaluateOnline, computeTrustScore } from "../lib/evalMetrics.js";
 import { getDb } from "../lib/db.js";
 import { logger } from "../lib/logger.js";
+import { logAudit } from "../lib/auditLog.js";
 
 export const evaluationRouter = Router();
 
@@ -38,8 +39,24 @@ evaluationRouter.post("/evaluate", async (req, res) => {
       db.prepare(`INSERT INTO trust_evaluations (id, run_id, metrics, created_at) VALUES (?, ?, ?, datetime('now','localtime'))`)
         .run(evalId, runId, JSON.stringify(metrics));
 
+      logAudit({
+        table: "trust_evaluations",
+        operation: "INSERT",
+        recordId: evalId,
+        newData: { runId, metrics },
+        source: "evaluation",
+      });
+
       // 更新 generation_runs 的 trust_score
       db.prepare("UPDATE generation_runs SET trust_score = ? WHERE id = ?").run(trustScore, runId);
+
+      logAudit({
+        table: "generation_runs",
+        operation: "UPDATE",
+        recordId: runId,
+        newData: { trustScore },
+        source: "evaluation",
+      });
     }
 
     res.json({ ok: true, metrics, trustScore });

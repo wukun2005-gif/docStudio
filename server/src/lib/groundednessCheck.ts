@@ -1,17 +1,22 @@
 /**
- * Groundedness Check — 句子级验证
- * Feature #12: LLM-as-Judge 验证生成内容是否忠实于检索文档
+ * Groundedness Detection — LLM-as-Judge 验证
+ *
+ * 照搬 patentExaminator groundednessCheck.ts，适配 i-Write 场景。
+ *
+ * 在 LLM 生成回答之后，检查回答是否忠实于检索到的文档，
+ * 移除无支撑声明后再返回给用户。
  */
 import { logger } from "./logger.js";
 import { registry } from "../providers/registry.js";
 import { getApiKey } from "../security/keyStore.js";
+import { readSettingsFromDb } from "./settingsReader.js";
 
 // ── 类型定义 ──────────────────────────────────────────
 
 export interface GroundingDoc {
   source: string;
   excerpt: string;
-  score?: number;
+  score?: number | undefined;
 }
 
 export interface ClaimVerdict {
@@ -27,79 +32,152 @@ export interface JudgeResult {
   overallVerdict: "pass" | "fail" | "partial";
 }
 
+export interface FilteredOutput {
+  output: string;
+  groundingScore: number;
+  removedClaims: Array<{ text: string; reason: string }>;
+  verdict: "pass" | "partial" | "fail";
+}
+
 export interface GroundednessConfig {
   apiKey?: string;
   providerPreference?: string[];
   modelId?: string;
   providerBaseUrls?: Record<string, string>;
   signal?: AbortSignal;
+  /** LLM 调用超时（毫秒），照搬 patentExaminator */
+  timeoutMs?: number;
 }
 
-// ── 句子拆分 ──────────────────────────────────────────
+// ── 句子拆分（照搬 patentExaminator splitIntoSentences） ───
 
 /**
  * 将文本拆分为句子/段落
  * - 按中文句号、问号、感叹号、英文句号拆分
+ * - 保留编号段落（如 [0001]）的完整性
  * - 合并过短句子
  */
 export function splitIntoSentences(text: string): string[] {
   if (!text || text.trim().length === 0) return [];
 
-  const rawSentences = text.split(/(?<=[。！？.!?])/);
+  // 保护编号段落 [0001] 等，先替换为占位符
+  const protectedMarkers: string[] = [];
+  const protectedText = text.replace(/\[(\d{4,})\]/g, (match) => {
+    const idx = protectedMarkers.length;
+    protectedMarkers.push(match);
+    return `__PROTECTED_MARKER_${idx}__`;
+  });
 
+  // 按句子分隔符拆分（中文句号、问号、感叹号、英文句号）
+  const rawSentences = protectedText.split(/(?<=[。！？.!?])/);
+
+  // 还原保护的标记
+  const sentences = rawSentences
+    .map((s) => {
+      let restored = s;
+      protectedMarkers.forEach((marker, idx) => {
+        restored = restored.replace(`__PROTECTED_MARKER_${idx}__`, marker);
+      });
+      return restored.trim();
+    })
+    .filter((s) => s.length > 0);
+
+  // 合并过短的句子（< 5 字符）到前一个句子
   const merged: string[] = [];
-  for (const s of rawSentences) {
-    const trimmed = s.trim();
-    if (!trimmed) continue;
-
-    if (merged.length > 0 && trimmed.length < 5) {
-      merged[merged.length - 1] += trimmed;
+  for (const s of sentences) {
+    if (merged.length > 0 && s.length < 5) {
+      merged[merged.length - 1] += s;
     } else {
-      merged.push(trimmed);
+      merged.push(s);
     }
   }
 
   return merged;
 }
 
-// ── Judge Prompt 构建 ──────────────────────────────────
+// ── Judge Prompt 构建（照搬 patentExaminator buildJudgePrompt） ───
 
 export function buildJudgePrompt(
   sentences: string[],
   groundingDocs: GroundingDoc[],
 ): { system: string; user: string } {
   const system = [
-    "你是事实核查员。判断 AI 生成的回答中，每个声明是否被参考文档支撑。",
+    "你是文档写作 AI 助手的事实核查员。你的任务是判断 AI 生成的回答中，每个声明是否被提供的参考文档支撑。",
     "",
     "规则：",
-    "- grounded: 声明有明确的文档支撑",
-    "- ungrounded: 声明没有文档支撑，可能是幻觉",
-    "- not_verifiable: 无法从文档判断（如常识性陈述）",
+    "- grounded: 声明有明确的文档支撑（可引用具体段落）",
+    "- ungrounded: 声明没有文档支撑，可能是幻觉或推测",
+    "- not_verifiable: 声明无法从文档中判断（如常识性陈述、过渡语句）",
     "",
-    "输出 JSON：",
-    '{"claims":[{"text":"声明","verdict":"grounded|ungrounded|not_verifiable","evidence":"文档片段","reason":"理由"}],"groundedRatio":0.85,"overallVerdict":"pass|fail|partial"}',
+    "输出格式（JSON）：",
+    "{",
+    '  "claims": [',
+    "    {",
+    '      "text": "声明原文",',
+    '      "verdict": "grounded | ungrounded | not_verifiable",',
+    '      "evidence": "支撑该声明的文档片段（如有）",',
+    '      "reason": "判断理由"',
+    "    }",
+    "  ],",
+    '  "groundedRatio": 0.85,',
+    '  "overallVerdict": "pass | fail | partial"',
+    "}",
     "",
-    "groundedRatio = grounded / (grounded + ungrounded)",
-    ">= 0.8 pass, 0.5~0.8 partial, < 0.5 fail",
+    "注意：",
+    "- groundedRatio = grounded 数量 / (grounded + ungrounded) 数量",
+    "- overallVerdict: groundedRatio >= 0.8 为 pass, 0.5~0.8 为 partial, < 0.5 为 fail",
+    "- not_verifiable 不计入 groundedRatio 计算",
+    "- 严格按 JSON 格式输出，不要输出 markdown 代码块或任何解释性文字",
   ].join("\n");
 
   const docSection = groundingDocs
-    .map((doc, i) => `[${i + 1}] ${doc.source}${doc.score ? ` (${doc.score.toFixed(2)})` : ""}\n${doc.excerpt}`)
+    .map(
+      (doc, i) =>
+        `[${i + 1}] ${doc.source}${doc.score ? ` (相似度: ${doc.score.toFixed(2)})` : ""}\n${doc.excerpt}`,
+    )
     .join("\n\n");
 
-  const sentenceSection = sentences.map((s, i) => `[S${i + 1}] ${s}`).join("\n");
+  const sentenceSection = sentences
+    .map((s, i) => `[S${i + 1}] ${s}`)
+    .join("\n");
 
   const user = [
     "## 参考文档",
     docSection || "（无参考文档）",
     "",
-    "## AI 生成的声明",
+    "## AI 生成的回答（已拆分为声明）",
     sentenceSection,
     "",
-    "请逐句检查每个声明。",
+    "请逐句检查以上回答的每个声明，判断是否有文档支撑。",
   ].join("\n");
 
   return { system, user };
+}
+
+// ── JSON 解析 ──────────────────────────────────────
+
+export function extractJudgeJson(text: string): JudgeResult | null {
+  try {
+    const parsed = JSON.parse(text) as JudgeResult;
+    if (parsed.claims && Array.isArray(parsed.claims)) {
+      return parsed;
+    }
+  } catch {
+    // 尝试提取 JSON 块
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start !== -1 && end > start) {
+      try {
+        const parsed = JSON.parse(text.substring(start, end + 1)) as JudgeResult;
+        if (parsed.claims && Array.isArray(parsed.claims)) {
+          return parsed;
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return null;
 }
 
 // ── LLM Judge 调用 ──────────────────────────────────
@@ -112,22 +190,26 @@ async function callJudge(
   const { system, user } = buildJudgePrompt(sentences, groundingDocs);
 
   try {
+    const dbSettings = readSettingsFromDb();
+    const providers = config.providerPreference ?? dbSettings.providerPreference ?? ["mimo"];
     const providerApiKeys: Record<string, string> = {};
-    for (const pid of config.providerPreference ?? []) {
+    for (const pid of providers) {
       const key = config.apiKey ?? getApiKey(pid);
       if (key) providerApiKeys[pid] = key;
     }
 
     const { response } = await registry.runWithFallback(
-      config.providerPreference ?? ["openai", "deepseek"],
+      providers,
       {
-        modelId: config.modelId ?? "gpt-4o-mini",
+        modelId: config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro",
         messages: [
           { role: "system", content: system },
           { role: "user", content: user },
         ],
         apiKey: "",
+        maxTokens: 2000,
         temperature: 0,
+        timeoutMs: config.timeoutMs ?? 180_000, // 照搬 patentExaminator: groundedness check 需要较长超时
         responseFormat: {
           type: "json_schema",
           json_schema: {
@@ -166,71 +248,133 @@ async function callJudge(
       throw new Error(`LLM error: ${response.error.message}`);
     }
 
-    const parsed = JSON.parse(response.text) as JudgeResult;
-    return parsed;
+    // 先尝试直接解析，失败则提取 JSON 块
+    const parsed = extractJudgeJson(response.text);
+    if (parsed) return parsed;
+
+    throw new Error("JSON 解析失败");
   } catch (err) {
-    logger.error(`[Groundedness] Judge 调用失败: ${err instanceof Error ? err.message : String(err)}`);
-    // 返回默认结果
+    logger.warn(`[Groundedness] Judge 调用失败: ${err instanceof Error ? err.message : String(err)}`);
+    // 降级：全部通过（照搬 patentExaminator 的降级策略）
     return {
       claims: sentences.map((s) => ({
         text: s,
-        verdict: "not_verifiable" as const,
-        reason: "Judge 调用失败",
+        verdict: "grounded" as const,
+        reason: "Judge 调用失败，默认通过",
       })),
-      groundedRatio: 0,
-      overallVerdict: "fail",
+      groundedRatio: 1,
+      overallVerdict: "pass",
     };
   }
 }
 
-// ── 完整 Groundedness Check 流程 ──────────────────────────
+// ── 过滤函数（照搬 patentExaminator filterUngrounded） ───
 
-export interface FilteredOutput {
-  output: string;
-  groundingScore: number;
-  removedClaims: Array<{ text: string; reason: string }>;
-  verdict: "pass" | "partial" | "fail";
-}
+export function filterUngrounded(
+  originalOutput: string,
+  sentences: string[],
+  judgeResult: JudgeResult,
+): FilteredOutput {
+  const claimVerdicts = judgeResult.claims;
 
-/**
- * 完整的 Groundedness Check：
- * 1. 句子拆分
- * 2. LLM Judge 验证
- * 3. 过滤无支撑声明
- */
-export async function checkGroundedness(
-  text: string,
-  groundingDocs: GroundingDoc[],
-  config: GroundednessConfig = {},
-): Promise<FilteredOutput> {
-  // 1. 句子拆分
-  const sentences = splitIntoSentences(text);
-  if (sentences.length === 0) {
-    return { output: text, groundingScore: 1, removedClaims: [], verdict: "pass" };
+  // 构建句子 → verdict 映射
+  const verdictMap = new Map<string, ClaimVerdict>();
+  for (const cv of claimVerdicts) {
+    verdictMap.set(cv.text, cv);
   }
 
-  logger.info(`[Groundedness] 检查 ${sentences.length} 个声明`);
-
-  // 2. LLM Judge
-  const judgeResult = await callJudge(sentences, groundingDocs, config);
-  logger.info(`[Groundedness] 结果: ${judgeResult.overallVerdict}, ratio=${judgeResult.groundedRatio.toFixed(2)}`);
-
-  // 3. 过滤无支撑声明
-  const removedClaims: Array<{ text: string; reason: string }> = [];
   const keptSentences: string[] = [];
+  const removedClaims: Array<{ text: string; reason: string }> = [];
 
-  for (const claim of judgeResult.claims) {
-    if (claim.verdict === "ungrounded") {
-      removedClaims.push({ text: claim.text, reason: claim.reason ?? "无文档支撑" });
-    } else {
-      keptSentences.push(claim.text);
+  for (const sentence of sentences) {
+    const verdict = verdictMap.get(sentence);
+    if (!verdict) {
+      // 未找到 verdict，保守保留
+      keptSentences.push(sentence);
+      continue;
+    }
+
+    switch (verdict.verdict) {
+      case "grounded":
+        keptSentences.push(sentence);
+        break;
+      case "not_verifiable":
+        // pass 时保留，partial/fail 时移除（照搬 patentExaminator）
+        if (judgeResult.overallVerdict === "pass") {
+          keptSentences.push(sentence);
+        } else {
+          removedClaims.push({
+            text: sentence,
+            reason: verdict.reason || "无法验证",
+          });
+        }
+        break;
+      case "ungrounded":
+        removedClaims.push({
+          text: sentence,
+          reason: verdict.reason || "无文档支撑",
+        });
+        break;
     }
   }
 
   return {
-    output: keptSentences.join(""),
+    output: keptSentences.join("。") + (keptSentences.length > 0 && !keptSentences[keptSentences.length - 1].match(/[。！？.!?]$/) ? "。" : ""),
     groundingScore: judgeResult.groundedRatio,
     removedClaims,
     verdict: judgeResult.overallVerdict,
   };
+}
+
+// ── 主函数 ──────────────────────────────────────────
+
+/**
+ * 检查 LLM 回答的 groundedness
+ * @param output LLM 生成的回答
+ * @param groundingDocs RAG + Web 合并的 grounding documents
+ * @param config LLM 调用配置
+ * @returns 过滤后的输出
+ */
+export async function checkGroundedness(
+  output: string,
+  groundingDocs: GroundingDoc[],
+  config: GroundednessConfig = {},
+): Promise<FilteredOutput> {
+  // 如果没有 grounding documents，跳过检查
+  if (groundingDocs.length === 0) {
+    logger.info("[Groundedness] 无 grounding documents，跳过检查");
+    return {
+      output,
+      groundingScore: 1,
+      removedClaims: [],
+      verdict: "pass",
+    };
+  }
+
+  // 拆分句子
+  const sentences = splitIntoSentences(output);
+  if (sentences.length === 0) {
+    return {
+      output,
+      groundingScore: 1,
+      removedClaims: [],
+      verdict: "pass",
+    };
+  }
+
+  logger.info(
+    `[Groundedness] 开始检查: ${sentences.length} 个句子, ${groundingDocs.length} 个 grounding documents`,
+  );
+
+  // 调用 LLM Judge
+  const judgeResult = await callJudge(sentences, groundingDocs, config);
+
+  // 过滤
+  const filtered = filterUngrounded(output, sentences, judgeResult);
+
+  logger.info(
+    `[Groundedness] 检查完成: verdict=${filtered.verdict}, score=${filtered.groundingScore.toFixed(2)}, removed=${filtered.removedClaims.length} 个声明`,
+  );
+
+  return filtered;
 }

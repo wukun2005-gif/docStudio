@@ -178,7 +178,7 @@ describe("Sample Data 注入", () => {
   it("injectDemoPeople 注入组织架构", () => {
     injectDemoPeople();
     const people = getAllPeople();
-    expect(people.length).toBe(7); // CEO, CTO, PM, TL, FE, BE, DS
+    expect(people.length).toBe(7); // 张明CEO, 李华CTO, 王芳产品总监, 陈强技术负责人, 赵丽前端, 刘伟后端, 孙娜数据科学家
     expect(people.find((p) => p.name === "张明")).toBeDefined(); // CEO
   });
 });

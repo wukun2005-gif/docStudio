@@ -168,21 +168,56 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
     const url = `${base}/chat/completions`;
     const timeoutMs = req.timeoutMs ?? 120_000;
 
+    // ── 模型能力自适应 ──────────────────────────────────
+    const caps = getModelCapabilities(req.modelId);
+
     const body: Record<string, unknown> = {
       model: req.modelId,
-      messages: req.messages,
-      temperature: req.temperature ?? 0.7,
-      max_tokens: req.maxTokens ?? 4096,
+      max_tokens: resolveMaxTokens(req.modelId, req.maxTokens),
     };
-    if (req.responseFormat) {
-      body.response_format = req.responseFormat;
+
+    // Temperature 适配：钳制到模型声明的范围
+    if (caps.temperature.supported) {
+      const requested = req.temperature ?? 0.7;
+      body.temperature = Math.max(caps.temperature.range[0], Math.min(caps.temperature.range[1], requested));
     }
+    // 若模型不支持 temperature（如 DeepSeek 思考模式、Kimi K2.6），不发送该字段
+
+    // System Prompt 路由：Gemini 风格用 systemInstruction 参数
+    if (caps.systemPromptMode === "parameter") {
+      const systemMsgs = req.messages.filter(m => m.role === "system");
+      const otherMsgs = req.messages.filter(m => m.role !== "system");
+      body.messages = otherMsgs;
+      if (systemMsgs.length > 0) {
+        body.systemInstruction = { parts: systemMsgs.map(m => ({ text: m.content })) };
+      }
+    } else {
+      body.messages = req.messages;
+    }
+
+    // Structured Output 门控
+    if (req.responseFormat) {
+      if (caps.supportsStructuredOutput) {
+        body.response_format = req.responseFormat;
+      } else {
+        // 降级为 json_object（DeepSeek 等不支持 json_schema）
+        body.response_format = { type: "json_object" };
+      }
+    }
+
+    // Function Calling 门控
     if (req.tools && req.tools.length > 0) {
-      body.tools = req.tools;
-      if (req.tool_choice) body.tool_choice = req.tool_choice;
+      if (caps.supportsFunctionCalling) {
+        body.tools = req.tools;
+        if (req.tool_choice) body.tool_choice = req.tool_choice;
+      }
+      // 若模型不支持 function calling，不发送 tools（降级为纯文本）
     }
 
     try {
+      console.log(`[OpenAI] HTTP 请求开始: ${this.id} -> ${url}, model=${req.modelId}, timeout=${timeoutMs}ms`);
+      const startTime = Date.now();
+
       const res = await fetch(url, {
         method: "POST",
         headers: {
@@ -192,6 +227,8 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
         body: JSON.stringify(body),
         signal: req.signal ?? AbortSignal.timeout(timeoutMs),
       });
+
+      console.log(`[OpenAI] HTTP 响应: ${this.id}, status=${res.status}, duration=${Date.now() - startTime}ms`);
 
       if (!res.ok) {
         const errorText = await res.text().catch(() => "");
@@ -209,20 +246,35 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
 
       const data = (await res.json()) as {
         choices: Array<{ message: { content: string; tool_calls?: ToolCall[] } }>;
-        usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+        usage?: {
+          prompt_tokens: number;
+          completion_tokens: number;
+          total_tokens: number;
+          completion_tokens_details?: { reasoning_tokens?: number };
+        };
       };
 
       const msg = data.choices?.[0]?.message;
+
+      // 提取 thinking tokens（不同模型返回格式不同）
+      const thinkingTokens = data.usage?.completion_tokens_details?.reasoning_tokens ?? 0;
+      if (thinkingTokens > 0) {
+        learnThinkingCapability(req.modelId, thinkingTokens);
+      }
+
+      console.log(`[OpenAI] LLM 响应成功: ${this.id}, text长度=${msg?.content?.length ?? 0}, thinkingTokens=${thinkingTokens}`);
       return {
         text: msg?.content ?? "",
         tokenUsage: data.usage
           ? { input: data.usage.prompt_tokens, output: data.usage.completion_tokens, total: data.usage.total_tokens }
           : undefined,
+        thinkingTokens: thinkingTokens > 0 ? thinkingTokens : undefined,
         rawResponse: data,
         toolCalls: msg?.tool_calls,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      console.log(`[OpenAI] LLM 调用失败: ${this.id}, error=${msg}`);
       const retryable = !msg.includes("401") && !msg.includes("403");
       return {
         text: "",
@@ -237,23 +289,71 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
     const url = `${base}/chat/completions`;
     const timeoutMs = req.timeoutMs ?? 120_000;
 
+    // 照搬 patentExaminator: chunk 级超时（120s 无新数据 → 取消流 → 降级到非 streaming）
+    const STREAM_CHUNK_TIMEOUT_MS = 120_000;
+
+    // ── 模型能力自适应（与 chat() 一致）──────────────────
+    const caps = getModelCapabilities(req.modelId);
+
     const body: Record<string, unknown> = {
       model: req.modelId,
-      messages: req.messages,
-      temperature: req.temperature ?? 0.7,
-      max_tokens: req.maxTokens ?? 4096,
+      max_tokens: resolveMaxTokens(req.modelId, req.maxTokens),
       stream: true,
     };
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${req.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: req.signal ?? AbortSignal.timeout(timeoutMs),
-    });
+    // Temperature 适配
+    if (caps.temperature.supported) {
+      const requested = req.temperature ?? 0.7;
+      body.temperature = Math.max(caps.temperature.range[0], Math.min(caps.temperature.range[1], requested));
+    }
+
+    // System Prompt 路由
+    if (caps.systemPromptMode === "parameter") {
+      const systemMsgs = req.messages.filter(m => m.role === "system");
+      const otherMsgs = req.messages.filter(m => m.role !== "system");
+      body.messages = otherMsgs;
+      if (systemMsgs.length > 0) {
+        body.systemInstruction = { parts: systemMsgs.map(m => ({ text: m.content })) };
+      }
+    } else {
+      body.messages = req.messages;
+    }
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${req.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: req.signal ?? AbortSignal.timeout(timeoutMs),
+      });
+    } catch (fetchErr) {
+      // 400 + streaming → 回退到非 streaming（照搬 patentExaminator）
+      if (fetchErr instanceof Error && fetchErr.message.includes("400") && body.stream) {
+        console.log(`[OpenAI] streaming not supported (400), retrying as non-streaming`);
+        delete body.stream;
+        try {
+          res = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${req.apiKey}`,
+            },
+            body: JSON.stringify(body),
+            signal: req.signal ?? AbortSignal.timeout(timeoutMs),
+          });
+        } catch (retryErr) {
+          yield { done: true };
+          throw retryErr;
+        }
+      } else {
+        yield { done: true };
+        throw fetchErr;
+      }
+    }
 
     if (!res.ok) {
       const errorText = await res.text().catch(() => "");
@@ -269,34 +369,98 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
 
     const decoder = new TextDecoder();
     let buffer = "";
+    let chunkCount = 0;
+    let chunkTimeoutId: ReturnType<typeof setTimeout> | undefined;
+    let streamTimedOut = false;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      for (;;) {
+        // 照搬 patentExaminator: chunk 级超时 — 无新数据 → 取消流
+        const readPromise = STREAM_CHUNK_TIMEOUT_MS > 0
+          ? reader.read().finally(() => {
+              if (chunkTimeoutId) { clearTimeout(chunkTimeoutId); chunkTimeoutId = undefined; }
+            })
+          : reader.read();
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
+        if (STREAM_CHUNK_TIMEOUT_MS > 0) {
+          chunkTimeoutId = setTimeout(() => {
+            console.log(`[OpenAI] ──── CHUNK TIMEOUT ──── no data for ${STREAM_CHUNK_TIMEOUT_MS}ms, canceling stream (chunks=${chunkCount})`);
+            reader.cancel("chunk timeout").catch(() => {});
+          }, STREAM_CHUNK_TIMEOUT_MS);
+        }
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith("data: ")) continue;
-        const data = trimmed.slice(6);
-        if (data === "[DONE]") {
+        let result: { done: boolean; value?: Uint8Array };
+        try {
+          result = await readPromise as { done: boolean; value?: Uint8Array };
+        } catch (readErr) {
+          if (readErr instanceof Error && readErr.name === "AbortError") {
+            console.log(`[OpenAI] ──── STREAM ABORTED ──── chunks=${chunkCount}`);
+            streamTimedOut = true;
+            break;
+          }
+          throw readErr;
+        }
+
+        if (result.done) break;
+        chunkCount++;
+
+        buffer += decoder.decode(result.value!, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          const data = trimmed.slice(6);
+          if (data === "[DONE]") {
+            yield { done: true };
+            return;
+          }
+          try {
+            const parsed = JSON.parse(data) as {
+              choices: Array<{ delta: { content?: string } }>;
+            };
+            const text = parsed.choices?.[0]?.delta?.content;
+            if (text) {
+              yield { text, done: false };
+            }
+          } catch {
+            // skip malformed chunks
+          }
+        }
+      }
+    } finally {
+      if (chunkTimeoutId) clearTimeout(chunkTimeoutId);
+    }
+
+    // 流超时：降级到非 streaming（照搬 patentExaminator）
+    if (streamTimedOut) {
+      console.log(`[OpenAI] ──── STREAM TIMEOUT, RETRY AS NON-STREAMING ────`);
+      delete body.stream;
+      try {
+        const retryRes = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${req.apiKey}`,
+          },
+          body: JSON.stringify(body),
+          signal: req.signal ?? AbortSignal.timeout(timeoutMs),
+        });
+        if (retryRes.ok) {
+          const data = (await retryRes.json()) as {
+            choices: Array<{ message: { content: string } }>;
+            usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+          };
+          const msg = data.choices?.[0]?.message;
+          if (msg?.content) {
+            yield { text: msg.content, done: false };
+          }
           yield { done: true };
           return;
         }
-        try {
-          const parsed = JSON.parse(data) as {
-            choices: Array<{ delta: { content?: string } }>;
-          };
-          const text = parsed.choices?.[0]?.delta?.content;
-          if (text) {
-            yield { text, done: false };
-          }
-        } catch {
-          // skip malformed chunks
-        }
+      } catch {
+        // 非 streaming 也失败，让调用方处理
       }
     }
 
