@@ -73,6 +73,11 @@ generationRouter.post("/generate", async (req, res) => {
       source: "generation",
     });
 
+    // 从请求中获取服务器基础URL
+    const protocol = req.protocol || "http";
+    const host = req.get("host") || "localhost:3000";
+    const baseUrl = `${protocol}://${host}`;
+
     // 生成文档（超时由 registry 120s + docGenerator 180s 逐层保障）
     const result = await generateDocument({
       title,
@@ -83,10 +88,11 @@ generationRouter.post("/generate", async (req, res) => {
       apiKey,
       providerBaseUrls,
       userRequest,
+      baseUrl,
     });
 
     // 更新记录
-    const htmlContent = toHtml(result);
+    const htmlContent = toHtml(result, baseUrl);
 
     // 生成简短文件名（基于用户需求 + 大纲）
     const docTitle = generateDocTitle(userRequest ?? title, outline as OutlineSection[]);
@@ -492,7 +498,20 @@ generationRouter.get("/:id/export/:format", (req, res) => {
     // 解析参考来源列表
     const citations = run.content ? parseCitations(run.content) : [];
 
-    const result = exportDocument(format, run.title, sections, citations);
+    // 从请求中获取服务器基础URL，将相对路径转换为完整URL
+    const protocol = req.protocol || "http";
+    const host = req.get("host") || "localhost:3000";
+    const baseUrl = `${protocol}://${host}`;
+
+    // 将相对路径转换为完整URL
+    const resolvedCitations = citations.map((c) => {
+      if (c.url && c.url.startsWith("/")) {
+        return { ...c, url: `${baseUrl}${c.url}` };
+      }
+      return c;
+    });
+
+    const result = exportDocument(format, run.title, sections, resolvedCitations);
 
     res.setHeader("Content-Type", result.contentType);
     res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(run.title)}${result.extension}"`);
@@ -520,6 +539,11 @@ generationRouter.post("/:runId/regenerate-section", async (req, res) => {
       return;
     }
 
+    // 从请求中获取服务器基础URL
+    const protocol = req.protocol || "http";
+    const host = req.get("host") || "localhost:3000";
+    const baseUrl = `${protocol}://${host}`;
+
     // 用单章节大纲调用 generateDocument
     const singleOutline = [section];
     const result = await generateDocument({
@@ -528,13 +552,14 @@ generationRouter.post("/:runId/regenerate-section", async (req, res) => {
       format: run.format ?? "html",
       apiKey,
       userRequest: run.title,
+      baseUrl,
     });
 
     // 重新生成完整文档 HTML：替换对应章节
     const oldContent = run.content || "";
     const fullOutline = JSON.parse(run.outline || "[]");
     // 重新生成所有章节的 HTML（用新章节替换旧章节）
-    const newSectionHtml = toHtml(result);
+    const newSectionHtml = toHtml(result, baseUrl);
 
     // 简单策略：返回新章节内容，由前端拼接
     const newSectionData = result.sections[0];

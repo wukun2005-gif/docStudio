@@ -10,3 +10,5 @@ data_old/
 coverage/
 *.log
 *.tsbuildinfo
+docs/backlog.md
+docs/sample-data-upgrade-plan.md
