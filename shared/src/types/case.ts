@@ -19,6 +19,7 @@ export interface DocumentCase {
   generatedContent?: string;          // 生成的文档 HTML
   format: DocumentFormat;             // 文档格式
   trustScore?: number;                // 信任度评分
+  lastRunId?: string;                 // 最近一次生成的 runId（用于生成树查询）
   workflowState: CaseWorkflowState;
   errorMessage?: string;              // 错误信息
   createdAt: string;

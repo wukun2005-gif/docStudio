@@ -30,6 +30,7 @@ export interface CaseStore {
   updateUserRequest: (userRequest: string) => void;
   updateOutline: (outline: OutlineSection[]) => void;
   updateGeneratedContent: (content: string, trustScore?: number) => void;
+  updateLastRunId: (runId: string) => void;
   updateFormat: (format: DocumentFormat) => void;
   updateWorkflowState: (state: CaseWorkflowState, errorMessage?: string) => void;
 }
@@ -114,6 +115,14 @@ export const useCaseStore = create<CaseStore>((set, get) => ({
     const c = get().currentCase;
     if (!c) return;
     const updated = { ...c, generatedContent: content, trustScore };
+    set({ currentCase: updated, cases: get().cases.map((x) => x.id === c.id ? updated : x) });
+    persistCase(updated);
+  },
+
+  updateLastRunId: (runId) => {
+    const c = get().currentCase;
+    if (!c) return;
+    const updated = { ...c, lastRunId: runId };
     set({ currentCase: updated, cases: get().cases.map((x) => x.id === c.id ? updated : x) });
     persistCase(updated);
   },

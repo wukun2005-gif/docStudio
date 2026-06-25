@@ -9,6 +9,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "declaration": true,
+    "composite": true,
     "declarationMap": true,
     "sourceMap": true
   },

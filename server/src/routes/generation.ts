@@ -169,6 +169,84 @@ generationRouter.get("/:id/export/:format", (req, res) => {
   }
 });
 
+/** POST /api/generation/:runId/regenerate-section — 重新生成单个章节 */
+generationRouter.post("/:runId/regenerate-section", async (req, res) => {
+  try {
+    const { sectionIdx, section, outline, apiKey } = req.body;
+    if (sectionIdx === undefined || !section || !outline) {
+      res.status(400).json({ ok: false, error: "sectionIdx, section, and outline are required" });
+      return;
+    }
+
+    const db = getDb();
+    const run = db.prepare("SELECT * FROM generation_runs WHERE id = ?").get(req.params.runId) as any;
+    if (!run) {
+      res.status(404).json({ ok: false, error: "Run not found" });
+      return;
+    }
+
+    // 用单章节大纲调用 generateDocument
+    const singleOutline = [section];
+    const result = await generateDocument({
+      title: run.title,
+      outline: singleOutline,
+      format: run.format ?? "html",
+      apiKey,
+      userRequest: run.title,
+    });
+
+    // 重新生成完整文档 HTML：替换对应章节
+    const oldContent = run.content || "";
+    const fullOutline = JSON.parse(run.outline || "[]");
+    // 重新生成所有章节的 HTML（用新章节替换旧章节）
+    const newSectionHtml = toHtml(result);
+
+    // 简单策略：返回新章节内容，由前端拼接
+    const newSectionData = result.sections[0];
+
+    // 更新 provenance：删除旧章节的节点，写入新节点
+    try {
+      const oldNodes = db.prepare("SELECT id FROM provenance_nodes WHERE run_id = ? AND paragraph_idx = ?")
+        .all(req.params.runId, sectionIdx) as any[];
+      for (const n of oldNodes) {
+        db.prepare("DELETE FROM provenance_nodes WHERE id = ?").run(n.id);
+      }
+      if (newSectionData.sources.length > 0) {
+        buildProvenanceTree(req.params.runId, [{
+          idx: sectionIdx,
+          sources: newSectionData.sources.map((src) => ({ chunkId: src.chunkId, score: src.score })),
+        }]);
+      }
+    } catch (treeErr) {
+      logger.warn(`[Generation] 章节生成树更新失败: ${treeErr}`);
+    }
+
+    logAudit({
+      table: "generation_runs",
+      operation: "UPDATE",
+      recordId: req.params.runId,
+      source: "generation.regenerate-section",
+    });
+
+    logger.info(`[Generation] 章节 ${sectionIdx} 重新生成完成`);
+
+    res.json({
+      ok: true,
+      section: {
+        title: newSectionData.title,
+        content: newSectionData.content,
+        sources: newSectionData.sources,
+        webCitations: newSectionData.webCitations,
+        groundingScore: newSectionData.groundingScore,
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Generation] 章节重新生成失败: ${msg}`);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
 /** PUT /api/generation/:id/content — 更新文档内容（在线编辑 Feature #16） */
 generationRouter.put("/:id/content", (req, res) => {
   try {

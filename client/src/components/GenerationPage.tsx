@@ -12,6 +12,7 @@ export default function GenerationPage() {
   const updateOutline = useCaseStore((s) => s.updateOutline);
   const updateGeneratedContent = useCaseStore((s) => s.updateGeneratedContent);
   const updateWorkflowState = useCaseStore((s) => s.updateWorkflowState);
+  const updateLastRunId = useCaseStore((s) => s.updateLastRunId);
   const createCase = useCaseStore((s) => s.createCase);
 
   const [localOutline, setLocalOutline] = useState<OutlineSection[]>([]);
@@ -20,6 +21,9 @@ export default function GenerationPage() {
   const [trustScore, setTrustScore] = useState<number | null>(null);
   const [sections, setSections] = useState<SectionData[]>([]);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [dirtySections, setDirtySections] = useState<Set<number>>(new Set());
+  const [regeneratingSections, setRegeneratingSections] = useState<Set<number>>(new Set());
 
   // 从 case 加载数据
   useEffect(() => {
@@ -27,11 +31,14 @@ export default function GenerationPage() {
       setLocalOutline(currentCase.outline);
       setDocument(currentCase.generatedContent ?? null);
       setTrustScore(currentCase.trustScore ?? null);
+      setRunId(currentCase.lastRunId ?? null);
     } else {
       setLocalOutline([]);
       setDocument(null);
       setTrustScore(null);
       setSections([]);
+      setRunId(null);
+      setDirtySections(new Set());
     }
   }, [currentCase?.id]);
 
@@ -99,6 +106,11 @@ export default function GenerationPage() {
         setDocument(data.content);
         setTrustScore(data.trustScore);
         setSections(data.sections ?? []);
+        setDirtySections(new Set());
+        if (data.runId) {
+          setRunId(data.runId);
+          updateLastRunId(data.runId);
+        }
         updateGeneratedContent(data.content, data.trustScore);
         updateWorkflowState("completed");
       } else {
@@ -115,12 +127,101 @@ export default function GenerationPage() {
     }
   }
 
+  // ── 章节来源修改回调 ──
+
+  const handleSectionUpdate = (sectionIdx: number, updated: SectionData) => {
+    setSections((prev) => prev.map((s, i) => i === sectionIdx ? updated : s));
+    setDirtySections((prev) => new Set(prev).add(sectionIdx));
+  };
+
+  const handleSourceMove = (fromSectionIdx: number, sourceIdx: number, toSectionIdx: number, type?: string, mode?: "move" | "copy") => {
+    const isCopy = mode === "copy";
+    setSections((prev) => {
+      const next = [...prev];
+      if (type === "web") {
+        const citation = next[fromSectionIdx]?.webCitations[sourceIdx];
+        if (!citation) return prev;
+        if (!isCopy) {
+          next[fromSectionIdx] = {
+            ...next[fromSectionIdx],
+            webCitations: next[fromSectionIdx].webCitations.filter((_, i) => i !== sourceIdx),
+          };
+        }
+        next[toSectionIdx] = {
+          ...next[toSectionIdx],
+          webCitations: [...next[toSectionIdx].webCitations, citation],
+        };
+      } else {
+        const source = next[fromSectionIdx]?.sources[sourceIdx];
+        if (!source) return prev;
+        if (!isCopy) {
+          next[fromSectionIdx] = {
+            ...next[fromSectionIdx],
+            sources: next[fromSectionIdx].sources.filter((_, i) => i !== sourceIdx),
+          };
+        }
+        next[toSectionIdx] = {
+          ...next[toSectionIdx],
+          sources: [...next[toSectionIdx].sources, source],
+        };
+      }
+      return next;
+    });
+    if (!isCopy) {
+      setDirtySections((prev) => {
+        const next = new Set(prev);
+        next.add(fromSectionIdx);
+        next.add(toSectionIdx);
+        return next;
+      });
+    } else {
+      // 复制模式：只标记目标章节为 dirty
+      setDirtySections((prev) => new Set(prev).add(toSectionIdx));
+    }
+  };
+
+  const handleRegenerateSection = async (sectionIdx: number) => {
+    if (!runId || !localOutline[sectionIdx]) return;
+    setRegeneratingSections((prev) => new Set(prev).add(sectionIdx));
+
+    try {
+      const res = await fetch(`/api/generation/${runId}/regenerate-section`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sectionIdx,
+          section: localOutline[sectionIdx],
+          outline: localOutline,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok && data.section) {
+        // 替换该章节
+        setSections((prev) => prev.map((s, i) => i === sectionIdx ? data.section : s));
+        // 从 dirty 集合中移除
+        setDirtySections((prev) => {
+          const next = new Set(prev);
+          next.delete(sectionIdx);
+          return next;
+        });
+      }
+    } catch (err) {
+      console.error("Regenerate section failed:", err);
+    } finally {
+      setRegeneratingSections((prev) => {
+        const next = new Set(prev);
+        next.delete(sectionIdx);
+        return next;
+      });
+    }
+  };
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* 大纲编辑区（可折叠） */}
       <div className="shrink-0 border-b bg-white">
         <div
-          className="px-4 py-2 flex items-center justify-between cursor-pointer hover:bg-gray-50 select-none"
+          className="px-4 py-2 flex items-center justify-between cursor-pointer hover:bg-gray-50"
           onClick={() => setOutlineCollapsed(!outlineCollapsed)}
         >
           <div className="flex items-center gap-2">
@@ -146,6 +247,12 @@ export default function GenerationPage() {
         trustScore={trustScore}
         sections={sections}
         generating={generating}
+        runId={runId}
+        dirtySections={dirtySections}
+        regeneratingSections={regeneratingSections}
+        onSectionUpdate={handleSectionUpdate}
+        onSourceMove={handleSourceMove}
+        onRegenerateSection={handleRegenerateSection}
       />
     </div>
   );

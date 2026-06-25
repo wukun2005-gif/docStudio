@@ -50,7 +50,7 @@ export default function App() {
                 </svg>
               </button>
             )}
-            <h1 className="text-lg font-bold text-gray-800">i-Write</h1>
+            <h1 className="text-lg font-bold text-gray-800">i-Write<span className="text-xs font-normal text-gray-500 ml-1">, a Studio of Document Generation w/ Knowledge</span></h1>
           </div>
           <div className="flex gap-1">
             {NAV_ITEMS.map((item) => (
@@ -129,9 +129,9 @@ function HomePage({ onNavigate }: { onNavigate: (page: Page) => void }) {
   return (
     <div className="h-full flex items-center justify-center">
       <div className="text-center max-w-lg">
-        <h2 className="text-3xl font-bold text-gray-800 mb-3">i-Write</h2>
-        <p className="text-lg text-gray-500 mb-2">可信文档生成工作台</p>
-        <p className="text-sm text-gray-400 mb-8">连接知识碎片，生成可信文档</p>
+        <h2 className="text-2xl font-bold text-gray-800 mb-1">i-Write</h2>
+        <p className="text-sm text-gray-500 mb-1">a Studio of Document Generation w/ Knowledge</p>
+        <p className="text-xs text-gray-400 mb-8">连接知识碎片，生成可信文档</p>
         <div className="flex justify-center gap-3">
           <button
             onClick={() => onNavigate("generate")}

@@ -1,3 +1,8 @@
+/**
+ * 生成树可视化组件 — 段落级来源追溯
+ * Feature #17: 生成树可视化
+ * Feature #18: 生成树 CRUD
+ */
 import { useEffect, useState } from "react";
 
 interface ProvenanceNode {
@@ -13,9 +18,10 @@ interface ProvenanceNode {
 
 interface ProvenanceTreeProps {
   runId: string;
+  sectionTitles?: string[]; // 章节标题列表，用于替换"段落 N"
 }
 
-export default function ProvenanceTree({ runId }: ProvenanceTreeProps) {
+export default function ProvenanceTree({ runId, sectionTitles }: ProvenanceTreeProps) {
   const [nodes, setNodes] = useState<ProvenanceNode[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -64,38 +70,54 @@ export default function ProvenanceTree({ runId }: ProvenanceTreeProps) {
 
   return (
     <div className="space-y-3">
-      {Array.from(byParagraph.entries()).sort(([a], [b]) => a - b).map(([idx, paragraphNodes]) => (
-        <div key={idx} className="bg-white rounded-lg border p-3">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium text-gray-700">段落 {idx + 1}</span>
-            <span className="text-xs text-gray-400">{paragraphNodes.length} 个来源</span>
-          </div>
-          <div className="space-y-1">
-            {paragraphNodes.sort((a, b) => b.score - a.score).map((node) => (
-              <div key={node.id} className="flex items-center gap-2 text-sm">
-                <div className={`w-2 h-2 rounded-full ${
-                  node.score >= 0.8 ? "bg-green-500" :
-                  node.score >= 0.5 ? "bg-yellow-500" :
-                  "bg-red-500"
-                }`} />
-                <span className="flex-1 truncate text-gray-600">
-                  {node.chunkId?.slice(0, 8) ?? "手动"}...
+      {Array.from(byParagraph.entries()).sort(([a], [b]) => a - b).map(([idx, paragraphNodes]) => {
+        const title = sectionTitles?.[idx] ?? `段落 ${idx + 1}`;
+        const avgScore = paragraphNodes.reduce((sum, n) => sum + n.score, 0) / paragraphNodes.length;
+        return (
+          <div key={idx} className="bg-white rounded-lg border p-3">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-gray-700 truncate max-w-[200px]" title={title}>
+                  {title}
                 </span>
-                <span className="text-gray-400 text-xs">{(node.score * 100).toFixed(0)}%</span>
-                {node.isManual && (
-                  <span className="px-1 py-0.5 bg-blue-100 text-blue-600 text-xs rounded">手动</span>
-                )}
-                <button
-                  onClick={() => handleDelete(node.id)}
-                  className="text-gray-400 hover:text-red-500 text-xs"
-                >
-                  ×
-                </button>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                  avgScore >= 0.8 ? "bg-green-100 text-green-700" :
+                  avgScore >= 0.5 ? "bg-yellow-100 text-yellow-700" :
+                  "bg-red-100 text-red-700"
+                }`}>
+                  {(avgScore * 100).toFixed(0)}%
+                </span>
               </div>
-            ))}
+              <span className="text-xs text-gray-400">{paragraphNodes.length} 个来源</span>
+            </div>
+            <div className="space-y-1">
+              {paragraphNodes.sort((a, b) => b.score - a.score).map((node) => (
+                <div key={node.id} className="flex items-center gap-2 text-sm">
+                  <div className={`w-2 h-2 rounded-full ${
+                    node.score >= 0.8 ? "bg-green-500" :
+                    node.score >= 0.5 ? "bg-yellow-500" :
+                    "bg-red-500"
+                  }`} />
+                  <span className="flex-1 truncate text-gray-600">
+                    {node.chunkId?.slice(0, 8) ?? "手动"}...
+                  </span>
+                  <span className="text-gray-400 text-xs">{(node.score * 100).toFixed(0)}%</span>
+                  {node.isManual && (
+                    <span className="px-1 py-0.5 bg-blue-100 text-blue-600 text-xs rounded">手动</span>
+                  )}
+                  <button
+                    onClick={() => handleDelete(node.id)}
+                    className="text-gray-400 hover:text-red-500 text-xs"
+                    title="删除此来源"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

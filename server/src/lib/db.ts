@@ -169,19 +169,7 @@ function migrate(db: Database.Database): void {
       PRIMARY KEY (store_name, record_id)
     );
 
-    -- 数据库审计日志
-    CREATE TABLE IF NOT EXISTS audit_log (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      timestamp   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-      table_name  TEXT NOT NULL,
-      operation   TEXT NOT NULL,           -- 'INSERT' | 'UPDATE' | 'DELETE'
-      record_id   TEXT NOT NULL,
-      old_data    TEXT,                    -- JSON: 更新/删除前的数据
-      new_data    TEXT,                    -- JSON: 插入/更新后的数据
-      source      TEXT                     -- 来源标记（模块名/路由名）
-    );
-    CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_audit_table ON audit_log(table_name);
+    -- 审计日志已改为文件方案，见 auditLog.ts（日志文件: server/data/db-audit.log）
 
     -- 生成树（段落级来源追溯）
     CREATE TABLE IF NOT EXISTS provenance_nodes (

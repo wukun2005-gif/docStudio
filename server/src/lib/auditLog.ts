@@ -1,9 +1,19 @@
 /**
- * 数据库审计日志模块
- * 照搬 patentExaminator 方案：记录所有 INSERT/UPDATE/DELETE 操作
+ * 审计日志 — 记录所有数据库写操作（INSERT/UPDATE/DELETE）
+ * 照搬 patentExaminator 方案：写文件，不写数据库
+ * 日志文件: server/data/db-audit.log
+ * 轮转: 超过 MAX_SIZE 后归档为 db-audit.1.log（仅保留 1 个备份）
  */
-import { getDb } from "./db.js";
-import { logger } from "./logger.js";
+import { appendFileSync, mkdirSync, renameSync, statSync } from "fs";
+import { join, dirname } from "path";
+
+const DATA_DIR = process.env.DB_DIR ?? join(process.cwd(), "data");
+const LOG_FILE = join(DATA_DIR, "db-audit.log");
+const BACKUP_FILE = join(DATA_DIR, "db-audit.1.log");
+const MAX_SIZE = 5 * 1024 * 1024; // 5 MB
+const MAX_FIELD_LEN = 500; // dataBefore/dataAfter 单字段最大字符数
+
+try { mkdirSync(DATA_DIR, { recursive: true }); } catch { /* exists */ }
 
 export type AuditOperation = "INSERT" | "UPDATE" | "DELETE";
 
@@ -16,66 +26,43 @@ export interface AuditLogEntry {
   source?: string;
 }
 
-/**
- * 记录审计日志 — 同步写入 audit_log 表
- * 异常不抛出，仅 warn 日志（审计失败不应阻断业务）
- */
-export function logAudit(entry: AuditLogEntry): void {
+/** 截断过大的数据字段，避免单行日志膨胀 */
+function truncateData(data: unknown): unknown {
+  if (data === undefined || data === null) return data;
+  const json = JSON.stringify(data);
+  if (json.length <= MAX_FIELD_LEN) return data;
+  return json.slice(0, MAX_FIELD_LEN) + `… (${json.length} chars truncated)`;
+}
+
+/** 超过阈值时轮转日志文件 */
+function rotateIfNeeded(): void {
   try {
-    const db = getDb();
-    db.prepare(`
-      INSERT INTO audit_log (table_name, operation, record_id, old_data, new_data, source)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      entry.table,
-      entry.operation,
-      entry.recordId,
-      entry.oldData != null ? JSON.stringify(entry.oldData) : null,
-      entry.newData != null ? JSON.stringify(entry.newData) : null,
-      entry.source ?? null,
-    );
-  } catch (err) {
-    logger.warn(`[AuditLog] 写入失败: ${err instanceof Error ? err.message : String(err)}`);
-  }
+    const stat = statSync(LOG_FILE);
+    if (stat.size >= MAX_SIZE) {
+      try { renameSync(LOG_FILE, BACKUP_FILE); } catch { /* backup may not exist */ }
+    }
+  } catch { /* file may not exist yet */ }
 }
 
 /**
- * 查询审计日志
+ * 记录审计日志 — 同步写入文件
+ * 异常不抛出，仅 warn 日志（审计失败不应阻断业务）
  */
-export function queryAuditLogs(options?: {
-  table?: string;
-  recordId?: string;
-  source?: string;
-  limit?: number;
-}): Array<{
-  id: number;
-  timestamp: string;
-  table_name: string;
-  operation: string;
-  record_id: string;
-  old_data: string | null;
-  new_data: string | null;
-  source: string | null;
-}> {
-  const db = getDb();
-  let sql = "SELECT * FROM audit_log WHERE 1=1";
-  const params: unknown[] = [];
-
-  if (options?.table) {
-    sql += " AND table_name = ?";
-    params.push(options.table);
+export function logAudit(entry: AuditLogEntry): void {
+  const ts = new Date().toISOString();
+  const line = JSON.stringify({
+    ts,
+    table: entry.table,
+    op: entry.operation,
+    recordId: entry.recordId,
+    dataBefore: truncateData(entry.oldData),
+    dataAfter: truncateData(entry.newData),
+    source: entry.source ?? null,
+  });
+  try {
+    rotateIfNeeded();
+    appendFileSync(LOG_FILE, line + "\n");
+  } catch (e) {
+    console.warn(`[AuditLog] write failed: ${e instanceof Error ? e.message : String(e)}`);
   }
-  if (options?.recordId) {
-    sql += " AND record_id = ?";
-    params.push(options.recordId);
-  }
-  if (options?.source) {
-    sql += " AND source = ?";
-    params.push(options.source);
-  }
-
-  sql += " ORDER BY timestamp DESC";
-  sql += ` LIMIT ${options?.limit ?? 100}`;
-
-  return db.prepare(sql).all(...params) as any[];
 }

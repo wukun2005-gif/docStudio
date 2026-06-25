@@ -1,6 +1,7 @@
 node_modules/
 dist/
 data/
+data_old/
 *.db
 *.db-journal
 *.db-wal
@@ -8,3 +9,4 @@ data/
 .DS_Store
 coverage/
 *.log
+*.tsbuildinfo
