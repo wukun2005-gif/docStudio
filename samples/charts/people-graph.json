@@ -1,133 +1,227 @@
 {
   "metadata": {
-    "name": "i-Write 项目团队",
-    "description": "i-Write 产品开发团队的组织架构和人际关系图谱",
-    "version": "1.0.0",
-    "lastUpdated": "2024-01-15T10:00:00Z"
+    "name": "Nexora Tech 产品团队",
+    "description": "Nexora Tech 产品开发团队的组织架构和人际关系图谱 — 18 人完整团队",
+    "version": "2.0.0",
+    "lastUpdated": "2026-06-25T10:00:00+08:00"
   },
   "nodes": [
     {
-      "id": "zhangming",
-      "name": "张明",
+      "id": "p-chenyu",
+      "name": "陈宇",
       "role": "CEO",
       "department": "管理层",
       "title": "CEO",
-      "email": "zhangming@company.com"
+      "email": "chenyu@nexora-tech.com"
     },
     {
-      "id": "lihua",
-      "name": "李华",
-      "role": "CTO",
+      "id": "p-wanglin",
+      "name": "王琳",
+      "role": "COO",
       "department": "管理层",
-      "title": "CTO",
-      "email": "lihua@company.com"
+      "title": "COO",
+      "email": "wanglin@nexora-tech.com"
     },
     {
-      "id": "wangfang",
-      "name": "王芳",
+      "id": "p-zhaojun",
+      "name": "赵军",
+      "role": "VP Engineering",
+      "department": "管理层",
+      "title": "VP Engineering",
+      "email": "zhaojun@nexora-tech.com"
+    },
+    {
+      "id": "p-sunan",
+      "name": "苏楠",
       "role": "产品总监",
       "department": "产品部",
       "title": "产品总监",
-      "email": "wangfang@company.com"
+      "email": "sunan@nexora-tech.com"
     },
     {
-      "id": "chenqiang",
+      "id": "p-huangwei",
+      "name": "黄薇",
+      "role": "高级产品经理",
+      "department": "产品部",
+      "title": "高级产品经理",
+      "email": "huangwei@nexora-tech.com"
+    },
+    {
+      "id": "p-chenqiang",
       "name": "陈强",
       "role": "技术负责人",
       "department": "技术部",
       "title": "技术负责人",
-      "email": "chenqiang@company.com"
+      "email": "chenqiang@nexora-tech.com"
     },
     {
-      "id": "liuwei",
+      "id": "p-liuwei",
       "name": "刘伟",
-      "role": "后端工程师",
+      "role": "高级后端工程师",
       "department": "技术部",
-      "title": "后端工程师",
-      "email": "liuwei@company.com"
+      "title": "高级后端工程师",
+      "email": "liuwei@nexora-tech.com"
     },
     {
-      "id": "sunna",
+      "id": "p-zhaoli",
+      "name": "赵丽",
+      "role": "高级前端工程师",
+      "department": "技术部",
+      "title": "高级前端工程师",
+      "email": "zhaoli@nexora-tech.com"
+    },
+    {
+      "id": "p-sunna",
       "name": "孙娜",
       "role": "数据科学家",
       "department": "技术部",
       "title": "数据科学家",
-      "email": "sunna@company.com"
+      "email": "sunna@nexora-tech.com"
     },
     {
-      "id": "zhaoli",
-      "name": "赵丽",
+      "id": "p-wangchao",
+      "name": "王超",
+      "role": "后端工程师",
+      "department": "技术部",
+      "title": "后端工程师",
+      "email": "wangchao@nexora-tech.com"
+    },
+    {
+      "id": "p-zhoumin",
+      "name": "周敏",
       "role": "前端工程师",
       "department": "技术部",
       "title": "前端工程师",
-      "email": "zhaoli@company.com"
+      "email": "zhoumin@nexora-tech.com"
+    },
+    {
+      "id": "p-xujun",
+      "name": "徐骏",
+      "role": "DevOps 工程师",
+      "department": "技术部",
+      "title": "DevOps 工程师",
+      "email": "xujun@nexora-tech.com"
+    },
+    {
+      "id": "p-yangfei",
+      "name": "杨飞",
+      "role": "QA 负责人",
+      "department": "技术部",
+      "title": "QA 负责人",
+      "email": "yangfei@nexora-tech.com"
+    },
+    {
+      "id": "p-luoxi",
+      "name": "罗茜",
+      "role": "UX 设计主管",
+      "department": "设计部",
+      "title": "UX 设计主管",
+      "email": "luoxi@nexora-tech.com"
+    },
+    {
+      "id": "p-hecheng",
+      "name": "何成",
+      "role": "UI 设计师",
+      "department": "设计部",
+      "title": "UI 设计师",
+      "email": "hecheng@nexora-tech.com"
+    },
+    {
+      "id": "p-wangli",
+      "name": "王莉",
+      "role": "市场总监",
+      "department": "市场部",
+      "title": "市场总监",
+      "email": "wangli@nexora-tech.com"
+    },
+    {
+      "id": "p-zhangwei",
+      "name": "张伟",
+      "role": "企业销售经理",
+      "department": "销售部",
+      "title": "企业销售经理",
+      "email": "zhangwei@nexora-tech.com"
+    },
+    {
+      "id": "p-tangmin",
+      "name": "唐敏",
+      "role": "法务顾问",
+      "department": "法务部",
+      "title": "法务顾问",
+      "email": "tangmin@nexora-tech.com"
+    },
+    {
+      "id": "p-lixin",
+      "name": "李鑫",
+      "role": "客户成功经理",
+      "department": "客户成功部",
+      "title": "客户成功经理",
+      "email": "lixin@nexora-tech.com"
     }
   ],
   "edges": [
-    {
-      "source": "chenqiang",
-      "target": "lihua",
-      "type": "reporting",
-      "label": "直接汇报"
-    },
-    {
-      "source": "wangfang",
-      "target": "zhangming",
-      "type": "reporting",
-      "label": "直接汇报"
-    },
-    {
-      "source": "liuwei",
-      "target": "chenqiang",
-      "type": "reporting",
-      "label": "直接汇报"
-    },
-    {
-      "source": "sunna",
-      "target": "chenqiang",
-      "type": "reporting",
-      "label": "直接汇报"
-    },
-    {
-      "source": "zhaoli",
-      "target": "chenqiang",
-      "type": "reporting",
-      "label": "直接汇报"
-    },
-    {
-      "source": "wangfang",
-      "target": "chenqiang",
-      "type": "collaboration",
-      "label": "产品技术协作"
-    },
-    {
-      "source": "zhaoli",
-      "target": "liuwei",
-      "type": "collaboration",
-      "label": "前后端协作"
-    },
-    {
-      "source": "sunna",
-      "target": "liuwei",
-      "type": "collaboration",
-      "label": "数据后端协作"
-    }
+    { "source": "p-wanglin", "target": "p-chenyu", "type": "reporting", "label": "直接汇报" },
+    { "source": "p-zhaojun", "target": "p-chenyu", "type": "reporting", "label": "直接汇报" },
+    { "source": "p-wangli", "target": "p-chenyu", "type": "reporting", "label": "直接汇报" },
+    { "source": "p-sunan", "target": "p-wanglin", "type": "reporting", "label": "直接汇报" },
+    { "source": "p-huangwei", "target": "p-sunan", "type": "reporting", "label": "直接汇报" },
+    { "source": "p-chenqiang", "target": "p-zhaojun", "type": "reporting", "label": "直接汇报" },
+    { "source": "p-xujun", "target": "p-zhaojun", "type": "reporting", "label": "直接汇报" },
+    { "source": "p-liuwei", "target": "p-chenqiang", "type": "reporting", "label": "直接汇报" },
+    { "source": "p-zhaoli", "target": "p-chenqiang", "type": "reporting", "label": "直接汇报" },
+    { "source": "p-sunna", "target": "p-chenqiang", "type": "reporting", "label": "直接汇报" },
+    { "source": "p-wangchao", "target": "p-chenqiang", "type": "reporting", "label": "直接汇报" },
+    { "source": "p-zhoumin", "target": "p-chenqiang", "type": "reporting", "label": "直接汇报" },
+    { "source": "p-hecheng", "target": "p-luoxi", "type": "reporting", "label": "直接汇报" },
+    { "source": "p-sunan", "target": "p-chenqiang", "type": "collaboration", "label": "产品技术协作" },
+    { "source": "p-sunan", "target": "p-luoxi", "type": "collaboration", "label": "产品设计协作" },
+    { "source": "p-zhaoli", "target": "p-liuwei", "type": "collaboration", "label": "前后端协作" },
+    { "source": "p-zhaoli", "target": "p-luoxi", "type": "collaboration", "label": "前端设计协作" },
+    { "source": "p-zhaoli", "target": "p-zhoumin", "type": "collaboration", "label": "前端协作" },
+    { "source": "p-sunna", "target": "p-liuwei", "type": "collaboration", "label": "数据后端协作" },
+    { "source": "p-wangchao", "target": "p-liuwei", "type": "collaboration", "label": "后端协作" },
+    { "source": "p-yangfei", "target": "p-chenqiang", "type": "collaboration", "label": "QA技术协作" },
+    { "source": "p-tangmin", "target": "p-wanglin", "type": "collaboration", "label": "法务运营协作" },
+    { "source": "p-zhangwei", "target": "p-lixin", "type": "collaboration", "label": "销售客户成功协作" },
+    { "source": "p-zhangwei", "target": "p-wangli", "type": "collaboration", "label": "销售市场协作" },
+    { "source": "p-huangwei", "target": "p-lixin", "type": "collaboration", "label": "产品客户反馈" },
+    { "source": "p-lixin", "target": "p-yangfei", "type": "collaboration", "label": "客户问题反馈" }
   ],
   "groups": [
     {
       "id": "management",
       "name": "管理层",
-      "members": ["zhangming", "lihua"]
+      "members": ["p-chenyu", "p-wanglin", "p-zhaojun"]
     },
     {
       "id": "product",
       "name": "产品部",
-      "members": ["wangfang"]
+      "members": ["p-sunan", "p-huangwei"]
     },
     {
       "id": "tech",
       "name": "技术部",
-      "members": ["chenqiang", "liuwei", "sunna", "zhaoli"]
+      "members": ["p-chenqiang", "p-liuwei", "p-zhaoli", "p-sunna", "p-wangchao", "p-zhoumin", "p-xujun", "p-yangfei"]
+    },
+    {
+      "id": "design",
+      "name": "设计部",
+      "members": ["p-luoxi", "p-hecheng"]
+    },
+    {
+      "id": "market",
+      "name": "市场/销售",
+      "members": ["p-wangli", "p-zhangwei"]
+    },
+    {
+      "id": "legal",
+      "name": "法务部",
+      "members": ["p-tangmin"]
+    },
+    {
+      "id": "cs",
+      "name": "客户成功部",
+      "members": ["p-lixin"]
     }
   ]
 }

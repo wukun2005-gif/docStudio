@@ -146,14 +146,14 @@ function convertCitationsToLinks(text: string, citations: CitationLink[]): strin
 
     // 知识库来源：链接到原始文件
     if (cite.sourceId) {
-      return `<sup><a href="/api/knowledge/sources/${escapeHtml(cite.sourceId)}/file" target="_blank" rel="noopener" class="cite-link" title="${escapeHtml(displayTitle)}">[${num}]</a></sup>`;
+      return `<sup><a href="/api/knowledge/sources/${escapeHtmlAttr(cite.sourceId)}/file" target="_blank" rel="noopener" class="cite-link" title="${escapeHtmlAttr(displayTitle)}">[${num}]</a></sup>`;
     }
     // Web 来源：直接链接
     if (cite.url) {
-      return `<sup><a href="${escapeHtml(cite.url)}" target="_blank" rel="noopener" class="cite-link" title="${escapeHtml(displayTitle)}">[${num}]</a></sup>`;
+      return `<sup><a href="${escapeHtmlAttr(cite.url)}" target="_blank" rel="noopener" class="cite-link" title="${escapeHtmlAttr(displayTitle)}">[${num}]</a></sup>`;
     }
     // 无链接
-    return `<sup><span class="cite-ref" title="${escapeHtml(displayTitle)}">[${num}]</span></sup>`;
+    return `<sup><span class="cite-ref" title="${escapeHtmlAttr(displayTitle)}">[${num}]</span></sup>`;
   });
 }
 
@@ -252,9 +252,10 @@ function inlineMarkdown(text: string): string {
   // 粗体
   result = result.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   result = result.replace(/__(.+?)__/g, "<strong>$1</strong>");
-  // 斜体
+  // 斜体（不匹配 HTML 属性中的 _blank 等）
   result = result.replace(/\*(.+?)\*/g, "<em>$1</em>");
-  result = result.replace(/_(.+?)_/g, "<em>$1</em>");
+  // 只匹配前后是空白、标点或行首行尾的 _，避免匹配 HTML 属性中的 _blank
+  result = result.replace(/(?<=^|[\s.,;:!?一-鿿])_(.+?)_(?=$|[\s.,;:!?一-鿿])/g, "<em>$1</em>");
   // 链接 [text](url)
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   return result;
@@ -284,4 +285,16 @@ function escapeHtml(text: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+/**
+ * HTML 属性值转义（用于 URL 等属性值）
+ * 注意：不对 & 进行转义，因为 URL 中的 & 是合法的查询参数分隔符
+ */
+function escapeHtmlAttr(text: string): string {
+  return text
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }

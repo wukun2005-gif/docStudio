@@ -33,9 +33,9 @@ peopleRouter.get("/", (_req, res) => {
 peopleRouter.get("/org-tree", (_req, res) => {
   try {
     const tree = getOrgTree();
-    const result: Record<string, Array<{ id: string; name: string; title?: string }>> = {};
+    const result: Record<string, Array<{ id: string; name: string; title?: string; email?: string }>> = {};
     for (const [dept, people] of tree) {
-      result[dept] = people.map((p) => ({ id: p.id, name: p.name, title: p.title }));
+      result[dept] = people.map((p) => ({ id: p.id, name: p.name, title: p.title, email: p.email }));
     }
     res.json({ ok: true, tree: result });
   } catch (err) {
@@ -93,6 +93,31 @@ peopleRouter.post("/", (req, res) => {
     addPerson({ id, name, title, department, email, attributes: attributes as PersonAttributes });
     logger.info(`[People] 添加人员: ${name}`);
     res.json({ ok: true, id });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** PUT /api/people/:id — 更新人员信息 */
+peopleRouter.put("/:id", (req, res) => {
+  try {
+    const existing = getPersonById(req.params.id);
+    if (!existing) {
+      res.status(404).json({ ok: false, error: "Person not found" });
+      return;
+    }
+    const { name, title, department, email } = req.body;
+    addPerson({
+      id: req.params.id,
+      name: name ?? existing.name,
+      title: title ?? existing.title,
+      department: department ?? existing.department,
+      email: email ?? existing.email,
+      attributes: existing.attributes,
+    });
+    logger.info(`[People] 更新人员: ${name ?? existing.name}`);
+    res.json({ ok: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ ok: false, error: msg });

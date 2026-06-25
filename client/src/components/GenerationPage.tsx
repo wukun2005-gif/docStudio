@@ -6,6 +6,7 @@ import OutlineEditor from "./OutlineEditor";
 import DocPreview, { type SectionData } from "./DocPreview";
 import { useCaseStore } from "../store/caseStore.js";
 import type { OutlineSection } from "../../../shared/src/types/generation.js";
+import type { TrustMetrics } from "../../../shared/src/types/evaluation.js";
 
 export default function GenerationPage() {
   const currentCase = useCaseStore((s) => s.currentCase);
@@ -14,6 +15,8 @@ export default function GenerationPage() {
   const updateWorkflowState = useCaseStore((s) => s.updateWorkflowState);
   const updateLastRunId = useCaseStore((s) => s.updateLastRunId);
   const createCase = useCaseStore((s) => s.createCase);
+  const updateUserRequest = useCaseStore((s) => s.updateUserRequest);
+  const updateTitle = useCaseStore((s) => s.updateTitle);
 
   const [localOutline, setLocalOutline] = useState<OutlineSection[]>([]);
   const [document, setDocument] = useState<string | null>(null);
@@ -24,6 +27,9 @@ export default function GenerationPage() {
   const [runId, setRunId] = useState<string | null>(null);
   const [dirtySections, setDirtySections] = useState<Set<number>>(new Set());
   const [regeneratingSections, setRegeneratingSections] = useState<Set<number>>(new Set());
+  const [evaluationMetrics, setEvaluationMetrics] = useState<TrustMetrics | null>(null);
+  const [evaluating, setEvaluating] = useState(false);
+  const [documentStyle, setDocumentStyle] = useState<string | undefined>(undefined);
 
   // 从 case 加载数据
   useEffect(() => {
@@ -32,6 +38,28 @@ export default function GenerationPage() {
       setDocument(currentCase.generatedContent ?? null);
       setTrustScore(currentCase.trustScore ?? null);
       setRunId(currentCase.lastRunId ?? null);
+      // 恢复 sections 来源详情（重启后从 provenance 重建）
+      if (currentCase.lastRunId) {
+        fetch(`/api/generation/${currentCase.lastRunId}/sections`)
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.ok && data.sections) {
+              setSections(data.sections);
+            }
+          })
+          .catch(() => { /* 静默失败，不影响主流程 */ });
+        // 恢复 documentStyle
+        fetch(`/api/generation/${currentCase.lastRunId}`)
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.ok && data.run?.document_style) {
+              setDocumentStyle(data.run.document_style);
+            }
+          })
+          .catch(() => { /* 静默失败 */ });
+      } else {
+        setSections([]);
+      }
     } else {
       setLocalOutline([]);
       setDocument(null);
@@ -39,13 +67,82 @@ export default function GenerationPage() {
       setSections([]);
       setRunId(null);
       setDirtySections(new Set());
+      setDocumentStyle(undefined);
     }
+    setEvaluationMetrics(null);
   }, [currentCase?.id]);
 
-  function handleOutlineRequest(suggested: Array<{ title: string; description?: string }>) {
+  // runId 变化时加载置信度评估（切换 case 时从 DB 读缓存，无缓存则触发新评估）
+  useEffect(() => {
+    if (!runId) { setEvaluationMetrics(null); return; }
+    let cancelled = false;
+
+    fetch(`/api/evaluation/${runId}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        if (data.ok && data.evaluations.length > 0) {
+          const cached = JSON.parse(data.evaluations[0].metrics);
+          // 检测全 0 缓存（旧的失败评估），当作无缓存处理
+          const isAllZero = cached.faithfulness === 0 && cached.groundedness === 0
+            && cached.coherence === 0 && cached.fluency === 0 && cached.completeness === 0;
+          if (isAllZero && document) {
+            triggerEvaluation(runId, document);
+          } else {
+            setEvaluationMetrics(cached);
+          }
+        } else if (document) {
+          // 无缓存 + 有文档 → 触发评估
+          triggerEvaluation(runId, document);
+        }
+      })
+      .catch(() => {
+        if (!cancelled && document) triggerEvaluation(runId, document);
+      });
+
+    return () => { cancelled = true; };
+  }, [runId]);
+
+  // 文档内容变化时重新评估（用户编辑后保存）
+  useEffect(() => {
+    if (!runId || !document) return;
+    // 首次加载不触发（由上面的 runId effect 处理）
+    if (!evaluationMetrics) return;
+    const timer = setTimeout(() => {
+      triggerEvaluation(runId, document);
+    }, 2000); // 防抖 2 秒
+    return () => clearTimeout(timer);
+  }, [document]);
+
+  async function triggerEvaluation(rid: string, content: string) {
+    setEvaluating(true);
+    const allSources = sections.flatMap((s) => s.sources);
+    try {
+      const res = await fetch("/api/evaluation/evaluate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId: rid, content, sources: allSources }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setEvaluationMetrics(data.metrics);
+        setTrustScore(data.trustScore);
+      }
+    } catch (err) {
+      console.error("Auto-evaluation failed:", err);
+    } finally {
+      setEvaluating(false);
+    }
+  }
+
+  function handleOutlineRequest(suggested: Array<{ title: string; description?: string }>, userRequest?: string) {
     if (!currentCase) {
-      const userReq = suggested.map((s) => s.title).join("、");
+      // 优先使用用户原始消息（如"写邮件"），而非大纲标题
+      const userReq = userRequest || suggested.map((s) => s.title).join("、");
       createCase(userReq);
+    } else if (userRequest) {
+      // 已有 case 时也更新 userRequest
+      updateUserRequest(userRequest);
     }
 
     const outlineData: OutlineSection[] = suggested.map((s, idx) => ({
@@ -68,7 +165,8 @@ export default function GenerationPage() {
   // 将 handleOutlineRequest 暴露给 ChatBox（通过 window 事件）
   useEffect(() => {
     function handleOutlineEvent(e: CustomEvent) {
-      handleOutlineRequest(e.detail);
+      const { outline, userRequest } = e.detail;
+      handleOutlineRequest(outline, userRequest);
     }
     window.addEventListener("outline-request" as any, handleOutlineEvent);
     return () => window.removeEventListener("outline-request" as any, handleOutlineEvent);
@@ -81,12 +179,15 @@ export default function GenerationPage() {
     setSections([]);
     updateWorkflowState("generating");
 
+    // 用 userRequest 作为标题（如"写邮件给苏楠"），而非大纲第一章节名
+    const docTitle = currentCase?.userRequest?.trim() || localOutline[0]?.title || "文档";
+
     try {
       const res = await fetch("/api/generation/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          title: localOutline[0]?.title ?? "文档",
+          title: docTitle,
           outline: localOutline,
           format: "html",
           userRequest: currentCase?.userRequest ?? localOutline[0]?.title ?? "",
@@ -107,9 +208,14 @@ export default function GenerationPage() {
         setTrustScore(data.trustScore);
         setSections(data.sections ?? []);
         setDirtySections(new Set());
+        setDocumentStyle(data.documentStyle);
         if (data.runId) {
           setRunId(data.runId);
           updateLastRunId(data.runId);
+        }
+        // 用服务端生成的文件名更新 case 标题
+        if (data.title) {
+          updateTitle(data.title);
         }
         updateGeneratedContent(data.content, data.trustScore);
         updateWorkflowState("completed");
@@ -245,14 +351,18 @@ export default function GenerationPage() {
       <DocPreview
         content={document}
         trustScore={trustScore}
+        evaluationMetrics={evaluationMetrics}
+        evaluating={evaluating}
         sections={sections}
         generating={generating}
         runId={runId}
         dirtySections={dirtySections}
         regeneratingSections={regeneratingSections}
+        documentStyle={documentStyle}
         onSectionUpdate={handleSectionUpdate}
         onSourceMove={handleSourceMove}
         onRegenerateSection={handleRegenerateSection}
+        onSave={(newContent) => setDocument(newContent)}
       />
     </div>
   );

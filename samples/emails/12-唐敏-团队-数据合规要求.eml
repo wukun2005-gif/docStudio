@@ -1,0 +1,30 @@
+From: 唐敏（法务顾问） <tangmin@nexora-tech.com>
+To: 团队全体 <team@nexora-tech.com>
+Date: 2026-06-23（周一）09:00
+Subject: GDPR 合规检查清单 - 请各部门确认
+MIME-Version: 1.0
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+大家好，
+
+为确保 i-Write 满足 GDPR 合规要求，请各部门确认以下清单：
+
+技术部（陈强）：
+- [x] API Key 加密存储（AES-256-GCM）
+- [x] 审计日志记录所有写操作
+- [ ] 数据导出功能（用户可导出所有数据）
+- [ ] 数据删除功能（用户可请求删除所有数据）
+
+产品部（苏楠）：
+- [ ] 隐私政策页面
+- [ ] Cookie 同意弹窗
+- [ ] 用户授权流程
+
+市场部（王莉）：
+- [ ] 隐私政策链接（Landing page）
+- [ ] 数据处理说明（用户文档）
+
+请在 7/1 前完成标记为 [ ] 的项目。
+
+唐敏

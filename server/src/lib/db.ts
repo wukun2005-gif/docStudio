@@ -202,6 +202,18 @@ function migrate(db: Database.Database): void {
     // 表可能还不存在，CREATE TABLE 已经处理了
   }
 
+  // 增量迁移：generation_runs 添加 document_style 列
+  try {
+    const runCols = db.prepare("PRAGMA table_info(generation_runs)").all() as Array<{ name: string }>;
+    const runColNames = new Set(runCols.map((c) => c.name));
+    if (!runColNames.has("document_style")) {
+      db.exec("ALTER TABLE generation_runs ADD COLUMN document_style TEXT");
+      logger.info("[DB] Migration: added generation_runs.document_style");
+    }
+  } catch (e) {
+    // 表可能还不存在，CREATE TABLE 已经处理了
+  }
+
   // 设置版本号
   if (versionRow < 2) {
     db.pragma("user_version = 2");

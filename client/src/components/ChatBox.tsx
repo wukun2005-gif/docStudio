@@ -171,8 +171,8 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
           if (onOutlineRequest) {
             onOutlineRequest(data.suggestedOutline);
           } else {
-            // 跨组件通信：通过 window event
-            window.dispatchEvent(new CustomEvent("outline-request", { detail: data.suggestedOutline }));
+            // 跨组件通信：通过 window event，附带用户原始消息
+            window.dispatchEvent(new CustomEvent("outline-request", { detail: { outline: data.suggestedOutline, userRequest: input } }));
           }
         }
       }

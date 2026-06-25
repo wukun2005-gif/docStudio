@@ -11,6 +11,7 @@
 import { useState, useRef, useMemo, useCallback } from "react";
 import DOMPurify from "dompurify";
 import type { OutlineSection } from "../../../shared/src/types/generation.js";
+import type { TrustMetrics } from "../../../shared/src/types/evaluation.js";
 
 export interface SectionData {
   title: string;
@@ -32,39 +33,84 @@ interface PendingDrop {
 interface DocPreviewProps {
   content: string | null;
   trustScore: number | null;
+  evaluationMetrics?: TrustMetrics | null;
+  evaluating?: boolean;
   sections: SectionData[];
   generating: boolean;
   runId?: string | null;
   dirtySections?: Set<number>;
   regeneratingSections?: Set<number>;
+  documentStyle?: string;
   onSectionClick?: (sectionIdx: number) => void;
   onSectionUpdate?: (sectionIdx: number, updated: SectionData) => void;
   onSourceMove?: (fromSectionIdx: number, sourceIdx: number, toSectionIdx: number, type?: string, mode?: "move" | "copy") => void;
   onRegenerateSection?: (sectionIdx: number) => void;
+  onSave?: (content: string) => void;
 }
 
 export default function DocPreview({
-  content, trustScore, sections, generating, runId,
-  dirtySections, regeneratingSections,
-  onSectionClick, onSectionUpdate, onSourceMove, onRegenerateSection,
+  content, trustScore, evaluationMetrics, evaluating, sections, generating, runId,
+  dirtySections, regeneratingSections, documentStyle,
+  onSectionClick, onSectionUpdate, onSourceMove, onRegenerateSection, onSave,
 }: DocPreviewProps) {
   const [activeSection, setActiveSection] = useState<number | null>(null);
   const [dragOverSection, setDragOverSection] = useState<number | null>(null);
   const [pendingDrop, setPendingDrop] = useState<PendingDrop | null>(null);
+  const [showMetrics, setShowMetrics] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editedContent, setEditedContent] = useState("");
+  const [saving, setSaving] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // DOMPurify 净化
+  // DOMPurify 净化 + 段落标记
   const sanitizedContent = useMemo(() => {
     if (!content) return null;
-    return DOMPurify.sanitize(content, {
+    const clean = DOMPurify.sanitize(content, {
       ADD_TAGS: ["h1", "h2", "h3", "h4", "h5", "h6"],
-      ADD_ATTR: ["target", "rel", "class", "title"],
+      ADD_ATTR: ["target", "rel", "class", "title", "id"],
+    });
+    // 给段落元素添加 id，供 insight 中的 [¶N] 引用跳转
+    let paraIdx = 0;
+    return clean.replace(/<(p|h[1-6]|li|div|section)(\s|>)/gi, (match, tag, after) => {
+      paraIdx++;
+      return `<${tag} id="para-${paraIdx}"${after}`;
     });
   }, [content]);
 
   function handleSectionClick(idx: number) {
     setActiveSection(activeSection === idx ? null : idx);
     onSectionClick?.(idx);
+  }
+
+  // ── 段落跳转 ──
+  function scrollToPara(paraNum: string) {
+    const el = document.getElementById(`para-${paraNum}`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.style.transition = "background-color 0.3s";
+      el.style.backgroundColor = "#fef9c3"; // yellow-100
+      setTimeout(() => { el.style.backgroundColor = ""; }, 2000);
+    }
+  }
+
+  // 将 insight 文本中的 [¶N] 渲染为可点击链接
+  function renderInsight(text: string) {
+    const parts = text.split(/(\[¶\d+\])/g);
+    return parts.map((part, i) => {
+      const match = part.match(/\[¶(\d+)\]/);
+      if (match) {
+        return (
+          <button
+            key={i}
+            onClick={() => scrollToPara(match[1])}
+            className="text-blue-600 hover:underline font-medium cursor-pointer"
+          >
+            [¶{match[1]}]
+          </button>
+        );
+      }
+      return <span key={i}>{part}</span>;
+    });
   }
 
   // ── 删除来源 ──
@@ -139,24 +185,226 @@ export default function DocPreview({
     setPendingDrop(null);
   }, [pendingDrop, onSourceMove]);
 
+  // ── HTML ↔ 纯文本转换 ──
+  function htmlToPlainText(html: string): string {
+    // 用临时 div 解析 HTML，提取纯文本
+    const tmp = document.createElement("div");
+    tmp.innerHTML = html;
+    // 将 <br> / </p> / </div> / </h1-h6> / </li> 转为换行
+    tmp.innerHTML = tmp.innerHTML
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(p|div|h[1-6]|li|section|tr)>/gi, "\n")
+      .replace(/<li[^>]*>/gi, "• ");
+    // 去掉所有标签
+    const text = tmp.textContent || tmp.innerText || "";
+    // 合并多余空行
+    return text.replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  function plainTextToHtml(text: string): string {
+    // 按空行分段，每段包 <p>
+    const paragraphs = text.split(/\n\s*\n/);
+    return paragraphs
+      .map((p) => {
+        const lines = p.split("\n").map((l) => l.trim()).filter(Boolean);
+        return `<p>${lines.join("<br/>")}</p>`;
+      })
+      .join("\n");
+  }
+
+  // ── 编辑 ──
+  async function handleSave() {
+    if (!runId) return;
+    setSaving(true);
+    try {
+      // 纯文本 → HTML 再保存
+      const htmlContent = plainTextToHtml(editedContent);
+      await fetch(`/api/generation/${runId}/content`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: htmlContent }),
+      });
+      onSave?.(htmlContent);
+      setEditing(false);
+    } catch (err) {
+      console.error("Save failed:", err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ── 导出 ──
+  function handleExport(format: string) {
+    if (!runId) return;
+    window.open(`/api/generation/${runId}/export/${format}`, "_blank");
+  }
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-white">
       {/* Header */}
-      <div className="px-5 py-3 border-b flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-3">
-          <span className="font-medium text-gray-700">📄 文档预览</span>
-          {sections.length > 0 && (
-            <span className="text-xs text-gray-400">{sections.length} 个章节</span>
+      <div className="shrink-0 border-b bg-white">
+        <div className="px-5 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="font-medium text-gray-700">📄 文档预览</span>
+            {sections.length > 0 && (
+              <span className="text-xs text-gray-400">{sections.length} 个章节</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {/* 编辑按钮 */}
+            {content && runId && !editing && (
+              <button
+                onClick={() => { setEditing(true); setEditedContent(htmlToPlainText(content)); }}
+                className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100 transition-colors"
+              >
+                ✏️ 编辑
+              </button>
+            )}
+            {editing && (
+              <>
+                <button
+                  onClick={handleSave}
+                  disabled={saving}
+                  className="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 transition-colors"
+                >
+                  {saving ? "保存中..." : "💾 保存"}
+                </button>
+                <button
+                  onClick={() => { setEditing(false); setEditedContent(""); }}
+                  className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100 transition-colors"
+                >
+                  取消
+                </button>
+              </>
+            )}
+            {/* 导出按钮 */}
+            {runId && !editing && (
+              <div className="flex gap-1">
+                <button
+                  onClick={() => handleExport("docx")}
+                  className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100 transition-colors"
+                  title="导出 Word"
+                >
+                  📄 Word
+                </button>
+                <button
+                  onClick={() => handleExport("pptx")}
+                  className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100 transition-colors"
+                  title="导出 PPT"
+                >
+                  📊 PPT
+                </button>
+                <button
+                  onClick={() => handleExport("xlsx")}
+                  className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100 transition-colors"
+                  title="导出 Excel"
+                >
+                  📈 Excel
+                </button>
+                <button
+                  onClick={() => handleExport("eml")}
+                  className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100 transition-colors"
+                  title="导出 Outlook 邮件 (.eml)"
+                >
+                  📧 Outlook
+                </button>
+              </div>
+            )}
+          {trustScore !== null && (
+            <button
+              onClick={() => setShowMetrics(!showMetrics)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors hover:opacity-80 ${
+                evaluating ? "bg-blue-100 text-blue-700" :
+                trustScore >= 0.8 ? "bg-green-100 text-green-700" :
+                trustScore >= 0.5 ? "bg-yellow-100 text-yellow-700" :
+                "bg-red-100 text-red-700"
+              }`}
+            >
+              {evaluating ? (
+                <>
+                  <span className="animate-spin inline-block w-3 h-3 border border-blue-400 border-t-transparent rounded-full" />
+                  评估中...
+                </>
+              ) : (
+                <>
+                  置信度 {(trustScore * 100).toFixed(0)}%
+                  <span className="text-[10px]">{showMetrics ? "▲" : "▼"}</span>
+                </>
+              )}
+            </button>
           )}
+          </div>
         </div>
-        {trustScore !== null && (
-          <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
-            trustScore >= 0.8 ? "bg-green-100 text-green-700" :
-            trustScore >= 0.5 ? "bg-yellow-100 text-yellow-700" :
-            "bg-red-100 text-red-700"
-          }`}>
-            信任度 {(trustScore * 100).toFixed(0)}%
-          </span>
+
+        {/* 置信度详情面板 */}
+        {showMetrics && (evaluating && !evaluationMetrics) && (
+          <div className="px-5 pb-4 border-t bg-gray-50">
+            <div className="pt-3 flex items-center gap-2 text-sm text-gray-500">
+              <span className="animate-spin inline-block w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full" />
+              正在分析文档质量，请稍候...
+            </div>
+          </div>
+        )}
+        {showMetrics && evaluationMetrics && (
+          <div className="px-5 pb-4 border-t bg-gray-50">
+            <div className="pt-3">
+              {/* 推荐操作 */}
+              {trustScore !== null && trustScore < 0.8 && (
+                <div className={`mb-3 px-3 py-2 rounded-lg text-xs ${
+                  trustScore >= 0.5 ? "bg-yellow-50 text-yellow-800 border border-yellow-200" :
+                  "bg-red-50 text-red-800 border border-red-200"
+                }`}>
+                  {trustScore >= 0.5
+                    ? "⚠️ 文档整体可用，但建议先改进下方标红的指标再发布"
+                    : "❌ 置信度较低，建议补充知识源或重新生成后再使用"
+                  }
+                </div>
+              )}
+
+              {/* 5 个指标 */}
+              <div className="space-y-2">
+                {([
+                  ["faithfulness", "事实忠实度", "faithfulness_insight"],
+                  ["groundedness", "有据可查度", "groundedness_insight"],
+                  ["coherence", "逻辑连贯性", "coherence_insight"],
+                  ["fluency", "语言流畅性", "fluency_insight"],
+                  ["completeness", "内容完整度", "completeness_insight"],
+                ] as const).map(([key, label, insightKey]) => {
+                  const score = evaluationMetrics[key];
+                  const insight = evaluationMetrics[insightKey];
+                  return (
+                    <div key={key} className="flex items-start gap-3">
+                      <span className="text-xs text-gray-500 w-20 shrink-0 pt-0.5">{label}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 bg-gray-200 rounded-full h-1.5">
+                            <div
+                              className={`h-1.5 rounded-full ${
+                                score >= 0.8 ? "bg-green-500" :
+                                score >= 0.5 ? "bg-yellow-500" :
+                                "bg-red-500"
+                              }`}
+                              style={{ width: `${score * 100}%` }}
+                            />
+                          </div>
+                          <span className={`text-xs font-medium w-8 text-right ${
+                            score >= 0.8 ? "text-green-600" :
+                            score >= 0.5 ? "text-yellow-600" :
+                            "text-red-600"
+                          }`}>
+                            {(score * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                        {insight && (
+                          <p className="text-[11px] text-gray-500 mt-0.5">{renderInsight(insight)}</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         )}
       </div>
 
@@ -172,11 +420,20 @@ export default function DocPreview({
           </div>
         ) : sanitizedContent ? (
           <div className="p-6" ref={containerRef}>
-            {/* 渲染净化后的 HTML 内容 */}
-            <div
-              className="doc-content max-w-none"
-              dangerouslySetInnerHTML={{ __html: sanitizedContent }}
-            />
+            {/* 编辑模式：textarea */}
+            {editing ? (
+              <textarea
+                value={editedContent}
+                onChange={(e) => setEditedContent(e.target.value)}
+                className="w-full h-full min-h-[400px] border rounded-lg p-4 font-sans text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            ) : (
+              /* 渲染净化后的 HTML 内容 */
+              <div
+                className="doc-content max-w-none"
+                dangerouslySetInnerHTML={{ __html: sanitizedContent }}
+              />
+            )}
 
             {/* 🌳 章节来源详情（可展开、支持拖拽和删除） */}
             {sections.length > 0 && (

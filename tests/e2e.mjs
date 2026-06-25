@@ -89,7 +89,7 @@ async function testChatPipeline() {
   let outline = null;
   await test("POST /api/chat — 大纲生成", async () => {
     const res = await api("POST", "/api/chat", {
-      message: "向王芳写一封邮件，汇报最近一周在做什么产品",
+      message: "向苏楠写一封邮件，汇报最近一周在做什么产品",
       apiKey: mimoKey,
     });
     if (!res.ok) throw new Error(`chat failed: ${res.status} ${JSON.stringify(res.data)}`);
@@ -139,11 +139,11 @@ async function testFullDocGeneration() {
   let genResult = null;
   await test("POST /api/generation/generate — 多章节邮件生成", async () => {
     genResult = await api("POST", "/api/generation/generate", {
-      title: "向王芳汇报工作进展",
+      title: "向苏楠汇报工作进展",
       outline,
       format: "html",
       documentStyle: "email",
-      userRequest: "向王芳写一封邮件，汇报最近一周在做什么产品",
+      userRequest: "向苏楠写一封邮件，汇报最近一周在做什么产品",
       apiKey: mimoKey,
     }, 300_000);
     if (!genResult.ok) throw new Error(`generate failed: ${genResult.status} ${JSON.stringify(genResult.data)}`);

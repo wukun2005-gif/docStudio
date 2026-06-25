@@ -523,7 +523,31 @@ knowledgeRouter.get("/sources/:id/file", (req, res) => {
       return res.status(404).json({ ok: false, error: "知识源不存在" });
     }
     if (!source.file_path) {
-      return res.status(404).json({ ok: false, error: "该知识源无原始文件" });
+      // 无原始文件路径时，从数据库 chunks 重建内容返回
+      const chunks = db.prepare("SELECT content FROM kb_chunks WHERE sourceId = ? ORDER BY chunkIndex").all(req.params.id) as { content: string }[];
+      if (chunks.length === 0) {
+        return res.status(404).json({ ok: false, error: "该知识源无原始文件" });
+      }
+      const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>${source.name}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.8; color: #333; }
+    h1 { font-size: 1.5em; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; }
+    p { margin: 12px 0; white-space: pre-wrap; }
+    .chunk { margin: 16px 0; padding: 12px; background: #f8fafc; border-left: 3px solid #3b82f6; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>${source.name}</h1>
+  ${chunks.map(c => `<div class="chunk"><p>${c.content.replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>")}</p></div>`).join("\n")}
+</body>
+</html>`;
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(source.name)}.html"`);
+      return res.send(html);
     }
 
     // 在 samples 目录下查找文件（可能在子目录中）
@@ -548,7 +572,31 @@ knowledgeRouter.get("/sources/:id/file", (req, res) => {
     }
 
     if (!filePath || !fs.existsSync(filePath)) {
-      return res.status(404).json({ ok: false, error: "文件不存在" });
+      // 没有物理文件时，从数据库 chunks 重建内容返回
+      const chunks = db.prepare("SELECT content FROM kb_chunks WHERE sourceId = ? ORDER BY chunkIndex").all(req.params.id) as { content: string }[];
+      if (chunks.length === 0) {
+        return res.status(404).json({ ok: false, error: "文件不存在" });
+      }
+      const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>${source.name}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.8; color: #333; }
+    h1 { font-size: 1.5em; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; }
+    p { margin: 12px 0; white-space: pre-wrap; }
+    .chunk { margin: 16px 0; padding: 12px; background: #f8fafc; border-left: 3px solid #3b82f6; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>${source.name}</h1>
+  ${chunks.map(c => `<div class="chunk"><p>${c.content.replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>")}</p></div>`).join("\n")}
+</body>
+</html>`;
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(source.name)}.html"`);
+      return res.send(html);
     }
 
     // 设置 Content-Disposition 为 inline 让浏览器预览，而不是下载

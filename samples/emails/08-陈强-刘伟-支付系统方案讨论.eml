@@ -1,0 +1,26 @@
+From: 陈强（技术负责人） <chenqiang@nexora-tech.com>
+To: 刘伟（高级后端工程师） <liuwei@nexora-tech.com>
+Date: 2026-06-19（周四）09:00
+Subject: 支付系统技术方案 - 初稿讨论
+MIME-Version: 1.0
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+刘伟，
+
+支付系统技术方案初稿写好了，主要设计：
+
+1. 支付 Provider: Stripe（国际）+ 支付宝/微信支付（国内）
+2. 订阅模式: 月付 / 年付 / 团队版
+3. 账单管理: 自动生成发票、账单历史
+
+技术要点：
+- 使用 Stripe Checkout Session 简化集成
+- Webhook 验证支付状态
+- 订阅状态同步到用户配置
+
+详细文档：[OneDrive: 支付系统技术方案 v1.docx]
+
+你看看有没有遗漏的场景，明天设计评审讨论。
+
+陈强

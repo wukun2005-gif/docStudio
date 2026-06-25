@@ -34,7 +34,7 @@ async function main() {
       process.exit(1);
     }
 
-    const userRequest = "向王芳写一封邮件，汇报最近一周在做什么产品，为啥要做，现在做到了什么程度。还有附上从2026年到今天为止全球最火的3个竞品的简介。";
+    const userRequest = "向苏楠写一封邮件，汇报最近一周在做什么产品，为啥要做，现在做到了什么程度。还有附上从2026年到今天为止全球最火的3个竞品的简介。";
 
     console.log("2. 调用文档生成 API...");
     console.log(`   用户需求: ${userRequest}\n`);

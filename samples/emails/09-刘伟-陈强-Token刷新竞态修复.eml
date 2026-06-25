@@ -1,0 +1,22 @@
+From: 刘伟（高级后端工程师） <liuwei@nexora-tech.com>
+To: 陈强（技术负责人） <chenqiang@nexora-tech.com>
+Date: 2026-06-19（周四）18:00
+Subject: BUG-215 已修复 - Token 刷新竞态问题
+MIME-Version: 1.0
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+陈强，
+
+BUG-215（Token 刷新时偶尔 401）已修复。
+
+解决方案：
+1. Token 刷新时设置 isRefreshing 标志
+2. 后续请求检测到 isRefreshing 时，加入等待队列
+3. Token 刷新完成后，用新 Token 重发队列中的请求
+
+PR: #132 — fix: token refresh race condition
+
+测试通过，并发 100 个请求不会出现 401。
+
+刘伟

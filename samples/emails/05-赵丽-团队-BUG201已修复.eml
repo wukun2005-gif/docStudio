@@ -1,0 +1,17 @@
+From: 赵丽（高级前端工程师） <zhaoli@nexora-tech.com>
+To: 团队全体 <team@nexora-tech.com>
+Date: 2026-06-17（周二）16:30
+Subject: BUG-201 已修复 - Safari 登录页面样式
+MIME-Version: 1.0
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+大家好，
+
+BUG-201（Safari 下登录页面样式错乱）已修复。
+
+原因：Safari 对 flexbox gap 属性的支持问题，改用 margin 替代。
+
+PR: #128 — fix: safari login page layout
+
+赵丽

@@ -1,0 +1,32 @@
+From: 李鑫（客户成功经理） <lixin@nexora-tech.com>
+To: 黄薇（高级产品经理） <huangwei@nexora-tech.com>
+Date: 2026-06-25（周三）16:00
+Subject: Beta 用户反馈汇总 - 3 个用户
+MIME-Version: 1.0
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+黄薇，
+
+Beta 用户反馈汇总：
+
+用户 A（PM，NPS 9/10）：
+- 最喜欢：溯源功能，能看到每段话的来源
+- 建议：支持更多知识源类型（Confluence、Notion）
+- 使用频率：每天 2-3 次
+
+用户 B（Engineer，NPS 8/10）：
+- 最喜欢：RAG 检索准确率高
+- 建议：支持代码片段生成
+- 使用频率：每天 1 次
+
+用户 C（Consultant，NPS 7/10）：
+- 最喜欢：文档生成速度快
+- 建议：支持自定义模板
+- 使用频率：每周 3-4 次
+
+平均 NPS: 8.0/10
+
+建议优先处理：Confluence/Notion 集成（用户 A 的需求代表 PM 群体）。
+
+李鑫

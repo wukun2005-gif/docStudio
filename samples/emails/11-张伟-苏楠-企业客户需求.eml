@@ -1,0 +1,26 @@
+From: 张伟（企业销售经理） <zhangwei@nexora-tech.com>
+To: 苏楠（产品总监） <sunan@nexora-tech.com>
+Date: 2026-06-20（周五）10:00
+Subject: Acme Corp 客户需求清单 - 请评审
+MIME-Version: 1.0
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+苏楠，
+
+Acme Corp（200 人团队）的需求清单整理好了，他们对 i-Write 非常感兴趣：
+
+核心需求：
+1. SSO 集成 — 必须支持 Azure AD（已有）
+2. 批量文档生成 — 一次生成 50+ 份文档
+3. 团队权限管理 — Admin/Editor/Viewer 三级权限
+4. API 接入 — 通过 API 集成到现有系统
+5. 数据安全 — 必须满足 SOC 2 Type II
+
+预算：$49/人/月 × 200 人 = $9,800/月（$117,600/年）
+
+时间线：希望 7 月底前开始试用，8 月底正式上线。
+
+请评审需求优先级，我下周安排技术 demo。
+
+张伟

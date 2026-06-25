@@ -78,7 +78,7 @@ export default function DocumentViewer({ content, runId, trustScore, onSave }: D
               trustScore >= 0.5 ? "bg-yellow-100 text-yellow-700" :
               "bg-red-100 text-red-700"
             }`}>
-              信任度: {(trustScore * 100).toFixed(0)}%
+              置信度: {(trustScore * 100).toFixed(0)}%
             </span>
           )}
 

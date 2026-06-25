@@ -121,8 +121,8 @@ describe("PeopleGraph 模块", () => {
   });
 
   it("addPerson / getAllPeople", () => {
-    addPerson({ id: "p1", name: "张三", title: "工程师", department: "技术部" });
-    addPerson({ id: "p2", name: "李四", title: "产品经理", department: "产品部" });
+    addPerson({ id: "p1", name: "陈强", title: "工程师", department: "技术部" });
+    addPerson({ id: "p2", name: "刘伟", title: "产品经理", department: "产品部" });
     const people = getAllPeople();
     expect(people).toHaveLength(2);
   });
@@ -130,7 +130,7 @@ describe("PeopleGraph 模块", () => {
   it("getPersonById", () => {
     const person = getPersonById("p1");
     expect(person).toBeDefined();
-    expect(person!.name).toBe("张三");
+    expect(person!.name).toBe("陈强");
   });
 
   it("getOrgTree 按部门分组", () => {
@@ -147,7 +147,7 @@ describe("PeopleGraph 模块", () => {
 
   it("getPersonContext 返回上下文信息", () => {
     const ctx = getPersonContext("p1");
-    expect(ctx).toContain("张三");
+    expect(ctx).toContain("陈强");
     expect(ctx).toContain("工程师");
     expect(ctx).toContain("技术部");
   });
@@ -165,20 +165,20 @@ describe("Sample Data 注入", () => {
   it("injectSampleData 注入周报数据", () => {
     injectSampleData();
     const stats = getStats();
-    expect(stats.sourceCount).toBe(3); // 3 份周报/规划文档
+    expect(stats.sourceCount).toBe(8); // 4 份周报 + 技术方案 + 产品规划 + 架构设计 + 合规方案
     expect(stats.chunkCount).toBeGreaterThan(0);
   });
 
   it("injectSampleData 重复调用不重复注入", () => {
     injectSampleData(); // 第二次调用
     const stats = getStats();
-    expect(stats.sourceCount).toBe(3); // 仍然是 3
+    expect(stats.sourceCount).toBe(8); // 仍然是 8
   });
 
   it("injectDemoPeople 注入组织架构", () => {
     injectDemoPeople();
     const people = getAllPeople();
-    expect(people.length).toBe(7); // 张明CEO, 李华CTO, 王芳产品总监, 陈强技术负责人, 赵丽前端, 刘伟后端, 孙娜数据科学家
-    expect(people.find((p) => p.name === "张明")).toBeDefined(); // CEO
+    expect(people.length).toBe(18); // 完整团队：管理层3 + 产品2 + 技术8 + 设计2 + 市场销售2 + 法务1 + 客户成功1
+    expect(people.find((p) => p.name === "陈宇")).toBeDefined(); // CEO
   });
 });

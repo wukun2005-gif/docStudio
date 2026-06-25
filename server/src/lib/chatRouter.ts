@@ -26,11 +26,17 @@ export interface ChatResponse {
 
 /** 判断用户意图 */
 async function classifyIntent(message: string): Promise<"simple" | "document" | "unclear"> {
-  const documentKeywords = ["生成", "写", "文档", "报告", "周报", "总结", "方案", "PPT", "Excel", "大纲", "邮件", "信"];
-  const hasDocumentKeyword = documentKeywords.some((kw) => message.includes(kw));
+  // 强意图关键词：即使很短也直接判定为 document
+  const strongKeywords = ["邮件", "email", "PPT", "Excel", "周报", "月报", "年报", "报告", "方案", "大纲"];
+  const hasStrongKeyword = strongKeywords.some((kw) => message.toLowerCase().includes(kw.toLowerCase()));
+  if (hasStrongKeyword) return "document";
 
-  if (hasDocumentKeyword && message.length > 10) return "document";
-  if (message.length < 5) return "unclear";
+  // 一般文档关键词：需要更长的消息
+  const documentKeywords = ["生成", "写", "文档", "总结", "计划", "通知", "邀请函"];
+  const hasDocumentKeyword = documentKeywords.some((kw) => message.includes(kw));
+  if (hasDocumentKeyword && message.length > 5) return "document";
+
+  if (message.length < 3) return "unclear";
   return "simple";
 }
 

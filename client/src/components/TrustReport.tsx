@@ -98,7 +98,7 @@ export default function TrustReport({ runId, onOptimize }: TrustReportProps) {
             <span className="text-gray-400">--</span>
           )}
         </div>
-        <div className="text-sm text-gray-500">综合信任度</div>
+        <div className="text-sm text-gray-500">综合置信度</div>
         {!metrics && (
           <button
             onClick={handleEvaluate}

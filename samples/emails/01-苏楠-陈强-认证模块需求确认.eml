@@ -1,0 +1,22 @@
+From: 苏楠（产品总监） <sunan@nexora-tech.com>
+To: 陈强（技术负责人） <chenqiang@nexora-tech.com>
+Date: 2026-06-15（周日）20:30
+Subject: 认证模块需求确认 - 请周一评审前看一下
+MIME-Version: 1.0
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+陈强你好，
+
+明天下午的认证模块需求评审，我把需求文档整理好了，主要变化：
+
+1. 新增 Microsoft OAuth2 支持 — 之前只计划了 GitHub OAuth，但考虑到我们的目标用户很多用 Microsoft 365，需要加上
+2. Token 刷新策略调整 — 从 2 小时改为 1 小时，安全性更高
+3. 多账号绑定 — 用户可以同时绑定 Microsoft 和 GitHub 账号
+
+另外，设计团队（罗茜）已经出了登录页面的初稿，评审时一起看。
+
+需求文档链接：[OneDrive: 认证模块 PRD v2.pdf]
+
+Best,
+苏楠

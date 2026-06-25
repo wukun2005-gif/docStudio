@@ -129,7 +129,7 @@ export function formatSuggestionForUser(suggestion: ProactiveSuggestion): string
 
   if (suggestion.generatedContent && trustScore !== undefined) {
     message += `**预览**:\n${suggestion.generatedContent.slice(0, 300)}...\n\n`;
-    message += `📊 信任度: ${trustScore.toFixed(2)}\n\n`;
+    message += `📊 置信度: ${trustScore.toFixed(2)}\n\n`;
     message += `[查看完整文档]  [编辑后使用]  [忽略]`;
   }
 

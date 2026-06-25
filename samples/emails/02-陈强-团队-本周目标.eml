@@ -1,0 +1,30 @@
+From: 陈强（技术负责人） <chenqiang@nexora-tech.com>
+To: 团队全体 <team@nexora-tech.com>
+Date: 2026-06-16（周一）08:00
+Subject: 本周目标 - 认证模块 + Bug 修复
+MIME-Version: 1.0
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+大家好，
+
+本周目标：
+
+1. 认证模块开发（优先级 P0）
+   - OAuth2 基础框架 — 陈强
+   - Microsoft OAuth2 — 陈强、刘伟
+   - GitHub OAuth — 刘伟
+   - 登录页面 UI — 赵丽
+   - E2E 测试 — 杨飞
+
+2. Bug 修复（优先级 P0）
+   - BUG-201: Safari 样式问题 — 赵丽
+   - BUG-205: Token 刷新失败 — 刘伟
+   - BUG-210: 密码重置延迟 — 刘伟
+
+3. 支付系统技术方案（优先级 P1）
+   - 初稿 — 陈强、刘伟
+
+请各位确认任务分配，有问题今天 Standup 讨论。
+
+陈强

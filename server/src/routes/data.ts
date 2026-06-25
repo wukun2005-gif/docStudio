@@ -27,11 +27,44 @@ dataRouter.get("/:store", (req, res) => {
     }>;
 
     const records: Array<Record<string, unknown>> = [];
+    const needsTitleFix: Array<{ record: Record<string, unknown>; recordId: string }> = [];
     for (const row of rows) {
       try {
-        records.push({ id: row.record_id, ...JSON.parse(row.data) });
+        const parsed = JSON.parse(row.data);
+        const record = { id: row.record_id, ...parsed };
+        records.push(record);
+        // 收集需要修正标题的 case
+        if (store === "cases" && (!record.title || record.title === "新文档") && record.createdAt) {
+          needsTitleFix.push({ record, recordId: row.record_id });
+        }
       } catch {
         logger.warn(`[Data] Corrupted JSON in store=${store} record=${row.record_id}, skipping`);
+      }
+    }
+
+    // 动态修正 case 标题：用最近的 generation run 标题
+    if (needsTitleFix.length > 0) {
+      const runs = db.prepare("SELECT id, title, created_at FROM generation_runs WHERE title IS NOT NULL AND title != '' AND title != '新文档' ORDER BY created_at DESC").all() as Array<{ id: string; title: string; created_at: string }>;
+      const caseUpdateStmt = db.prepare("UPDATE sync_data SET data = ?, updated_at = datetime('now','localtime') WHERE store_name = 'cases' AND record_id = ?");
+      for (const { record, recordId } of needsTitleFix) {
+        const caseTime = new Date(record.createdAt as string).getTime() / 1000;
+        let bestTitle = "";
+        let bestDiff = Infinity;
+        for (const run of runs) {
+          const runTime = new Date(run.created_at).getTime() / 1000;
+          const diff = Math.abs(runTime - caseTime);
+          if (diff < bestDiff) {
+            bestDiff = diff;
+            bestTitle = run.title;
+          }
+        }
+        if (bestTitle && bestDiff < 86400) {
+          record.title = bestTitle;
+          const fullData = { ...record };
+          delete fullData.id;
+          caseUpdateStmt.run(JSON.stringify(fullData), recordId);
+          logger.info(`[Data] 动态修正 case 标题: "新文档" → "${bestTitle}" (case: ${record.id})`);
+        }
       }
     }
 

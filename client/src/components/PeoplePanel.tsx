@@ -11,9 +11,11 @@ interface Person {
 
 export default function PeoplePanel() {
   const [people, setPeople] = useState<Person[]>([]);
-  const [orgTree, setOrgTree] = useState<Record<string, Array<{ id: string; name: string; title?: string }>>>({});
+  const [orgTree, setOrgTree] = useState<Record<string, Array<{ id: string; name: string; title?: string; email?: string }>>>({});
   const [showAdd, setShowAdd] = useState(false);
   const [newPerson, setNewPerson] = useState({ name: "", title: "", department: "", email: "" });
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState({ name: "", title: "", department: "", email: "" });
 
   useEffect(() => {
     loadData();
@@ -55,6 +57,26 @@ export default function PeoplePanel() {
       loadData();
     } catch (err) {
       console.error("Delete failed:", err);
+    }
+  }
+
+  function startEdit(p: Person) {
+    setEditingId(p.id);
+    setEditForm({ name: p.name, title: p.title ?? "", department: p.department ?? "", email: p.email ?? "" });
+  }
+
+  async function handleUpdate() {
+    if (!editingId || !editForm.name.trim()) return;
+    try {
+      await fetch(`/api/people/${editingId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editForm),
+      });
+      setEditingId(null);
+      loadData();
+    } catch (err) {
+      console.error("Update failed:", err);
     }
   }
 
@@ -129,6 +151,7 @@ export default function PeoplePanel() {
                       <div>
                         <div className="text-sm font-medium">{p.name}</div>
                         {p.title && <div className="text-xs text-gray-500">{p.title}</div>}
+                        {p.email && <div className="text-xs text-gray-400">{p.email}</div>}
                       </div>
                     </div>
                   ))}
@@ -147,26 +170,73 @@ export default function PeoplePanel() {
         ) : (
           <div className="divide-y">
             {people.map((p) => (
-              <div key={p.id} className="px-4 py-3 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-medium">
-                    {p.name[0]}
+              editingId === p.id ? (
+                <div key={p.id} className="px-4 py-3 bg-blue-50">
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    <input
+                      placeholder="姓名 *"
+                      value={editForm.name}
+                      onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                      className="border rounded px-3 py-2 text-sm"
+                    />
+                    <input
+                      placeholder="职位"
+                      value={editForm.title}
+                      onChange={(e) => setEditForm({ ...editForm, title: e.target.value })}
+                      className="border rounded px-3 py-2 text-sm"
+                    />
+                    <input
+                      placeholder="部门"
+                      value={editForm.department}
+                      onChange={(e) => setEditForm({ ...editForm, department: e.target.value })}
+                      className="border rounded px-3 py-2 text-sm"
+                    />
+                    <input
+                      placeholder="邮箱"
+                      value={editForm.email}
+                      onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
+                      className="border rounded px-3 py-2 text-sm"
+                    />
                   </div>
-                  <div>
-                    <div className="font-medium">{p.name}</div>
-                    <div className="text-sm text-gray-500">
-                      {[p.title, p.department].filter(Boolean).join(" · ")}
-                      {p.email && ` · ${p.email}`}
-                    </div>
+                  <div className="flex gap-2">
+                    <button onClick={handleUpdate} className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">
+                      保存
+                    </button>
+                    <button onClick={() => setEditingId(null)} className="px-3 py-1.5 border rounded text-sm hover:bg-gray-50">
+                      取消
+                    </button>
                   </div>
                 </div>
-                <button
-                  onClick={() => handleDelete(p.id, p.name)}
-                  className="text-red-500 hover:text-red-700 text-sm"
-                >
-                  删除
-                </button>
-              </div>
+              ) : (
+                <div key={p.id} className="px-4 py-3 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-medium">
+                      {p.name[0]}
+                    </div>
+                    <div>
+                      <div className="font-medium">{p.name}</div>
+                      <div className="text-sm text-gray-500">
+                        {[p.title, p.department].filter(Boolean).join(" · ")}
+                        {p.email && ` · ${p.email}`}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => startEdit(p)}
+                      className="text-blue-500 hover:text-blue-700 text-sm"
+                    >
+                      编辑
+                    </button>
+                    <button
+                      onClick={() => handleDelete(p.id, p.name)}
+                      className="text-red-500 hover:text-red-700 text-sm"
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+              )
             ))}
           </div>
         )}

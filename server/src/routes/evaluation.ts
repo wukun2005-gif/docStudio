@@ -8,29 +8,45 @@ import { evaluateOnline, computeTrustScore } from "../lib/evalMetrics.js";
 import { getDb } from "../lib/db.js";
 import { logger } from "../lib/logger.js";
 import { logAudit } from "../lib/auditLog.js";
+import { readSettingsFromDb } from "../lib/settingsReader.js";
 
 export const evaluationRouter = Router();
 
 /** POST /api/evaluation/evaluate — 在线评估 */
 evaluationRouter.post("/evaluate", async (req, res) => {
   try {
-    const { runId, content, sources, providerPreference, modelId, apiKey, providerBaseUrls } = req.body;
+    const { runId, content, sources } = req.body;
 
     if (!content) {
       res.status(400).json({ ok: false, error: "content is required" });
       return;
     }
 
+    // 从 DB 读取用户配置的 provider（与 docGenerator 一致）
+    const dbSettings = readSettingsFromDb();
+
+    if (!dbSettings.providerPreference?.length || !dbSettings.modelId) {
+      res.status(400).json({ ok: false, error: "请先在设置页配置 LLM Provider" });
+      return;
+    }
+
     const metrics = await evaluateOnline({
       content,
       sources: sources ?? [],
-      providerPreference,
-      modelId,
-      apiKey,
-      providerBaseUrls,
+      providerPreference: dbSettings.providerPreference,
+      modelId: dbSettings.modelId,
+      providerBaseUrls: dbSettings.providerBaseUrls,
     });
 
     const trustScore = computeTrustScore(metrics);
+
+    // 评估失败（全 0）时不写入 DB，让前端下次重试
+    const isFailed = trustScore === 0;
+    if (isFailed) {
+      logger.warn(`[Evaluation] 评估返回全 0，跳过写入 DB`);
+      res.json({ ok: true, metrics, trustScore });
+      return;
+    }
 
     // 保存评估结果
     if (runId) {

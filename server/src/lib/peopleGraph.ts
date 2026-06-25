@@ -139,6 +139,7 @@ export function getPersonContext(personId: string): string {
   const parts = [person.name];
   if (person.title) parts.push(person.title);
   if (person.department) parts.push(`${person.department}部门`);
+  if (person.email) parts.push(`邮箱: ${person.email}`);
 
   const relationships = getRelationships(personId);
   if (relationships.length > 0) {
@@ -169,95 +170,259 @@ export function getPersonContext(personId: string): string {
 
 /**
  * 注入 demo People Graph 数据
- * 人员与 EML 邮件、Sample 数据完全对齐
+ * 18 人完整团队，覆盖管理层、产品、技术、设计、市场、法务、客户成功
+ * 与 sampleDataGenerator.ts、generateSamples.ts 完全对齐
  */
 export function injectDemoPeople(): void {
   const people = getAllPeople();
   if (people.length > 0) return;
 
-  logger.info("[PeopleGraph] 注入 demo 组织架构数据...");
-
-  // 与 Sample 数据（EML 邮件、周报）人名对齐
-  const zhangming = { id: "p-zhangming", name: "张明", title: "CEO",           department: "管理层" };
-  const lihua     = { id: "p-lihua",     name: "李华", title: "CTO",           department: "技术部" };
-  const wangfang  = { id: "p-wangfang",  name: "王芳", title: "产品总监",     department: "产品部" };
-  const chenqiang = { id: "p-chenqiang", name: "陈强", title: "技术负责人",   department: "技术部" };
-  const zhaoli    = { id: "p-zhaoli",    name: "赵丽", title: "前端工程师",   department: "技术部" };
-  const liuwei    = { id: "p-liuwei",    name: "刘伟", title: "后端工程师",   department: "技术部" };
-  const sunna     = { id: "p-sunna",     name: "孙娜", title: "数据科学家",   department: "技术部" };
+  logger.info("[PeopleGraph] 注入 demo 组织架构数据（18 人）...");
 
   const peopleData = [
+    // ── 管理层 ──────────────────────────────────
     {
-      ...zhangming,
+      id: "p-chenyu", name: "陈宇", title: "CEO", department: "管理层",
+      email: "chenyu@nexora-tech.com",
       attributes: {
         communicationStyle: "formal" as const,
         relationships: [
-          { targetPersonId: "p-lihua",    type: "direct_report" as const, strength: 0.9 },
-          { targetPersonId: "p-wangfang", type: "direct_report" as const, strength: 0.9 },
+          { targetPersonId: "p-wanglin",  type: "direct_report" as const, strength: 0.9 },
+          { targetPersonId: "p-zhaojun",  type: "direct_report" as const, strength: 0.9 },
+          { targetPersonId: "p-wangli",   type: "direct_report" as const, strength: 0.7 },
         ],
       },
     },
     {
-      ...lihua,
+      id: "p-wanglin", name: "王琳", title: "COO", department: "管理层",
+      email: "wanglin@nexora-tech.com",
+      attributes: {
+        communicationStyle: "formal" as const,
+        relationships: [
+          { targetPersonId: "p-chenyu",   type: "manager" as const, strength: 0.9 },
+          { targetPersonId: "p-sunan",    type: "direct_report" as const, strength: 0.8 },
+          { targetPersonId: "p-tangmin",  type: "cross_team" as const, strength: 0.6 },
+        ],
+      },
+    },
+    {
+      id: "p-zhaojun", name: "赵军", title: "VP Engineering", department: "管理层",
+      email: "zhaojun@nexora-tech.com",
       attributes: {
         communicationStyle: "technical" as const,
         relationships: [
-          { targetPersonId: "p-zhangming", type: "manager" as const,     strength: 0.9 },
+          { targetPersonId: "p-chenyu",   type: "manager" as const, strength: 0.9 },
           { targetPersonId: "p-chenqiang", type: "direct_report" as const, strength: 0.9 },
-          { targetPersonId: "p-wangfang",  type: "cross_team" as const,  strength: 0.7 },
+          { targetPersonId: "p-xujun",    type: "direct_report" as const, strength: 0.7 },
+          { targetPersonId: "p-sunan",    type: "cross_team" as const, strength: 0.7 },
         ],
       },
     },
+
+    // ── 产品部 ──────────────────────────────────
     {
-      ...wangfang,
+      id: "p-sunan", name: "苏楠", title: "产品总监", department: "产品部",
+      email: "sunan@nexora-tech.com",
       attributes: {
         communicationStyle: "formal" as const,
         relationships: [
-          { targetPersonId: "p-zhangming", type: "manager" as const, strength: 0.9 },
-          { targetPersonId: "p-lihua",     type: "cross_team" as const, strength: 0.7 },
+          { targetPersonId: "p-wanglin",  type: "manager" as const, strength: 0.8 },
+          { targetPersonId: "p-huangwei", type: "direct_report" as const, strength: 0.9 },
+          { targetPersonId: "p-chenqiang", type: "cross_team" as const, strength: 0.8 },
+          { targetPersonId: "p-luoxi",    type: "cross_team" as const, strength: 0.7 },
         ],
       },
     },
     {
-      ...chenqiang,
+      id: "p-huangwei", name: "黄薇", title: "高级产品经理", department: "产品部",
+      email: "huangwei@nexora-tech.com",
+      attributes: {
+        communicationStyle: "casual" as const,
+        relationships: [
+          { targetPersonId: "p-sunan",    type: "manager" as const, strength: 0.9 },
+          { targetPersonId: "p-zhaoli",   type: "cross_team" as const, strength: 0.6 },
+          { targetPersonId: "p-lixin",    type: "cross_team" as const, strength: 0.5 },
+        ],
+      },
+    },
+
+    // ── 技术部 ──────────────────────────────────
+    {
+      id: "p-chenqiang", name: "陈强", title: "技术负责人", department: "技术部",
+      email: "chenqiang@nexora-tech.com",
       attributes: {
         communicationStyle: "technical" as const,
         relationships: [
-          { targetPersonId: "p-lihua", type: "manager" as const, strength: 0.9 },
-          { targetPersonId: "p-zhaoli", type: "direct_report" as const, strength: 0.8 },
-          { targetPersonId: "p-liuwei", type: "direct_report" as const, strength: 0.8 },
-          { targetPersonId: "p-sunna",  type: "direct_report" as const, strength: 0.8 },
+          { targetPersonId: "p-zhaojun",  type: "manager" as const, strength: 0.9 },
+          { targetPersonId: "p-liuwei",   type: "direct_report" as const, strength: 0.9 },
+          { targetPersonId: "p-zhaoli",   type: "direct_report" as const, strength: 0.9 },
+          { targetPersonId: "p-sunna",    type: "direct_report" as const, strength: 0.8 },
+          { targetPersonId: "p-wangchao", type: "direct_report" as const, strength: 0.8 },
+          { targetPersonId: "p-zhoumin",  type: "direct_report" as const, strength: 0.8 },
+          { targetPersonId: "p-yangfei",  type: "peer" as const, strength: 0.7 },
+          { targetPersonId: "p-sunan",    type: "cross_team" as const, strength: 0.8 },
         ],
       },
     },
     {
-      ...zhaoli,
+      id: "p-liuwei", name: "刘伟", title: "高级后端工程师", department: "技术部",
+      email: "liuwei@nexora-tech.com",
+      attributes: {
+        communicationStyle: "technical" as const,
+        relationships: [
+          { targetPersonId: "p-chenqiang", type: "manager" as const, strength: 0.9 },
+          { targetPersonId: "p-zhaoli",    type: "peer" as const, strength: 0.8 },
+          { targetPersonId: "p-sunna",     type: "peer" as const, strength: 0.7 },
+          { targetPersonId: "p-wangchao",  type: "peer" as const, strength: 0.8 },
+        ],
+      },
+    },
+    {
+      id: "p-zhaoli", name: "赵丽", title: "高级前端工程师", department: "技术部",
+      email: "zhaoli@nexora-tech.com",
+      attributes: {
+        communicationStyle: "casual" as const,
+        relationships: [
+          { targetPersonId: "p-chenqiang", type: "manager" as const, strength: 0.9 },
+          { targetPersonId: "p-liuwei",    type: "peer" as const, strength: 0.8 },
+          { targetPersonId: "p-zhoumin",   type: "peer" as const, strength: 0.9 },
+          { targetPersonId: "p-luoxi",     type: "cross_team" as const, strength: 0.7 },
+        ],
+      },
+    },
+    {
+      id: "p-sunna", name: "孙娜", title: "数据科学家", department: "技术部",
+      email: "sunna@nexora-tech.com",
+      attributes: {
+        communicationStyle: "technical" as const,
+        relationships: [
+          { targetPersonId: "p-chenqiang", type: "manager" as const, strength: 0.8 },
+          { targetPersonId: "p-liuwei",    type: "peer" as const, strength: 0.7 },
+          { targetPersonId: "p-wangchao",  type: "peer" as const, strength: 0.6 },
+        ],
+      },
+    },
+    {
+      id: "p-wangchao", name: "王超", title: "后端工程师", department: "技术部",
+      email: "wangchao@nexora-tech.com",
+      attributes: {
+        communicationStyle: "technical" as const,
+        relationships: [
+          { targetPersonId: "p-chenqiang", type: "manager" as const, strength: 0.8 },
+          { targetPersonId: "p-liuwei",    type: "peer" as const, strength: 0.8 },
+          { targetPersonId: "p-sunna",     type: "peer" as const, strength: 0.6 },
+        ],
+      },
+    },
+    {
+      id: "p-zhoumin", name: "周敏", title: "前端工程师", department: "技术部",
+      email: "zhoumin@nexora-tech.com",
       attributes: {
         communicationStyle: "casual" as const,
         relationships: [
           { targetPersonId: "p-chenqiang", type: "manager" as const, strength: 0.8 },
-          { targetPersonId: "p-liuwei",    type: "peer" as const,    strength: 0.9 },
+          { targetPersonId: "p-zhaoli",    type: "peer" as const, strength: 0.9 },
         ],
       },
     },
     {
-      ...liuwei,
+      id: "p-xujun", name: "徐骏", title: "DevOps 工程师", department: "技术部",
+      email: "xujun@nexora-tech.com",
       attributes: {
         communicationStyle: "technical" as const,
         relationships: [
-          { targetPersonId: "p-chenqiang", type: "manager" as const, strength: 0.8 },
-          { targetPersonId: "p-zhaoli",    type: "peer" as const,    strength: 0.9 },
-          { targetPersonId: "p-sunna",     type: "peer" as const,    strength: 0.7 },
+          { targetPersonId: "p-zhaojun",  type: "manager" as const, strength: 0.7 },
+          { targetPersonId: "p-chenqiang", type: "cross_team" as const, strength: 0.7 },
         ],
       },
     },
     {
-      ...sunna,
+      id: "p-yangfei", name: "杨飞", title: "QA 负责人", department: "技术部",
+      email: "yangfei@nexora-tech.com",
       attributes: {
         communicationStyle: "technical" as const,
         relationships: [
-          { targetPersonId: "p-chenqiang", type: "manager" as const, strength: 0.8 },
-          { targetPersonId: "p-liuwei",    type: "peer" as const,    strength: 0.7 },
+          { targetPersonId: "p-chenqiang", type: "peer" as const, strength: 0.7 },
+          { targetPersonId: "p-liuwei",    type: "cross_team" as const, strength: 0.5 },
+          { targetPersonId: "p-zhaoli",    type: "cross_team" as const, strength: 0.5 },
+        ],
+      },
+    },
+
+    // ── 设计部 ──────────────────────────────────
+    {
+      id: "p-luoxi", name: "罗茜", title: "UX 设计主管", department: "设计部",
+      email: "luoxi@nexora-tech.com",
+      attributes: {
+        communicationStyle: "casual" as const,
+        relationships: [
+          { targetPersonId: "p-sunan",    type: "cross_team" as const, strength: 0.7 },
+          { targetPersonId: "p-hecheng",  type: "direct_report" as const, strength: 0.9 },
+          { targetPersonId: "p-zhaoli",   type: "cross_team" as const, strength: 0.7 },
+        ],
+      },
+    },
+    {
+      id: "p-hecheng", name: "何成", title: "UI 设计师", department: "设计部",
+      email: "hecheng@nexora-tech.com",
+      attributes: {
+        communicationStyle: "casual" as const,
+        relationships: [
+          { targetPersonId: "p-luoxi",    type: "manager" as const, strength: 0.9 },
+          { targetPersonId: "p-zhoumin",  type: "cross_team" as const, strength: 0.5 },
+        ],
+      },
+    },
+
+    // ── 市场/销售 ────────────────────────────────
+    {
+      id: "p-wangli", name: "王莉", title: "市场总监", department: "市场部",
+      email: "wangli@nexora-tech.com",
+      attributes: {
+        communicationStyle: "formal" as const,
+        relationships: [
+          { targetPersonId: "p-chenyu",   type: "manager" as const, strength: 0.7 },
+          { targetPersonId: "p-zhangwei", type: "peer" as const, strength: 0.7 },
+          { targetPersonId: "p-sunan",    type: "cross_team" as const, strength: 0.6 },
+        ],
+      },
+    },
+    {
+      id: "p-zhangwei", name: "张伟", title: "企业销售经理", department: "销售部",
+      email: "zhangwei@nexora-tech.com",
+      attributes: {
+        communicationStyle: "formal" as const,
+        relationships: [
+          { targetPersonId: "p-wangli",   type: "peer" as const, strength: 0.7 },
+          { targetPersonId: "p-lixin",    type: "cross_team" as const, strength: 0.6 },
+          { targetPersonId: "p-huangwei", type: "cross_team" as const, strength: 0.4 },
+        ],
+      },
+    },
+
+    // ── 法务 ────────────────────────────────────
+    {
+      id: "p-tangmin", name: "唐敏", title: "法务顾问", department: "法务部",
+      email: "tangmin@nexora-tech.com",
+      attributes: {
+        communicationStyle: "formal" as const,
+        relationships: [
+          { targetPersonId: "p-wanglin",  type: "cross_team" as const, strength: 0.6 },
+          { targetPersonId: "p-chenyu",   type: "cross_team" as const, strength: 0.4 },
+        ],
+      },
+    },
+
+    // ── 客户成功 ─────────────────────────────────
+    {
+      id: "p-lixin", name: "李鑫", title: "客户成功经理", department: "客户成功部",
+      email: "lixin@nexora-tech.com",
+      attributes: {
+        communicationStyle: "casual" as const,
+        relationships: [
+          { targetPersonId: "p-huangwei", type: "cross_team" as const, strength: 0.5 },
+          { targetPersonId: "p-zhangwei", type: "cross_team" as const, strength: 0.6 },
+          { targetPersonId: "p-yangfei",  type: "cross_team" as const, strength: 0.4 },
         ],
       },
     },

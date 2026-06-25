@@ -13,8 +13,10 @@ import { checkGroundedness, type GroundingDoc } from "./groundednessCheck.js";
 import { cleanContent, type CitationLink } from "./contentCleaner.js";
 import { logger } from "./logger.js";
 import { getDb } from "./db.js";
+import { getAllPeople, type Person } from "./peopleGraph.js";
 import type { OutlineSection } from "./narrativeEngine.js";
 import type { ChatRequest, ToolDefinition, ToolCall } from "../providers/openai.js";
+import type { DocumentMetadata } from "../../../shared/src/types/generation.js";
 
 // ── 文档生成 ──────────────────────────────────────────
 
@@ -90,6 +92,56 @@ function detectDocumentStyle(userRequest: string): { style: "email" | "ppt" | "t
   };
 }
 
+/** 从用户请求中提取文档元数据（收件人、主题等） */
+export function extractDocumentMetadata(userRequest: string, outline: OutlineSection[]): DocumentMetadata {
+  const detected = detectDocumentStyle(userRequest);
+  const metadata: DocumentMetadata = {
+    style: detected.style,
+    guide: detected.guide,
+    metadata: {},
+  };
+
+  if (detected.style === "email") {
+    // 提取收件人姓名
+    const recipientMatch = userRequest.match(/(?:给|致|向|写给|发给|寄给)\s*([^\s,，。写发寄打做干的]{1,6})/);
+    const recipientName = recipientMatch?.[1]?.trim();
+
+    if (recipientName) {
+      // 从 People Graph 查找匹配的人
+      const people = getAllPeople();
+      const matchedPerson = people.find((p) =>
+        p.name === recipientName ||
+        p.name.includes(recipientName) ||
+        recipientName.includes(p.name)
+      );
+
+      if (matchedPerson) {
+        metadata.recipient = {
+          name: matchedPerson.name,
+          email: matchedPerson.email,
+          title: matchedPerson.title,
+          department: matchedPerson.department,
+        };
+      } else {
+        metadata.recipient = { name: recipientName };
+      }
+    }
+
+    // 自动生成默认主题
+    const meaningfulSections = outline.filter((s) => !/问候|近况|开头|称呼/.test(s.title));
+    const topics = meaningfulSections.map((s) => s.title).join(" ").slice(0, 20);
+    metadata.subject = topics || "邮件";
+
+    // 提取抄送（如果有）
+    const ccMatch = userRequest.match(/抄送[：:]\s*([^\n]+)/);
+    if (ccMatch) {
+      metadata.cc = ccMatch[1].split(/[,，、]/).map((s) => s.trim()).filter(Boolean);
+    }
+  }
+
+  return metadata;
+}
+
 export interface GenerateDocRequest {
   title: string;
   outline: OutlineSection[];
@@ -101,6 +153,8 @@ export interface GenerateDocRequest {
   signal?: AbortSignal;
   /** 用户原始需求（传递给 LLM 以理解文档类型） */
   userRequest?: string;
+  /** 文档元数据（收件人、主题等） */
+  metadata?: DocumentMetadata;
 }
 
 export interface GenerateDocResult {
@@ -238,6 +292,7 @@ async function generateSection(
   const detected = detectDocumentStyle(userRequest);
   const effectiveStyle = documentStyle ?? detected.style;
   const formatGuide = detected.guide;
+  const metadata = config.metadata;
 
   const isFirstSection = sectionIndex === 0;
   const isEmail = effectiveStyle === "email";
@@ -250,13 +305,27 @@ async function generateSection(
   // 4. 格式与约束
   const outlineText = outlineToText(fullOutline);
 
+  // 邮件元数据注入
+  let emailMetadataSection = "";
+  if (isEmail && metadata?.recipient) {
+    const recipient = metadata.recipient;
+    const parts = [`收件人: ${recipient.name}`];
+    if (recipient.email) parts.push(`邮箱: ${recipient.email}`);
+    if (recipient.title) parts.push(`职位: ${recipient.title}`);
+    if (recipient.department) parts.push(`部门: ${recipient.department}`);
+    emailMetadataSection = `\n═══ 邮件信息 ═══\n\n${parts.join(" | ")}`;
+    if (metadata.subject) emailMetadataSection += `\n主题: ${metadata.subject}`;
+    if (metadata.cc?.length) emailMetadataSection += `\n抄送: ${metadata.cc.join(", ")}`;
+    emailMetadataSection += "\n";
+  }
+
   const systemPrompt = `你是一个文档写作助手，负责为一篇完整文档撰写其中一个章节。
 
 ═══ 文档全局视图 ═══
 
 文档类型：${formatGuide.split('\n')[0]}
 用户需求：${userRequest}
-
+${emailMetadataSection}
 完整文档大纲（共 ${totalSections} 个章节）：
 ${outlineText}
 
@@ -275,7 +344,11 @@ ${sourceText || "（无参考信息）"}
 1. 直接输出章节正文内容，不要输出章节标题、不要输出章节编号（如"1."、"5."等）
 2. 不要写「以下是...」「根据参考文档...」等引导语，直接输出内容
 3. 不要写补充说明、注意事项等元信息
-4. ${isFirstSection ? `这是第一个章节，请写称呼（如"XXX，你好："）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}` : isEmail && isLastSection ? `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："）。但这是最后一个章节，请在内容末尾写上邮件结尾问候语（如"此致"、"祝好"、"Best regards"等）和署名（如"[你的名字]"）。` : `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`}
+4. ${isFirstSection && isEmail && metadata?.recipient ? `这是邮件的第一个章节。请在开头写明：
+   - 收件人：${metadata.recipient.name}${metadata.recipient.email ? ` <${metadata.recipient.email}>` : ""}
+   - 主题：${metadata.subject || "（从内容中提炼）"}
+   然后写称呼（如"${metadata.recipient.name}，你好："）。
+   【注意】不要写邮件结尾（如"此致"、"祝好"、"Best regards"等）和署名，结尾由后续章节处理。` : isFirstSection ? `这是第一个章节，请写称呼（如"XXX，你好："）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}` : isEmail && isLastSection ? `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："）。但这是最后一个章节，请在内容末尾写上邮件结尾问候语（如"此致"、"祝好"、"Best regards"等）和署名（如"[你的名字]"）。` : `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`}
 5. 内容要与前文自然衔接，承上启下，不要重复前文已写过的内容
 6. 如果参考信息不足，可以使用 web_search 工具搜索最新信息
 7. 【重要】引用参考信息时，必须用 [N] 标记来源编号。系统会自动提供带编号的参考文档，请直接复用这些编号。
@@ -475,7 +548,14 @@ export async function generateDocument(config: GenerateDocRequest): Promise<Gene
   logger.info(`[DocGenerator] 开始生成: ${config.title}`);
 
   const userRequest = config.userRequest ?? config.title;
-  const { style: documentStyle } = detectDocumentStyle(userRequest);
+
+  // 如果没有提供元数据，自动提取
+  if (!config.metadata) {
+    config.metadata = extractDocumentMetadata(userRequest, config.outline);
+    logger.info(`[DocGenerator] 自动提取元数据: style=${config.metadata.style}, recipient=${config.metadata.recipient?.name ?? "无"}, subject=${config.metadata.subject ?? "无"}`);
+  }
+
+  const { style: documentStyle } = config.metadata;
 
   const sections = await generateSections(config.outline, "", config, userRequest, config.outline, documentStyle);
 
@@ -494,7 +574,7 @@ export async function generateDocument(config: GenerateDocRequest): Promise<Gene
 
 // ── 格式转换 ──────────────────────────────────────────
 
-export function toHtml(result: GenerateDocResult): string {
+export function toHtml(result: GenerateDocResult, baseUrl?: string): string {
   const isEmail = result.documentStyle === "email";
 
   // 照搬 patentExaminator：编号已经是全局的，不需要重编号
@@ -560,7 +640,11 @@ export function toHtml(result: GenerateDocResult): string {
     ? `<footer class="citations"><h3>参考来源</h3><div class="citation-list">${citedSources.map((s) => {
         // 知识库来源：链接到原始文件
         if (s.sourceId) {
-          return `<div class="citation-item"><span class="citation-num">[${s.index}]</span> <a href="/api/knowledge/sources/${escapeHtmlAttr(s.sourceId)}/file" target="_blank" rel="noopener" class="cite-kb-link">${escapeHtml(s.title)}</a></div>`;
+          // 如果有 baseUrl，使用完整URL；否则使用相对路径
+          const href = baseUrl
+            ? `${baseUrl}/api/knowledge/sources/${escapeHtmlAttr(s.sourceId)}/file`
+            : `/api/knowledge/sources/${escapeHtmlAttr(s.sourceId)}/file`;
+          return `<div class="citation-item"><span class="citation-num">[${s.index}]</span> <a href="${href}" target="_blank" rel="noopener" class="cite-kb-link">${escapeHtml(s.title)}</a></div>`;
         }
         // Web 来源：直接链接
         if (s.url) {

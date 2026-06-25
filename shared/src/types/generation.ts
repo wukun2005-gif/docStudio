@@ -2,7 +2,7 @@
  * 文档生成相关类型
  */
 
-export type DocumentFormat = "docx" | "pptx" | "xlsx" | "html";
+export type DocumentFormat = "docx" | "pptx" | "xlsx" | "html" | "eml";
 export type GenerationStatus = "pending" | "generating" | "done" | "error";
 
 export interface OutlineSection {
@@ -32,6 +32,18 @@ export interface GenerationRun {
   trustScore?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 文档元数据 — 从用户请求中提取的结构化信息 */
+export interface DocumentMetadata {
+  style: "email" | "ppt" | "table" | "code" | "report" | "general";
+  guide: string;
+  // 邮件特有
+  recipient?: { name: string; email?: string; title?: string; department?: string };
+  subject?: string;
+  cc?: string[];
+  // 通用
+  metadata: Record<string, unknown>;
 }
 
 export interface ProvenanceNode {

@@ -1,0 +1,35 @@
+From: 徐骏（DevOps 工程师） <xujun@nexora-tech.com>
+To: 团队全体 <team@nexora-tech.com>
+Date: 2026-06-26（周四）11:00
+Subject: CI/CD Pipeline 优化 - 从 8 分钟降到 5 分钟
+MIME-Version: 1.0
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: 7bit
+
+大家好，
+
+本周完成了 CI/CD Pipeline 的优化：
+
+优化前：
+- Lint: 30s
+- Type Check: 45s
+- Unit Test: 2min
+- Build: 3min
+- 总计: ~8 分钟
+
+优化措施：
+1. 并行执行 Lint 和 Type Check（节省 30s）
+2. 测试缓存（只运行变更文件相关的测试，节省 1min）
+3. Build 缓存（增量构建，节省 1min）
+
+优化后：
+- Lint + Type Check: 45s（并行）
+- Unit Test: 1min（缓存）
+- Build: 2min（增量）
+- 总计: ~5 分钟
+
+下一步计划：
+- Docker 多阶段构建优化（预计再节省 30s）
+- 测试分片（并行运行测试，预计再节省 30s）
+
+徐骏
