@@ -36,3 +36,6 @@ body {
 .doc-content footer.citations { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #e5e7eb; font-size: 0.85em; color: #6b7280; }
 .doc-content footer.citations ol { padding-left: 1.25rem; }
 .doc-content footer.citations li { margin-bottom: 0.375rem; }
+.doc-content footer.citations .citation-list { padding-left: 0; }
+.doc-content footer.citations .citation-item { margin-bottom: 0.375rem; }
+.doc-content footer.citations .citation-num { font-weight: 500; color: #374151; margin-right: 0.25rem; }

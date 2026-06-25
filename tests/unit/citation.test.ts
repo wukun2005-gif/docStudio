@@ -19,6 +19,10 @@ describe("Citation 编号修复", () => {
           ],
           webCitations: [],
           groundingScore: 0.9,
+          citationLinks: [
+            { index: 1, title: "来源1", url: "", sourceId: "src1" },
+            { index: 2, title: "来源2", url: "", sourceId: "src2" },
+          ],
         },
       ],
       trustScore: 0.9,
@@ -49,6 +53,9 @@ describe("Citation 编号修复", () => {
           ],
           webCitations: [],
           groundingScore: 0.9,
+          citationLinks: [
+            { index: 1, title: "来源1", url: "", sourceId: "src1" },
+          ],
         },
       ],
       trustScore: 0.9,
@@ -83,6 +90,9 @@ describe("Citation 编号修复", () => {
           ],
           webCitations: [],
           groundingScore: 0.9,
+          citationLinks: [
+            { index: 1, title: "来源1", url: "", sourceId: "src1" },
+          ],
         },
         {
           title: "第二章",
@@ -93,6 +103,10 @@ describe("Citation 编号修复", () => {
           ],
           webCitations: [],
           groundingScore: 0.8,
+          citationLinks: [
+            { index: 2, title: "来源2", url: "", sourceId: "src2" },
+            { index: 3, title: "来源3", url: "", sourceId: "src3" },
+          ],
         },
       ],
       trustScore: 0.85,
@@ -126,6 +140,10 @@ describe("Citation 编号修复", () => {
           ],
           webCitations: [],
           groundingScore: 0.85,
+          citationLinks: [
+            { index: 1, title: "来源1", url: "", sourceId: "src1" },
+            { index: 2, title: "来源2", url: "", sourceId: "src2" },
+          ],
         },
       ],
       trustScore: 0.85,
@@ -159,6 +177,9 @@ describe("Citation 编号修复", () => {
           ],
           webCitations: [],
           groundingScore: 0.9,
+          citationLinks: [
+            { index: 1, title: "来源1", url: "", sourceId: "src1" },
+          ],
         },
       ],
       trustScore: 0.9,
@@ -187,6 +208,10 @@ describe("Citation 编号修复", () => {
           ],
           webCitations: [],
           groundingScore: 0.85,
+          citationLinks: [
+            { index: 1, title: "来源1", url: "", sourceId: "src1" },
+            { index: 2, title: "来源2", url: "", sourceId: "src2" },
+          ],
         },
         {
           title: "第二章",
@@ -197,6 +222,10 @@ describe("Citation 编号修复", () => {
           ],
           webCitations: [],
           groundingScore: 0.8,
+          citationLinks: [
+            { index: 3, title: "来源3", url: "", sourceId: "src3" },
+            { index: 4, title: "来源4", url: "", sourceId: "src4" },
+          ],
         },
       ],
       trustScore: 0.825,

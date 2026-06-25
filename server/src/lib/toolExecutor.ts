@@ -27,7 +27,7 @@ interface LLMMessage {
 export interface ToolExecutorInput {
   systemPrompt: string;
   userPrompt: string;
-  ragCitations: Array<{ source: string; score: number; excerpt: string }>;
+  ragCitations: Array<{ source: string; score: number; excerpt: string; sourceId?: string }>;
   callLLM: (overrides?: {
     messages?: LLMMessage[];
     tools?: ToolDefinition[];
@@ -42,6 +42,8 @@ export interface ToolExecutorInput {
   documentFormat?: "docx" | "pptx" | "xlsx" | "html";
   /** 文档风格 — 从 userRequest 动态识别，影响 citation 处理 */
   documentStyle?: "email" | "ppt" | "table" | "code" | "report" | "general";
+  /** 全局引用编号偏移量（照搬 patentExaminator：确保每个章节的引用编号全局唯一） */
+  globalCitationOffset?: number;
 }
 
 interface FusedCitation {
@@ -51,12 +53,14 @@ interface FusedCitation {
   engine: string; // "rag" | "web"
   /** reranker 相关性分数（照搬 patentExaminator：用于显示相似度） */
   score?: number;
+  /** 知识库来源 ID（用于生成文件链接） */
+  sourceId?: string;
 }
 
 export interface ToolExecutorOutput {
   answer: string;
   webSearchCitations: Array<{ title: string; url: string; snippet: string }>;
-  mergedCitations: Array<{ title: string; url: string; snippet: string; source: string; score?: number }>;
+  mergedCitations: Array<{ title: string; url: string; snippet: string; source: string; score?: number; sourceId?: string }>;
   toolRounds: number;
 }
 
@@ -117,12 +121,13 @@ async function fuseAndRank(
     logger.info(`[Rerank] Web 去重: ${webResults.length} → ${uniqueWeb.length}`);
   }
 
-  // RAG 结果转为统一格式
+  // RAG 结果转为统一格式（保留 sourceId 用于知识库文件链接）
   const ragAsFused: FusedCitation[] = ragCitations.map((c) => ({
     title: c.source,
     url: "",
     snippet: c.excerpt,
     engine: "rag",
+    sourceId: c.sourceId,
   }));
 
   // 合并所有结果
@@ -165,8 +170,8 @@ async function fuseAndRank(
             ...allResults[r.index]!,
             score: r.relevance_score,
           }))
-          .filter((c): c is FusedCitation => !!c);
-        const finalCitations = reranked.slice(0, TOP_K);
+          .filter((c): c is NonNullable<typeof c> => !!c);
+        const finalCitations: FusedCitation[] = reranked.slice(0, TOP_K);
         logger.info(`[Rerank] 远程 Rerank 完成: ${reranked.length} → top${TOP_K}=${finalCitations.length} (${countSources(finalCitations)})`);
         return { citations: finalCitations };
       }
@@ -180,7 +185,7 @@ async function fuseAndRank(
   try {
     const reranked = localRerank(rerankInput, query);
     // 照搬 patentExaminator：保存 reranker 分数到 FusedCitation
-    const localCitations = reranked
+    const localCitations: FusedCitation[] = reranked
       .slice(0, TOP_K)
       .map((r) => {
         const idx = parseInt(r.chunkId.replace("fusion_", ""));
@@ -189,7 +194,7 @@ async function fuseAndRank(
           score: r.score,
         };
       })
-      .filter((c): c is FusedCitation => !!c);
+      .filter((c): c is NonNullable<typeof c> => !!c);
     logger.info(`[Rerank] 本地启发式 完成: ${reranked.length} → top${TOP_K}=${localCitations.length} (${countSources(localCitations)})`);
     return { citations: localCitations };
   } catch (err) {
@@ -201,7 +206,7 @@ async function fuseAndRank(
 // ── 主函数 ──────────────────────────────────────────
 
 export async function executeWithTools(input: ToolExecutorInput): Promise<ToolExecutorOutput> {
-  const { systemPrompt, userPrompt, ragCitations, callLLM, query, rerankerConfig, timeoutMs, documentFormat, documentStyle } = input;
+  const { systemPrompt, userPrompt, ragCitations, callLLM, query, rerankerConfig, timeoutMs, documentFormat, documentStyle, globalCitationOffset = 0 } = input;
 
   const messages: LLMMessage[] = [
     { role: "system", content: systemPrompt },
@@ -314,15 +319,17 @@ export async function executeWithTools(input: ToolExecutorInput): Promise<ToolEx
   let { citations } = fuseResult;
 
   // Step 4: Re-inject with reranked citations（照搬 patentExaminator re-inject 逻辑）
-  if (toolRounds > 0 && citations.length > 0) {
+  // 照搬 patentExaminator：只要 citations 就 re-inject，确保 LLM 使用融合后的编号
+  if (citations.length > 0) {
     logger.info(`[ToolExecutor] Re-inject: injecting ${citations.length} docs (${countSources(citations)})`);
     // 照搬 patentExaminator：显示来源标签和相似度分数
+    // 使用全局偏移量确保编号与 LLM prompt 中的编号一致
     const docsSection = citations
       .map((c, i) => {
         const link = c.url ? `[${c.title}](${c.url})` : `《${c.title}》`;
         const tag = c.engine === "rag" ? "（知识库）" : "（网络搜索）";
         const scoreInfo = c.score !== undefined ? `（相似度: ${c.score.toFixed(2)}）` : '';
-        return `[${i + 1}] ${tag} ${link}${scoreInfo}\n${c.snippet}`;
+        return `[${globalCitationOffset + i + 1}] ${tag} ${link}${scoreInfo}\n${c.snippet}`;
       })
       .join("\n\n");
 
@@ -388,7 +395,7 @@ export async function executeWithTools(input: ToolExecutorInput): Promise<ToolEx
   return {
     answer: finalAnswer,
     webSearchCitations: webSearchResults,
-    mergedCitations: citations.map((c) => ({ title: c.title, url: c.url, snippet: c.snippet, source: c.engine, score: c.score })),
+    mergedCitations: citations.map((c) => ({ title: c.title, url: c.url, snippet: c.snippet, source: c.engine, score: c.score, sourceId: c.sourceId })),
     toolRounds,
   };
 }

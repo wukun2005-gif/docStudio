@@ -111,6 +111,8 @@ export interface GenerateDocResult {
     sources: Array<{ chunkId: string; content: string; score: number; sourceId: string; sourceName?: string; sourceUrl?: string }>;
     webCitations: Array<{ title: string; url: string; snippet: string }>;
     groundingScore: number;
+    /** 照搬 patentExaminator：citation 编号→来源映射，确保正文 [N] 与参考来源列表一一对应 */
+    citationLinks: CitationLink[];
   }>;
   trustScore: number;
   /** 文档风格（从 userRequest 动态识别） */
@@ -220,16 +222,17 @@ async function generateSection(
   isLastSection: boolean = false,
 ): Promise<{
   content: string;
-  sources: Array<{ chunkId: string; content: string; score: number }>;
+  sources: Array<{ chunkId: string; content: string; score: number; sourceId: string; sourceName?: string; sourceUrl?: string }>;
   webCitations: Array<{ title: string; url: string; snippet: string }>;
   groundingScore: number;
+  citationLinks: CitationLink[];
 }> {
   const sources = await retrieveForSection(section.title, section.description);
-  // 照搬 patentExaminator：使用全局偏移量构建引用编号，确保编号全局唯一
   // 照搬 patentExaminator：显示来源标签和相似度分数，帮助 LLM 判断引用权重
+  // 注意：不在此处添加 [N] 编号，由 toolExecutor re-inject 统一提供编号
   const sourceText = sources.map((s, i) => {
     const sourceLabel = s.sourceName ? `《${s.sourceName}》` : '';
-    return `[${globalCitationOffset + i + 1}] ${sourceLabel}（相似度: ${s.score.toFixed(2)}）\n${s.content}`;
+    return `${sourceLabel}（相似度: ${s.score.toFixed(2)}）\n${s.content}`;
   }).join("\n\n");
 
   const detected = detectDocumentStyle(userRequest);
@@ -275,8 +278,8 @@ ${sourceText || "（无参考信息）"}
 4. ${isFirstSection ? `这是第一个章节，请写称呼（如"XXX，你好："）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}` : isEmail && isLastSection ? `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："）。但这是最后一个章节，请在内容末尾写上邮件结尾问候语（如"此致"、"祝好"、"Best regards"等）和署名（如"[你的名字]"）。` : `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`}
 5. 内容要与前文自然衔接，承上启下，不要重复前文已写过的内容
 6. 如果参考信息不足，可以使用 web_search 工具搜索最新信息
-7. 【重要】引用参考信息时，必须用 [N] 标记来源编号。例如："根据会议纪要[${globalCitationOffset + 1}]，本周完成了..."。参考信息中已标注 [${globalCitationOffset + 1}]、[${globalCitationOffset + 2}] 等编号，直接复用这些编号。不要省略引用标记。
-8. 【禁止】只允许引用上方"参考信息"中列出的编号（[${globalCitationOffset + 1}] 到 [${globalCitationOffset + sources.length}]），绝对不要引用不存在的编号。如果某句话没有对应的参考来源，直接写出该句，不要添加任何引用标记。
+7. 【重要】引用参考信息时，必须用 [N] 标记来源编号。系统会自动提供带编号的参考文档，请直接复用这些编号。
+8. 【禁止】只允许引用系统提供的参考文档中的编号，绝对不要引用不存在的编号。如果某句话没有对应的参考来源，直接写出该句，不要添加任何引用标记。
 9. ${isEmail ? "用纯文本段落输出，不要使用 markdown 格式（不要 # 标题、**粗体**、- 列表）" : "可以用 markdown 格式组织内容"}`;
 
   const userPrompt = `请为"${section.title}"章节撰写内容。${section.description ? `该章节要写：${section.description}` : ""}`;
@@ -326,15 +329,18 @@ ${sourceText || "（无参考信息）"}
   const rerankerConfig = dbSettings.knowledgeReranker;
 
   // 使用 toolExecutor（含 web search + 跨源融合重排）
+  // 照搬 patentExaminator：传递 globalCitationOffset 和 sourceId，确保编号全局唯一
+  // 注意：source 传 sourceName（人类可读），不是 chunkId（UUID）
   const result = await executeWithTools({
     systemPrompt,
     userPrompt,
-    ragCitations: sources.map((s) => ({ source: s.chunkId, score: s.score, excerpt: s.content })),
+    ragCitations: sources.map((s) => ({ source: s.sourceName || s.chunkId, score: s.score, excerpt: s.content, sourceId: s.sourceId })),
     callLLM: buildLLMCall,
     query: `${section.title} ${section.description ?? ""}`,
     timeoutMs: SECTION_TIMEOUT_MS,
     documentFormat: config.format,
     documentStyle: effectiveStyle,
+    globalCitationOffset,
     ...(rerankerConfig ? { rerankerConfig } : {}),
   });
 
@@ -365,19 +371,13 @@ ${sourceText || "（无参考信息）"}
   }
 
   // 内容清洗：移除元信息、处理 citation、markdown→HTML
-  const citationLinks: CitationLink[] = [
-    ...sources.map((s, i) => ({
-      index: i + 1,
-      title: s.sourceName || s.chunkId,
-      url: s.sourceUrl || "",
-      sourceId: s.sourceId,
-    })),
-    ...result.webSearchCitations.map((c, i) => ({
-      index: sources.length + i + 1,
-      title: c.title,
-      url: c.url,
-    })),
-  ];
+  // 照搬 patentExaminator：使用 mergedCitations（与 re-inject 相同的数组）确保编号一致
+  const citationLinks: CitationLink[] = result.mergedCitations.map((c, i) => ({
+    index: globalCitationOffset + i + 1,
+    title: c.title,
+    url: c.url || "",
+    sourceId: c.sourceId || "",
+  }));
   finalContent = cleanContent(finalContent, config.format, citationLinks, effectiveStyle);
 
   return {
@@ -385,6 +385,7 @@ ${sourceText || "（无参考信息）"}
     sources,
     webCitations: result.webSearchCitations,
     groundingScore,
+    citationLinks,
   };
 }
 
@@ -427,13 +428,14 @@ async function generateSections(
     // 最后一个章节：当前层级的最后一个，且它是文档末尾（没有子章节，或者子层级递归处理）
     const isLastSection = isLastInCurrentLevel && lastSectionIsDocEnd && section.children.length === 0;
     // 照搬 patentExaminator：传递全局引用偏移量
-    const { content, sources, webCitations, groundingScore } = await generateSection(
+    const { content, sources, webCitations, groundingScore, citationLinks } = await generateSection(
       section, rollingSummary, config, userRequest, fullOutline, documentStyle, globalIndex, currentCitationOffset, isLastSection
     );
-    sections.push({ title: section.title, content, sources, webCitations, groundingScore });
+    sections.push({ title: section.title, content, sources, webCitations, groundingScore, citationLinks });
 
-    // 更新全局引用偏移量（当前章节的 sources + webCitations 数量）
-    currentCitationOffset += sources.length + webCitations.length;
+    // 更新全局引用偏移量（使用融合后的 citationLinks 数量，不是原始 sources 数量）
+    // 照搬 patentExaminator：mergedCitations 是实际使用的来源，编号应该基于它
+    currentCitationOffset += citationLinks.length;
 
     // 更新滚动摘要：参考 OpenAI Cookbook，每章节生成后更新 rolling summary
     // 总长度限制 3000 字，避免 token 溢出
@@ -454,8 +456,8 @@ async function generateSections(
         childLastIsDocEnd,
       );
       sections.push(...childSections);
-      // 更新偏移量（子章节已经增加了）
-      currentCitationOffset += childSections.reduce((sum, s) => sum + s.sources.length + s.webCitations.length, 0);
+      // 更新偏移量（子章节已经增加了，使用 citationLinks 数量）
+      currentCitationOffset += childSections.reduce((sum, s) => sum + s.citationLinks.length, 0);
       // 子章节生成后，更新滚动摘要
       const lastChild = childSections[childSections.length - 1];
       if (lastChild) {
@@ -504,25 +506,9 @@ export function toHtml(result: GenerateDocResult): string {
     return `<section>\n<h2>${escapeHtml(s.title)}</h2>\n${s.content}\n</section>`;
   });
 
-  // 照搬 patentExaminator：合并所有来源（编号已经是全局的）
-  const allSources = result.sections.flatMap((s) => [
-    ...s.sources.map((src) => ({
-      name: src.sourceName || src.chunkId,
-      content: src.content,
-      score: src.score,
-      url: src.sourceUrl || "",
-      isKnowledgeBase: true,
-      sourceId: src.sourceId,
-    })),
-    ...s.webCitations.map((c) => ({
-      name: c.title,
-      content: c.snippet,
-      score: 0,
-      url: c.url,
-      isKnowledgeBase: false,
-      sourceId: "",
-    })),
-  ]);
+  // 照搬 patentExaminator：从各章节的 citationLinks 构建全局 citation 映射
+  // citationLinks 的 index 已经是全局编号（globalCitationOffset + i + 1）
+  const allCitationLinks = result.sections.flatMap((s) => s.citationLinks);
 
   // 从正文中提取被引用的全局编号 [N]
   const fullText = sections.join("\n");
@@ -533,9 +519,9 @@ export function toHtml(result: GenerateDocResult): string {
     citedIndices.add(parseInt(citeMatch[1], 10));
   }
 
-  // 清理无效引用：移除没有对应来源的 [N] 标记
-  const maxValidIndex = allSources.length;
-  const invalidIndices = [...citedIndices].filter((idx) => idx > maxValidIndex || idx < 1);
+  // 清理无效引用：移除没有对应 citationLink 的 [N] 标记
+  const validIndices = new Set(allCitationLinks.map((c) => c.index));
+  const invalidIndices = [...citedIndices].filter((idx) => !validIndices.has(idx));
   if (invalidIndices.length > 0) {
     logger.warn(`[DocGenerator] 发现 ${invalidIndices.length} 个无效引用编号: [${invalidIndices.join("], [")}]，将被移除`);
     // 从 sections 中移除无效引用标记
@@ -563,23 +549,25 @@ export function toHtml(result: GenerateDocResult): string {
     }
   }
 
-  // 只保留被引用的来源
-  const citedSources = allSources
-    .map((s, i) => ({ ...s, globalIndex: i + 1 }))
-    .filter((s) => citedIndices.has(s.globalIndex) && s.globalIndex <= maxValidIndex);
+  // 照搬 patentExaminator：只保留被引用的 citationLinks，按编号排序
+  const citedSources = allCitationLinks
+    .filter((c) => citedIndices.has(c.index))
+    .sort((a, b) => a.index - b.index);
 
+  // 照搬 patentExaminator：参考来源列表使用 [N] 编号，与正文 citation 对应
+  // 注意：不使用 <ol> 自动编号，因为 citedSources 的 index 可能不连续（如 [1] 和 [3]）
   const footnotes = citedSources.length > 0
-    ? `<footer class="citations"><h3>参考来源</h3><ol>${citedSources.map((s) => {
+    ? `<footer class="citations"><h3>参考来源</h3><div class="citation-list">${citedSources.map((s) => {
         // 知识库来源：链接到原始文件
-        if (s.isKnowledgeBase && s.sourceId) {
-          return `<li><a href="/api/knowledge/sources/${escapeHtmlAttr(s.sourceId)}/file" target="_blank" rel="noopener" class="cite-kb-link">${escapeHtml(s.name)}</a></li>`;
+        if (s.sourceId) {
+          return `<div class="citation-item"><span class="citation-num">[${s.index}]</span> <a href="/api/knowledge/sources/${escapeHtmlAttr(s.sourceId)}/file" target="_blank" rel="noopener" class="cite-kb-link">${escapeHtml(s.title)}</a></div>`;
         }
         // Web 来源：直接链接
         if (s.url) {
-          return `<li><a href="${escapeHtmlAttr(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.name)}</a></li>`;
+          return `<div class="citation-item"><span class="citation-num">[${s.index}]</span> <a href="${escapeHtmlAttr(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.title)}</a></div>`;
         }
-        return `<li>${escapeHtml(s.name)}</li>`;
-      }).join("")}</ol></footer>`
+        return `<div class="citation-item"><span class="citation-num">[${s.index}]</span> ${escapeHtml(s.title)}</div>`;
+      }).join("")}</div></footer>`
     : "";
 
   const title = isEmail ? (result.sections[0]?.title ?? "邮件") : (result.sections[0]?.title ?? "文档");
@@ -591,7 +579,17 @@ ${isEmail ? "" : `<h1>${escapeHtml(result.sections[0]?.title ?? "文档")}</h1>`
 ${sections.join(isEmail ? "\n\n" : "\n<hr>\n")}
 ${footnotes}
 </div>`;
-  console.log(`[DocGenerator] toHtml — style=${result.documentStyle}, isEmail=${isEmail}, html length=${html.length}, first 800 chars:\n${html.substring(0, 800)}`);
+  console.log(`[DocGenerator] toHtml — style=${result.documentStyle}, isEmail=${isEmail}, html length=${html.length}`);
+  // 输出正文引用的编号和参考来源列表，便于调试
+  const citedInText = [...new Set(html.match(/\[(\d+)\]/g) ?? [])].sort((a, b) => parseInt(a.slice(1, -1)) - parseInt(b.slice(1, -1)));
+  const citedInList = [...new Set(html.match(/citation-num">\[(\d+)\]/g) ?? [])].map(m => m.match(/\[(\d+)\]/)?.[0] ?? '').sort((a, b) => parseInt(a.slice(1, -1)) - parseInt(b.slice(1, -1)));
+  console.log(`[DocGenerator] 正文引用编号: ${citedInText.join(', ')}`);
+  console.log(`[DocGenerator] 参考来源编号: ${citedInList.join(', ')}`);
+  // 输出参考来源列表的完整 HTML，便于调试
+  const footerMatch = html.match(/<footer class="citations">[\s\S]*?<\/footer>/);
+  if (footerMatch) {
+    console.log(`[DocGenerator] 参考来源列表 HTML:\n${footerMatch[0]}`);
+  }
   return html;
 }
 
