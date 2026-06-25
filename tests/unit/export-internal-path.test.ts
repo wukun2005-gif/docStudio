@@ -33,12 +33,11 @@ describe("内部API路径不应该显示", () => {
     expect(decoded).toContain("无URL引用");
   });
 
-  it("Word 格式不应该显示内部API路径", () => {
+  it("Word 格式应该显示完整URL", () => {
     const result = generateWord("测试", sections, citations).toString();
 
-    // 内部路径不应该显示
-    expect(result).not.toContain("/api/knowledge/sources/");
-    expect(result).not.toContain("86832973-1df9-48f1-b312-c08d09c93e05");
+    // 内部路径应该显示为完整URL
+    expect(result).toContain('href="/api/knowledge/sources/86832973-1df9-48f1-b312-c08d09c93e05/file"');
 
     // 外部URL应该显示为可点击链接
     expect(result).toContain('href="https://www.csdn.net/article/2026-06-12/161934138"');
@@ -47,11 +46,11 @@ describe("内部API路径不应该显示", () => {
     expect(result).toContain("[1] 03-周三-设计评审会议.docx");
   });
 
-  it("PPT 格式不应该显示内部API路径", () => {
+  it("PPT 格式应该显示完整URL", () => {
     const result = generatePowerPoint("测试", sections, citations).toString();
 
-    // 内部路径不应该显示
-    expect(result).not.toContain("/api/knowledge/sources/");
+    // 内部路径应该显示为完整URL
+    expect(result).toContain('href="/api/knowledge/sources/86832973-1df9-48f1-b312-c08d09c93e05/file"');
 
     // 外部URL应该显示为可点击链接
     expect(result).toContain('href="https://www.csdn.net/article/2026-06-12/161934138"');
@@ -60,16 +59,17 @@ describe("内部API路径不应该显示", () => {
     expect(result).toContain("[1] 03-周三-设计评审会议.docx");
   });
 
-  it("Excel 格式不应该显示内部API路径", () => {
+  it("Excel 格式应该显示完整URL", () => {
     const result = generateExcel("测试", sections, citations).toString();
 
-    // 内部路径不应该显示
-    expect(result).not.toContain("/api/knowledge/sources/");
+    // 内部路径应该显示为完整URL
+    expect(result).toContain("/api/knowledge/sources/86832973-1df9-48f1-b312-c08d09c93e05/file");
 
     // 外部URL应该显示
     expect(result).toContain("https://www.csdn.net/article/2026-06-12/161934138");
 
-    // 文件名应该显示（注意Excel中引用在第二列）
-    expect(result).toContain('"[1]","03-周三-设计评审会议.docx"');
+    // 文件名应该显示（注意Excel中引用在第二列，包含URL）
+    expect(result).toContain("03-周三-设计评审会议.docx");
+    expect(result).toContain("/api/knowledge/sources/86832973-1df9-48f1-b312-c08d09c93e05/file");
   });
 });

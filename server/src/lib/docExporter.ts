@@ -290,21 +290,13 @@ function isInternalApiPath(url: string): boolean {
 /** 格式化引用URL用于显示（HTML格式，带链接） */
 export function formatCitationUrlHtml(c: CitationItem): string {
   if (!c.url) return "";
-  if (isInternalApiPath(c.url)) {
-    // 内部文件不显示路径
-    return "";
-  }
-  // 外部URL显示为可点击链接
+  // 所有URL（包括内部文件）都显示为可点击链接
   return ` <a href="${escapeHtmlAttr(c.url)}">${escapeHtml(c.url)}</a>`;
 }
 
 /** 格式化引用URL用于显示（纯文本格式） */
 export function formatCitationUrlText(c: CitationItem): string {
   if (!c.url) return "";
-  if (isInternalApiPath(c.url)) {
-    // 内部文件不显示路径
-    return "";
-  }
-  // 外部URL显示
+  // 所有URL（包括内部文件）都显示
   return ` (${c.url})`;
 }
