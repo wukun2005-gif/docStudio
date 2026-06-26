@@ -1,26 +1,36 @@
-From: 陈强（技术负责人） <chenqiang@nexora-tech.com>
-To: 刘伟（高级后端工程师） <liuwei@nexora-tech.com>
-Date: 2026-06-19（周四）09:00
-Subject: 支付系统技术方案 - 初稿讨论
+From: 陈强 <chenqiang@nexora-tech.com>
+To: 刘伟 <liuwei@nexora-tech.com>
+Date: 2026-06-19 15:00 +0800
+Subject: 支付系统技术方案讨论 — Stripe 集成细节
 MIME-Version: 1.0
 Content-Type: text/plain; charset="UTF-8"
 Content-Transfer-Encoding: 7bit
 
 刘伟，
 
-支付系统技术方案初稿写好了，主要设计：
+支付系统技术方案需要讨论几个关键点：
 
-1. 支付 Provider: Stripe（国际）+ 支付宝/微信支付（国内）
-2. 订阅模式: 月付 / 年付 / 团队版
-3. 账单管理: 自动生成发票、账单历史
+1. Stripe Checkout vs Stripe Elements
+   - 我建议用 Checkout（托管支付页面），最简单、最安全
+   - Elements 需要我们自己处理 PCI DSS 合规
+   - Checkout 已经通过 PCI DSS Level 1 认证
 
-技术要点：
-- 使用 Stripe Checkout Session 简化集成
-- Webhook 验证支付状态
-- 订阅状态同步到用户配置
+2. Webhook 安全
+   - 必须验证 Stripe 签名（webhook-signature 头部）
+   - 使用 webhook secret（环境变量配置）
+   - 幂等性：使用 Stripe Event ID 作为幂等键
 
-详细文档：[OneDrive: 支付系统技术方案 v1.docx]
+3. 订阅管理
+   - 创建订阅：Stripe Customer + Subscription
+   - 取消订阅：设置 cancel_at_period_end=true
+   - 升级/降级：使用 proration
 
-你看看有没有遗漏的场景，明天设计评审讨论。
+4. 退款处理
+   - 全额退款：Stripe Refund API
+   - 部分退款：需要人工审核
+   - 退款政策：7 天无理由退款
+
+请你看一下这个方案，有问题我们明天讨论。
 
 陈强
+技术负责人 | Nexora Tech

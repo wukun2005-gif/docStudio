@@ -144,9 +144,12 @@ function convertCitationsToLinks(text: string, citations: CitationLink[]): strin
 
     const displayTitle = formatSourceTitle(cite.title);
 
-    // 知识库来源：链接到原始文件
+    // 知识库来源：优先链接到原始文件 URL（GitHub/OneDrive），否则用 API 端点
     if (cite.sourceId) {
-      return `<sup><a href="/api/knowledge/sources/${escapeHtmlAttr(cite.sourceId)}/file" target="_blank" rel="noopener" class="cite-link" title="${escapeHtmlAttr(displayTitle)}">[${num}]</a></sup>`;
+      const href = cite.url
+        ? escapeHtmlAttr(cite.url)
+        : `/api/knowledge/sources/${escapeHtmlAttr(cite.sourceId)}/file`;
+      return `<sup><a href="${href}" target="_blank" rel="noopener" class="cite-link" title="${escapeHtmlAttr(displayTitle)}">[${num}]</a></sup>`;
     }
     // Web 来源：直接链接
     if (cite.url) {

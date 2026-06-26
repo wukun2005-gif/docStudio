@@ -32,7 +32,6 @@ describe("DB 模块", () => {
     expect(tableNames).toContain("people");
     expect(tableNames).toContain("provenance_nodes");
     expect(tableNames).toContain("sync_data");
-    expect(tableNames).toContain("audit_log");
   });
 
   it("user_settings 表可读写", () => {

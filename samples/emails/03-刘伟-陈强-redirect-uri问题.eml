@@ -1,19 +1,32 @@
-From: 刘伟（高级后端工程师） <liuwei@nexora-tech.com>
-To: 陈强（技术负责人） <chenqiang@nexora-tech.com>
-Date: 2026-06-17（周二）11:15
-Subject: [紧急] Azure AD redirect_uri 配置问题
+From: 刘伟 <liuwei@nexora-tech.com>
+To: 陈强 <chenqiang@nexora-tech.com>
+Date: 2026-06-17 14:20 +0800
+Subject: Azure AD redirect_uri 配置问题 — 需要帮助
 MIME-Version: 1.0
 Content-Type: text/plain; charset="UTF-8"
 Content-Transfer-Encoding: 7bit
 
 陈强，
 
-遇到一个问题：Azure AD 要求 redirect_uri 必须完全匹配，但我们的开发环境（localhost:3000）和生产环境（app.i-write.com）用的是同一个 Azure AD App Registration。
+Azure AD 的 redirect_uri 配置遇到问题，需要你帮忙看一下：
 
-目前的解决方案：
-1. 在 Azure AD 中配置多个 redirect_uri（开发 + 生产）
-2. 用环境变量区分不同环境的 redirect_uri
+问题描述：
+- 在 Azure Portal 配置了 redirect_uri: http://localhost:3000/auth/microsoft/callback
+- 但 OAuth2 回调时报错：AADSTS50011: The reply URL specified in the request does not match the reply URLs configured for the application
+- 我检查了多次，URL 完全一致
 
-你觉得方案 1 可行吗？还是需要创建两个 App Registration？
+排查过程：
+1. 确认 Azure Portal 中的 redirect_uri 配置正确
+2. 确认代码中的 redirect_uri 参数正确
+3. 尝试了 http 和 https，都不行
+4. 清除了浏览器缓存，还是不行
+
+可能的原因：
+- Azure AD 可能需要通配符匹配？
+- 可能是 URL 编码问题？
+- 可能是 Azure AD 缓存问题？
+
+请帮忙看一下，这个阻塞了我今天的进度。
 
 刘伟
+高级后端工程师 | Nexora Tech

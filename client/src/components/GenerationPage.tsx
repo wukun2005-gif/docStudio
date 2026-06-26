@@ -5,6 +5,8 @@ import { useState, useEffect } from "react";
 import OutlineEditor from "./OutlineEditor";
 import DocPreview, { type SectionData } from "./DocPreview";
 import { useCaseStore } from "../store/caseStore.js";
+import { updateCase as repoUpdateCase } from "../lib/caseRepo.js";
+import { localIso } from "../../../shared/src/datetime.js";
 import type { OutlineSection } from "../../../shared/src/types/generation.js";
 import type { TrustMetrics } from "../../../shared/src/types/evaluation.js";
 
@@ -135,13 +137,20 @@ export default function GenerationPage() {
     }
   }
 
-  function handleOutlineRequest(suggested: Array<{ title: string; description?: string }>, userRequest?: string) {
-    if (!currentCase) {
+  function handleOutlineRequest(suggested: Array<{ title: string; description?: string }>, skipEdit?: boolean, userRequest?: string) {
+    console.log("[GenerationPage] handleOutlineRequest called", { suggestedLength: suggested.length, skipEdit, userRequest, currentCaseId: currentCase?.id });
+
+    let targetCase = currentCase;
+
+    if (!targetCase) {
       // 优先使用用户原始消息（如"写邮件"），而非大纲标题
       const userReq = userRequest || suggested.map((s) => s.title).join("、");
-      createCase(userReq);
+      console.log("[GenerationPage] Creating new case", { userReq });
+      targetCase = createCase(userReq);
+      console.log("[GenerationPage] New case created", { caseId: targetCase.id });
     } else if (userRequest) {
       // 已有 case 时也更新 userRequest
+      console.log("[GenerationPage] Updating existing case userRequest", { caseId: targetCase.id, userRequest });
       updateUserRequest(userRequest);
     }
 
@@ -152,9 +161,31 @@ export default function GenerationPage() {
       children: [],
       description: s.description,
     }));
+    console.log("[GenerationPage] Setting local outline", { outlineLength: outlineData.length });
     setLocalOutline(outlineData);
-    updateOutline(outlineData);
-    updateWorkflowState("outline-ready");
+
+    // 直接更新 case 的 outline，不依赖异步的 currentCase 状态
+    if (targetCase) {
+      console.log("[GenerationPage] Updating case with outline", { caseId: targetCase.id });
+      const updated = { ...targetCase, outline: outlineData, workflowState: "outline-ready" as const, updatedAt: localIso() };
+      useCaseStore.getState().setCurrentCase(updated);
+      useCaseStore.setState((prev) => ({
+        cases: prev.cases.map((c) => c.id === updated.id ? updated : c),
+      }));
+      repoUpdateCase(updated).catch(console.error);
+      console.log("[GenerationPage] Case updated successfully");
+
+      // 情况1：跳过编辑，直接开始生成
+      if (skipEdit) {
+        console.log("[GenerationPage] skipEdit=true, starting generation immediately");
+        // 使用 setTimeout 确保状态更新完成后再触发生成
+        setTimeout(() => {
+          handleGenerate();
+        }, 100);
+      }
+    } else {
+      console.error("[GenerationPage] No target case available to update outline");
+    }
   }
 
   function handleOutlineChange(outline: OutlineSection[]) {
@@ -165,11 +196,16 @@ export default function GenerationPage() {
   // 将 handleOutlineRequest 暴露给 ChatBox（通过 window 事件）
   useEffect(() => {
     function handleOutlineEvent(e: CustomEvent) {
-      const { outline, userRequest } = e.detail;
-      handleOutlineRequest(outline, userRequest);
+      const { outline, userRequest, skipEdit } = e.detail;
+      console.log("[GenerationPage] Received outline-request event", { outlineLength: outline.length, userRequest, skipEdit });
+      handleOutlineRequest(outline, skipEdit, userRequest);
     }
+    console.log("[GenerationPage] Registering outline-request event listener");
     window.addEventListener("outline-request" as any, handleOutlineEvent);
-    return () => window.removeEventListener("outline-request" as any, handleOutlineEvent);
+    return () => {
+      console.log("[GenerationPage] Unregistering outline-request event listener");
+      window.removeEventListener("outline-request" as any, handleOutlineEvent);
+    };
   }, [currentCase]);
 
   async function handleGenerate() {

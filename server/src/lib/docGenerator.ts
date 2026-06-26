@@ -7,13 +7,13 @@
 import { registry } from "../providers/registry.js";
 import { getApiKey } from "../security/keyStore.js";
 import { hybridSearch } from "./hybridSearch.js";
-import { readSettingsFromDb } from "./settingsReader.js";
+import { readSettingsFromDb, readSenderProfile } from "./settingsReader.js";
 import { executeWithTools } from "./toolExecutor.js";
 import { checkGroundedness, type GroundingDoc } from "./groundednessCheck.js";
 import { cleanContent, type CitationLink } from "./contentCleaner.js";
 import { logger } from "./logger.js";
 import { getDb } from "./db.js";
-import { getAllPeople, type Person } from "./peopleGraph.js";
+import { getAllPeople, getPersonById, getPersonContext, type Person } from "./peopleGraph.js";
 import type { OutlineSection } from "./narrativeEngine.js";
 import type { ChatRequest, ToolDefinition, ToolCall } from "../providers/openai.js";
 import type { DocumentMetadata } from "../../../shared/src/types/generation.js";
@@ -121,6 +121,7 @@ export function extractDocumentMetadata(userRequest: string, outline: OutlineSec
           email: matchedPerson.email,
           title: matchedPerson.title,
           department: matchedPerson.department,
+          personId: matchedPerson.id,
         };
       } else {
         metadata.recipient = { name: recipientName };
@@ -223,7 +224,7 @@ async function retrieveForSection(
     }
   }
 
-  const results = hybridSearch(query, { limit: 3, useQueryExpansion: false, queryEmbedding });
+  const results = hybridSearch(query, { limit: 5, useQueryExpansion: false, queryEmbedding });
 
   // 批量查询 source 信息（文件名、URL）
   const sourceIds = [...new Set(results.map((r) => r.sourceId))];
@@ -294,6 +295,10 @@ async function generateSection(
   const formatGuide = detected.guide;
   const metadata = config.metadata;
 
+  // 读取发件人身份（用于邮件署名）
+  const senderProfile = readSenderProfile();
+  const senderName = senderProfile?.name ?? "[你的名字]";
+
   const isFirstSection = sectionIndex === 0;
   const isEmail = effectiveStyle === "email";
   const totalSections = fullOutline.length;
@@ -316,6 +321,15 @@ async function generateSection(
     emailMetadataSection = `\n═══ 邮件信息 ═══\n\n${parts.join(" | ")}`;
     if (metadata.subject) emailMetadataSection += `\n主题: ${metadata.subject}`;
     if (metadata.cc?.length) emailMetadataSection += `\n抄送: ${metadata.cc.join(", ")}`;
+
+    // 注入收件人画像（关系网络 + 沟通风格）
+    if (recipient.personId) {
+      const personCtx = getPersonContext(recipient.personId);
+      if (personCtx) {
+        emailMetadataSection += `\n收件人画像: ${personCtx}`;
+      }
+    }
+
     emailMetadataSection += "\n";
   }
 
@@ -348,12 +362,23 @@ ${sourceText || "（无参考信息）"}
    - 收件人：${metadata.recipient.name}${metadata.recipient.email ? ` <${metadata.recipient.email}>` : ""}
    - 主题：${metadata.subject || "（从内容中提炼）"}
    然后写称呼（如"${metadata.recipient.name}，你好："）。
-   【注意】不要写邮件结尾（如"此致"、"祝好"、"Best regards"等）和署名，结尾由后续章节处理。` : isFirstSection ? `这是第一个章节，请写称呼（如"XXX，你好："）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}` : isEmail && isLastSection ? `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："）。但这是最后一个章节，请在内容末尾写上邮件结尾问候语（如"此致"、"祝好"、"Best regards"等）和署名（如"[你的名字]"）。` : `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`}
+   【注意】不要写邮件结尾（如"此致"、"祝好"、"Best regards"等）和署名，结尾由后续章节处理。` : isFirstSection ? `这是第一个章节，请写称呼（如"XXX，你好："）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}` : isEmail && isLastSection ? `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："）。但这是最后一个章节，请在内容末尾写上邮件结尾问候语（如"此致"、"祝好"、"Best regards"等）和署名（如"${senderName}"）。` : `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`}
 5. 内容要与前文自然衔接，承上启下，不要重复前文已写过的内容
 6. 如果参考信息不足，可以使用 web_search 工具搜索最新信息
 7. 【重要】引用参考信息时，必须用 [N] 标记来源编号。系统会自动提供带编号的参考文档，请直接复用这些编号。
 8. 【禁止】只允许引用系统提供的参考文档中的编号，绝对不要引用不存在的编号。如果某句话没有对应的参考来源，直接写出该句，不要添加任何引用标记。
-9. ${isEmail ? "用纯文本段落输出，不要使用 markdown 格式（不要 # 标题、**粗体**、- 列表）" : "可以用 markdown 格式组织内容"}`;
+9. ${isEmail ? "用纯文本段落输出，不要使用 markdown 格式（不要 # 标题、**粗体**、- 列表）" : "可以用 markdown 格式组织内容"}
+${(() => {
+  // 根据收件人沟通风格追加语气指令
+  if (isEmail && metadata?.recipient?.personId) {
+    const person = getPersonById(metadata.recipient.personId);
+    const style = person?.attributes?.communicationStyle;
+    if (style === "formal") return "10. 【语气要求】收件人偏好正式风格，请使用严谨、正式的措辞，避免口语化表达";
+    if (style === "casual") return "10. 【语气要求】收件人偏好轻松风格，请使用亲切、自然的措辞，适当口语化";
+    if (style === "technical") return "10. 【语气要求】收件人偏好技术风格，请使用专业术语和精确表述，逻辑清晰";
+  }
+  return "";
+})()}`;
 
   const userPrompt = `请为"${section.title}"章节撰写内容。${section.description ? `该章节要写：${section.description}` : ""}`;
 
@@ -638,12 +663,13 @@ export function toHtml(result: GenerateDocResult, baseUrl?: string): string {
   // 注意：不使用 <ol> 自动编号，因为 citedSources 的 index 可能不连续（如 [1] 和 [3]）
   const footnotes = citedSources.length > 0
     ? `<footer class="citations"><h3>参考来源</h3><div class="citation-list">${citedSources.map((s) => {
-        // 知识库来源：链接到原始文件
+        // 知识库来源：优先链接到原始文件 URL（GitHub/OneDrive），否则用 API 端点
         if (s.sourceId) {
-          // 如果有 baseUrl，使用完整URL；否则使用相对路径
-          const href = baseUrl
-            ? `${baseUrl}/api/knowledge/sources/${escapeHtmlAttr(s.sourceId)}/file`
-            : `/api/knowledge/sources/${escapeHtmlAttr(s.sourceId)}/file`;
+          const href = s.url
+            ? escapeHtmlAttr(s.url)
+            : baseUrl
+              ? `${baseUrl}/api/knowledge/sources/${escapeHtmlAttr(s.sourceId)}/file`
+              : `/api/knowledge/sources/${escapeHtmlAttr(s.sourceId)}/file`;
           return `<div class="citation-item"><span class="citation-num">[${s.index}]</span> <a href="${href}" target="_blank" rel="noopener" class="cite-kb-link">${escapeHtml(s.title)}</a></div>`;
         }
         // Web 来源：直接链接

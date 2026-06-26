@@ -407,3 +407,191 @@ export function getUnembeddedChunks(): Array<{
     "SELECT id, source_id as sourceId, content, chunk_index as chunkIndex FROM kb_chunks WHERE embedded = 0 ORDER BY LENGTH(content)"
   ).all() as any[];
 }
+
+// ── Remote Index ────────────────────────────────────────
+
+export function addRemoteIndex(entry: {
+  id: string; sourceType: string; remoteId: string; name: string;
+  url?: string; metadata?: Record<string, unknown>; contentHash?: string;
+  chunkCount?: number; status?: string;
+}): void {
+  const db = getDb();
+  const now = localIso();
+  const oldRow = db.prepare("SELECT * FROM kb_remote_index WHERE id = ?").get(entry.id) as any;
+
+  db.prepare(`INSERT OR REPLACE INTO kb_remote_index
+    (id, source_type, remote_id, name, url, metadata, content_hash, indexed_at, chunk_count, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(entry.id, entry.sourceType, entry.remoteId, entry.name,
+      entry.url ?? null, entry.metadata ? JSON.stringify(entry.metadata) : null,
+      entry.contentHash ?? null, now, entry.chunkCount ?? 0, entry.status ?? "indexed");
+
+  logAudit({
+    table: "kb_remote_index",
+    operation: oldRow ? "UPDATE" : "INSERT",
+    recordId: entry.id,
+    oldData: oldRow,
+    newData: entry,
+    source: "knowledge",
+  });
+}
+
+export function getRemoteIndexesByType(sourceType: string): Array<{
+  id: string; sourceType: string; remoteId: string; name: string;
+  url?: string; metadata?: Record<string, unknown>; contentHash?: string;
+  indexedAt: string; chunkCount: number; status: string;
+}> {
+  const db = getDb();
+  const rows = db.prepare("SELECT * FROM kb_remote_index WHERE source_type = ? ORDER BY indexed_at DESC").all(sourceType) as any[];
+  return rows.map(r => ({
+    id: r.id,
+    sourceType: r.source_type,
+    remoteId: r.remote_id,
+    name: r.name,
+    url: r.url ?? undefined,
+    metadata: r.metadata ? JSON.parse(r.metadata) : undefined,
+    contentHash: r.content_hash ?? undefined,
+    indexedAt: r.indexed_at,
+    chunkCount: r.chunk_count,
+    status: r.status,
+  }));
+}
+
+export function getRemoteIndexByRemoteId(sourceType: string, remoteId: string): {
+  id: string; sourceType: string; remoteId: string; name: string;
+  url?: string; metadata?: Record<string, unknown>; contentHash?: string;
+  indexedAt: string; chunkCount: number; status: string;
+} | undefined {
+  const db = getDb();
+  const r = db.prepare("SELECT * FROM kb_remote_index WHERE source_type = ? AND remote_id = ?").get(sourceType, remoteId) as any;
+  if (!r) return undefined;
+  return {
+    id: r.id,
+    sourceType: r.source_type,
+    remoteId: r.remote_id,
+    name: r.name,
+    url: r.url ?? undefined,
+    metadata: r.metadata ? JSON.parse(r.metadata) : undefined,
+    contentHash: r.content_hash ?? undefined,
+    indexedAt: r.indexed_at,
+    chunkCount: r.chunk_count,
+    status: r.status,
+  };
+}
+
+export function updateRemoteIndexStatus(id: string, status: string, chunkCount?: number): void {
+  const db = getDb();
+  const oldRow = db.prepare("SELECT * FROM kb_remote_index WHERE id = ?").get(id) as any;
+  if (chunkCount !== undefined) {
+    db.prepare("UPDATE kb_remote_index SET status = ?, chunk_count = ?, indexed_at = datetime('now','localtime') WHERE id = ?")
+      .run(status, chunkCount, id);
+  } else {
+    db.prepare("UPDATE kb_remote_index SET status = ?, indexed_at = datetime('now','localtime') WHERE id = ?")
+      .run(status, id);
+  }
+  logAudit({
+    table: "kb_remote_index",
+    operation: "UPDATE",
+    recordId: id,
+    oldData: oldRow,
+    newData: { ...oldRow, status, chunkCount },
+    source: "knowledge",
+  });
+}
+
+export function deleteRemoteIndex(id: string): void {
+  const db = getDb();
+  const oldRow = db.prepare("SELECT * FROM kb_remote_index WHERE id = ?").get(id) as any;
+  db.prepare("DELETE FROM kb_remote_index WHERE id = ?").run(id);
+  logAudit({
+    table: "kb_remote_index",
+    operation: "DELETE",
+    recordId: id,
+    oldData: oldRow,
+    source: "knowledge",
+  });
+}
+
+// ── Sync Jobs ───────────────────────────────────────────
+
+export function addSyncJob(job: {
+  id: string; sourceType: string; config: Record<string, unknown>;
+  status?: string;
+}): void {
+  const db = getDb();
+  const now = localIso();
+  db.prepare(`INSERT INTO kb_sync_jobs
+    (id, source_type, config, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(job.id, job.sourceType, JSON.stringify(job.config), job.status ?? "pending", now, now);
+}
+
+export function updateSyncJob(id: string, updates: {
+  status?: string; progress?: Record<string, unknown>;
+  lastSyncAt?: string; errorMessage?: string;
+}): void {
+  const db = getDb();
+  const now = localIso();
+  const oldRow = db.prepare("SELECT * FROM kb_sync_jobs WHERE id = ?").get(id) as any;
+  if (!oldRow) return;
+
+  const newStatus = updates.status ?? oldRow.status;
+  const newProgress = updates.progress ? JSON.stringify(updates.progress) : oldRow.progress;
+  const newLastSync = updates.lastSyncAt ?? oldRow.last_sync_at;
+  const newError = updates.errorMessage ?? oldRow.error_message;
+
+  db.prepare(`UPDATE kb_sync_jobs SET status = ?, progress = ?, last_sync_at = ?, error_message = ?, updated_at = ? WHERE id = ?`)
+    .run(newStatus, newProgress, newLastSync, newError, now, id);
+
+  logAudit({
+    table: "kb_sync_jobs",
+    operation: "UPDATE",
+    recordId: id,
+    oldData: oldRow,
+    newData: { ...oldRow, status: newStatus, progress: newProgress, last_sync_at: newLastSync, error_message: newError },
+    source: "knowledge",
+  });
+}
+
+export function getSyncJobsByType(sourceType: string): Array<{
+  id: string; sourceType: string; config: Record<string, unknown>;
+  status: string; progress?: Record<string, unknown>;
+  lastSyncAt?: string; errorMessage?: string;
+  createdAt: string; updatedAt: string;
+}> {
+  const db = getDb();
+  const rows = db.prepare("SELECT * FROM kb_sync_jobs WHERE source_type = ? ORDER BY created_at DESC").all(sourceType) as any[];
+  return rows.map(r => ({
+    id: r.id,
+    sourceType: r.source_type,
+    config: JSON.parse(r.config),
+    status: r.status,
+    progress: r.progress ? JSON.parse(r.progress) : undefined,
+    lastSyncAt: r.last_sync_at ?? undefined,
+    errorMessage: r.error_message ?? undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  }));
+}
+
+export function getSyncJobById(id: string): {
+  id: string; sourceType: string; config: Record<string, unknown>;
+  status: string; progress?: Record<string, unknown>;
+  lastSyncAt?: string; errorMessage?: string;
+  createdAt: string; updatedAt: string;
+} | undefined {
+  const db = getDb();
+  const r = db.prepare("SELECT * FROM kb_sync_jobs WHERE id = ?").get(id) as any;
+  if (!r) return undefined;
+  return {
+    id: r.id,
+    sourceType: r.source_type,
+    config: JSON.parse(r.config),
+    status: r.status,
+    progress: r.progress ? JSON.parse(r.progress) : undefined,
+    lastSyncAt: r.last_sync_at ?? undefined,
+    errorMessage: r.error_message ?? undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}

@@ -1,4 +1,14 @@
 import { useEffect, useState, useRef } from "react";
+import PeoplePanel from "./PeoplePanel";
+
+type TabId = "sources" | "code" | "remote" | "people";
+
+const tabs: { id: TabId; label: string }[] = [
+  { id: "sources", label: "本地文档" },
+  { id: "code", label: "远程 GitHub Repo" },
+  { id: "remote", label: "远程文档" },
+  { id: "people", label: "People Graph" },
+];
 
 interface KnowledgeSource {
   id: string;
@@ -9,25 +19,93 @@ interface KnowledgeSource {
   createdAt: string;
 }
 
+interface GitHubRepo {
+  id: number;
+  name: string;
+  fullName: string;
+  description: string;
+  language: string;
+  stargazersCount: number;
+  updatedAt: string;
+}
+
+interface SyncJob {
+  id: string;
+  sourceType: string;
+  config: Record<string, unknown>;
+  status: string;
+  progress?: { total: number; processed: number; skipped: number; errors: number };
+  lastSyncAt?: string;
+  errorMessage?: string;
+  createdAt: string;
+}
+
+interface IndexedRepo {
+  owner: string;
+  repo: string;
+  fileCount: number;
+  totalChunks: number;
+  lastIndexed: string;
+}
+
 export default function KnowledgePanel() {
+  const [activeTab, setActiveTab] = useState<TabId>("sources");
   const [sources, setSources] = useState<KnowledgeSource[]>([]);
-  const [stats, setStats] = useState({ sourceCount: 0, chunkCount: 0, vectorCount: 0 });
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // GitHub 代码 tab 状态
+  const [githubToken, setGithubToken] = useState("");
+  const [githubSaved, setGithubSaved] = useState(false);
+  const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
+  const [githubLoading, setGithubLoading] = useState(false);
+  const [githubError, setGithubError] = useState<string | null>(null);
+  const [selectedRepos, setSelectedRepos] = useState<Set<string>>(new Set());
+  const [connecting, setConnecting] = useState(false);
+  const [connectedRepos, setConnectedRepos] = useState<string[]>([]);
+
+  // GitHub 同步状态
+  const [indexedRepos, setIndexedRepos] = useState<IndexedRepo[]>([]);
+  const [syncJobs, setSyncJobs] = useState<SyncJob[]>([]);
+  const [syncing, setSyncing] = useState<string | null>(null);
+  const [syncProgress, setSyncProgress] = useState<Record<string, { total: number; processed: number; skipped: number; errors: number }>>({});
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // OneDrive 状态
+  const [onedriveFiles, setOnedriveFiles] = useState<any[]>([]);
+  const [onedriveLoading, setOnedriveLoading] = useState(false);
+  const [onedriveError, setOnedriveError] = useState<string | null>(null);
+  const [cacheStats, setCacheStats] = useState({ size: 0, entries: 0 });
+  const [msGraphStatus, setMsGraphStatus] = useState<{ connected: boolean; userDisplayName?: string; userEmail?: string; hasAppConfig: boolean } | null>(null);
+
   useEffect(() => {
     loadData();
+    loadGithubConfig();
+    loadIndexedRepos();
+    loadMsGraphStatus();
+  }, []);
+
+  // 监听 OAuth 弹窗回调
+  useEffect(() => {
+    function handleMessage(e: MessageEvent) {
+      if (e.data?.type === "msgraph-auth-success") {
+        loadMsGraphStatus();
+        loadOnedriveFiles();
+      }
+    }
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
   }, []);
 
   async function loadData() {
     try {
-      const [sourcesRes, statsRes] = await Promise.all([
-        fetch("/api/knowledge/sources").then((r) => r.json()),
-        fetch("/api/knowledge/stats").then((r) => r.json()),
-      ]);
-      if (sourcesRes.ok) setSources(sourcesRes.sources);
-      if (statsRes.ok) setStats(statsRes);
+      const res = await fetch("/api/knowledge/sources").then((r) => r.json());
+      if (res.ok) {
+        // 本地文档 tab 只显示非 GitHub 来源的文件
+        const localSources = res.sources.filter((s: KnowledgeSource) => s.type !== "github_file");
+        setSources(localSources);
+      }
     } catch (err) {
       console.error("Failed to load knowledge data:", err);
     }
@@ -76,30 +154,671 @@ export default function KnowledgePanel() {
     }
   }
 
+  // ── GitHub 相关 ──────────────────────────────────────
+
+  async function loadGithubConfig() {
+    try {
+      const res = await fetch("/api/settings/connector_github");
+      const data = await res.json();
+      if (data.ok && data.value) {
+        if (data.value.token) {
+          setGithubToken(data.value.token);
+          setGithubSaved(true);
+        }
+        if (Array.isArray(data.value.repos)) {
+          setConnectedRepos(data.value.repos);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function saveGithubConfig(token: string, repos: string[]) {
+    await fetch("/api/settings/connector_github", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: { token, repos } }),
+    });
+  }
+
+  async function handleSaveGithubToken() {
+    if (!githubToken.trim()) return;
+    try {
+      await saveGithubConfig(githubToken.trim(), connectedRepos);
+      setGithubSaved(true);
+      setGithubError(null);
+    } catch (err) {
+      setGithubError(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  async function handleVerifyGithub() {
+    setGithubLoading(true);
+    setGithubError(null);
+    setGithubRepos([]);
+    setSelectedRepos(new Set());
+
+    try {
+      const res = await fetch("/api/connectors/github/repos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: githubToken.trim(), perPage: 50 }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setGithubRepos(data.repos);
+      } else {
+        setGithubError(data.error || "连接失败");
+      }
+    } catch (err) {
+      setGithubError(`验证失败: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setGithubLoading(false);
+    }
+  }
+
+  function toggleRepo(fullName: string) {
+    setSelectedRepos((prev) => {
+      const next = new Set(prev);
+      if (next.has(fullName)) next.delete(fullName);
+      else next.add(fullName);
+      return next;
+    });
+  }
+
+  async function handleConnectGithub() {
+    if (selectedRepos.size === 0) return;
+    setConnecting(true);
+    setGithubError(null);
+
+    try {
+      // 合并已连接的和新选中的，去重
+      const merged = Array.from(new Set([...connectedRepos, ...selectedRepos]));
+      await saveGithubConfig(githubToken.trim(), merged);
+      setConnectedRepos(merged);
+      setSelectedRepos(new Set());
+    } catch (err) {
+      setGithubError(`连接失败: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  async function handleDisconnectRepo(repo: string) {
+    const updated = connectedRepos.filter((r) => r !== repo);
+    try {
+      await saveGithubConfig(githubToken.trim(), updated);
+      setConnectedRepos(updated);
+    } catch (err) {
+      setGithubError(`断开失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // ── GitHub 同步 ────────────────────────────────────────
+
+  async function loadIndexedRepos() {
+    try {
+      const res = await fetch("/api/knowledge/github/repos");
+      const data = await res.json();
+      if (data.ok) {
+        setIndexedRepos(data.repos);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function handleSyncRepo(owner: string, repo: string) {
+    const key = `${owner}/${repo}`;
+    setSyncing(key);
+    setGithubError(null);
+    setSyncProgress((prev) => ({ ...prev, [key]: { total: 0, processed: 0, skipped: 0, errors: 0 } }));
+
+    try {
+      const res = await fetch("/api/knowledge/github/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ owner, repo }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        pollSyncStatus(data.jobId, key);
+      } else {
+        setGithubError(`同步失败: ${data.error}`);
+        setSyncing(null);
+      }
+    } catch (err) {
+      setGithubError(`同步失败: ${err instanceof Error ? err.message : String(err)}`);
+      setSyncing(null);
+    }
+  }
+
+  async function handleIncrementalSync(owner: string, repo: string) {
+    const key = `${owner}/${repo}`;
+    setSyncing(key);
+    setGithubError(null);
+    setSyncProgress((prev) => ({ ...prev, [key]: { total: 0, processed: 0, skipped: 0, errors: 0 } }));
+
+    try {
+      const res = await fetch("/api/knowledge/github/sync/incremental", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ owner, repo }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        pollSyncStatus(data.jobId, key);
+      } else {
+        setGithubError(`增量同步失败: ${data.error}`);
+        setSyncing(null);
+      }
+    } catch (err) {
+      setGithubError(`增量同步失败: ${err instanceof Error ? err.message : String(err)}`);
+      setSyncing(null);
+    }
+  }
+
+  function pollSyncStatus(jobId: string, repoKey: string) {
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/knowledge/sync/job/${jobId}`);
+        const data = await res.json();
+        if (data.ok && data.job) {
+          const job = data.job;
+          // 更新进度
+          if (job.progress) {
+            setSyncProgress((prev) => ({ ...prev, [repoKey]: job.progress }));
+          }
+
+          if (job.status === "completed") {
+            setSyncing(null);
+            setSyncProgress((prev) => {
+              const next = { ...prev };
+              delete next[repoKey];
+              return next;
+            });
+            setMessage(`✅ ${repoKey} 同步完成: ${job.progress?.processed ?? 0} 个文件已处理`);
+            loadIndexedRepos();
+            loadData();
+            return;
+          }
+          if (job.status === "error") {
+            setSyncing(null);
+            setSyncProgress((prev) => {
+              const next = { ...prev };
+              delete next[repoKey];
+              return next;
+            });
+            setGithubError(`同步失败: ${job.errorMessage}`);
+            return;
+          }
+        }
+        if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = setTimeout(poll, 1500);
+      } catch {
+        if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = setTimeout(poll, 2000);
+      }
+    };
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    pollTimerRef.current = setTimeout(poll, 1000);
+  }
+
+  async function handleDeleteRepo(owner: string, repo: string) {
+    if (!confirm(`确定删除 ${owner}/${repo} 的所有索引数据？`)) return;
+
+    try {
+      const res = await fetch("/api/knowledge/github/repo", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ owner, repo }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setMessage(`已删除 ${owner}/${repo}，${data.deletedFiles} 个索引文件`);
+        loadIndexedRepos();
+        loadData();
+      }
+    } catch (err) {
+      setGithubError(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // ── OneDrive ───────────────────────────────────────────
+
+  async function loadMsGraphStatus() {
+    try {
+      const res = await fetch("/api/connectors/msgraph/status");
+      const data = await res.json();
+      if (data.ok) {
+        setMsGraphStatus(data);
+        if (data.connected) {
+          loadOnedriveFiles();
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function loadOnedriveFiles() {
+    setOnedriveLoading(true);
+    setOnedriveError(null);
+    try {
+      const res = await fetch("/api/connectors/msgraph/onedrive", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setOnedriveFiles(data.files);
+      } else {
+        setOnedriveError(data.error || "加载失败");
+      }
+    } catch (err) {
+      setOnedriveError(`加载失败: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setOnedriveLoading(false);
+    }
+  }
+
+  async function handleConnectOnedrive() {
+    setOnedriveError(null);
+    try {
+      const res = await fetch("/api/connectors/msgraph/auth");
+      const data = await res.json();
+      if (!data.ok) {
+        setOnedriveError(data.error || "获取授权链接失败");
+        return;
+      }
+      // 打开 OAuth 弹窗
+      const width = 600, height = 700;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2;
+      window.open(data.url, "msgraph-auth", `width=${width},height=${height},left=${left},top=${top}`);
+    } catch (err) {
+      setOnedriveError(`连接失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  async function handleDisconnectOnedrive() {
+    try {
+      await fetch("/api/connectors/msgraph/disconnect", { method: "POST" });
+      setMsGraphStatus({ connected: false, hasAppConfig: true });
+      setOnedriveFiles([]);
+    } catch {
+      // ignore
+    }
+  }
+
+  async function loadCacheStats() {
+    // TODO: 实现缓存统计 API
+    setCacheStats({ size: 0, entries: 0 });
+  }
+
   return (
     <div className="max-w-4xl mx-auto">
       <h2 className="text-2xl font-bold mb-6">知识库管理</h2>
 
-      {/* 统计卡片 */}
-      <div className="grid grid-cols-3 gap-4 mb-6">
-        <div className="bg-white rounded-lg p-4 shadow-sm border">
-          <div className="text-3xl font-bold text-blue-600">{stats.sourceCount}</div>
-          <div className="text-sm text-gray-500">知识源</div>
-        </div>
-        <div className="bg-white rounded-lg p-4 shadow-sm border">
-          <div className="text-3xl font-bold text-green-600">{stats.chunkCount}</div>
-          <div className="text-sm text-gray-500">文本块</div>
-        </div>
-        <div className="bg-white rounded-lg p-4 shadow-sm border">
-          <div className="text-3xl font-bold text-purple-600">{stats.vectorCount}</div>
-          <div className="text-sm text-gray-500">向量</div>
-        </div>
+      {/* Tab 切换 */}
+      <div className="flex border-b mb-6">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`px-6 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
+              activeTab === tab.id
+                ? "border-blue-500 text-blue-600"
+                : "border-transparent text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
+      {/* People Graph Tab */}
+      {activeTab === "people" && <PeoplePanel />}
+
+      {/* 代码 Tab */}
+      {activeTab === "code" && (
+      <div className="space-y-6">
+        {/* 已索引的 Repo（带同步状态） */}
+        {indexedRepos.length > 0 && (
+          <div className="bg-white rounded-lg shadow-sm border">
+            <div className="px-4 py-3 border-b font-medium">已索引的 Repo ({indexedRepos.length})</div>
+            <div className="divide-y">
+              {indexedRepos.map((repo) => {
+                const repoKey = `${repo.owner}/${repo.repo}`;
+                const progress = syncProgress[repoKey];
+                const isSyncing = syncing === repoKey;
+                return (
+                  <div key={repoKey} className="px-4 py-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="font-medium text-sm">{repoKey}</div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => handleIncrementalSync(repo.owner, repo.repo)}
+                          disabled={isSyncing}
+                          className="px-3 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200 disabled:opacity-50"
+                        >
+                          {isSyncing ? "同步中..." : "增量同步"}
+                        </button>
+                        <button
+                          onClick={() => handleSyncRepo(repo.owner, repo.repo)}
+                          disabled={isSyncing}
+                          className="px-3 py-1 bg-gray-100 text-gray-700 rounded text-xs hover:bg-gray-200 disabled:opacity-50"
+                        >
+                          全量重建
+                        </button>
+                        <button
+                          onClick={() => handleDeleteRepo(repo.owner, repo.repo)}
+                          className="px-3 py-1 bg-red-100 text-red-700 rounded text-xs hover:bg-red-200"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                    <div className="text-xs text-gray-500 flex gap-4">
+                      <span>📄 {repo.fileCount} 个文件</span>
+                      <span>🧩 {repo.totalChunks} 个 chunks</span>
+                      <span>🕐 最后索引: {new Date(repo.lastIndexed).toLocaleString()}</span>
+                    </div>
+                    {isSyncing && progress && progress.total > 0 && (
+                      <div className="mt-2">
+                        <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                          <span>同步中...</span>
+                          <span>{progress.processed + progress.skipped + progress.errors} / {progress.total}</span>
+                        </div>
+                        <div className="w-full bg-gray-200 rounded-full h-1.5">
+                          <div
+                            className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
+                            style={{ width: `${Math.round(((progress.processed + progress.skipped + progress.errors) / progress.total) * 100)}%` }}
+                          />
+                        </div>
+                        <div className="flex gap-3 mt-1 text-xs text-gray-400">
+                          <span>✅ {progress.processed}</span>
+                          <span>⏭️ {progress.skipped}</span>
+                          {progress.errors > 0 && <span>❌ {progress.errors}</span>}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* 已连接但未索引的 Repo */}
+        {connectedRepos.filter(r => !indexedRepos.some(ir => `${ir.owner}/${ir.repo}` === r)).length > 0 && (
+          <div className="bg-white rounded-lg shadow-sm border">
+            <div className="px-4 py-3 border-b font-medium">已连接的 Repo（未索引）</div>
+            <div className="divide-y">
+              {connectedRepos
+                .filter(r => !indexedRepos.some(ir => `${ir.owner}/${ir.repo}` === r))
+                .map((repo) => {
+                  const [owner, repoName] = repo.split("/");
+                  const progress = syncProgress[repo];
+                  const isSyncing = syncing === repo;
+                  return (
+                    <div key={repo} className="px-4 py-3">
+                      <div className="flex items-center justify-between">
+                        <div className="font-medium text-sm">{repo}</div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => handleSyncRepo(owner, repoName)}
+                            disabled={isSyncing}
+                            className="px-3 py-1 bg-green-100 text-green-700 rounded text-xs hover:bg-green-200 disabled:opacity-50"
+                          >
+                            {isSyncing ? "索引中..." : "开始索引"}
+                          </button>
+                          <button
+                            onClick={() => handleDisconnectRepo(repo)}
+                            className="text-red-500 hover:text-red-700 text-sm"
+                          >
+                            断开
+                          </button>
+                        </div>
+                      </div>
+                      {isSyncing && progress && progress.total > 0 && (
+                        <div className="mt-2">
+                          <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                            <span>处理中...</span>
+                            <span>{progress.processed + progress.skipped + progress.errors} / {progress.total}</span>
+                          </div>
+                          <div className="w-full bg-gray-200 rounded-full h-1.5">
+                            <div
+                              className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
+                              style={{ width: `${Math.round(((progress.processed + progress.skipped + progress.errors) / progress.total) * 100)}%` }}
+                            />
+                          </div>
+                          <div className="flex gap-3 mt-1 text-xs text-gray-400">
+                            <span>✅ {progress.processed}</span>
+                            <span>⏭️ {progress.skipped}</span>
+                            {progress.errors > 0 && <span>❌ {progress.errors}</span>}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        )}
+
+        {/* GitHub Token 状态提示 */}
+        <div className="bg-white rounded-lg shadow-sm border p-4">
+          <div className="flex items-center gap-2">
+            <span className="text-lg">🔑</span>
+            <span className="font-medium">GitHub Personal Access Token</span>
+            {githubSaved && githubToken ? (
+              <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">已配置</span>
+            ) : (
+              <span className="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-700">未配置</span>
+            )}
+          </div>
+          <p className="text-xs text-gray-500 mt-2">
+            请在「<span className="font-medium">设置 → 知识库 → GitHub</span>」中配置 Token，然后返回此页面查询并选择 Repo。
+          </p>
+        </div>
+
+        {/* 错误提示 */}
+        {githubError && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+            {githubError}
+          </div>
+        )}
+
+        {/* 可选 Repo 列表 */}
+        {githubRepos.length > 0 && (
+          <div className="bg-white rounded-lg shadow-sm border">
+            <div className="px-4 py-3 border-b flex items-center justify-between">
+              <span className="font-medium">可选 Repos ({githubRepos.length})</span>
+              <button
+                onClick={handleConnectGithub}
+                disabled={selectedRepos.size === 0 || connecting}
+                className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
+              >
+                {connecting ? "连接中..." : `连接选中 (${selectedRepos.size})`}
+              </button>
+            </div>
+            <div className="divide-y max-h-96 overflow-y-auto">
+              {githubRepos.map((repo) => (
+                <label
+                  key={repo.id}
+                  className={`px-4 py-3 flex items-start gap-3 cursor-pointer hover:bg-gray-50 ${
+                    connectedRepos.includes(repo.fullName) ? "bg-green-50" : ""
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedRepos.has(repo.fullName) || connectedRepos.includes(repo.fullName)}
+                    disabled={connectedRepos.includes(repo.fullName)}
+                    onChange={() => toggleRepo(repo.fullName)}
+                    className="mt-1"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-sm flex items-center gap-2">
+                      {repo.fullName}
+                      {connectedRepos.includes(repo.fullName) && (
+                        <span className="px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700">已连接</span>
+                      )}
+                    </div>
+                    {repo.description && (
+                      <div className="text-xs text-gray-500 truncate">{repo.description}</div>
+                    )}
+                    <div className="text-xs text-gray-400 mt-1 flex gap-3">
+                      {repo.language && <span>🔤 {repo.language}</span>}
+                      <span>⭐ {repo.stargazersCount}</span>
+                      <span>更新: {new Date(repo.updatedAt).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 空状态 */}
+        {githubRepos.length === 0 && !githubLoading && !githubError && (
+          <div className="text-center text-gray-400 py-12">
+            在「设置 → 知识库」中配置 GitHub Token 后，即可查询并选择 Repo
+          </div>
+        )}
+      </div>
+      )}
+
+      {/* 远程文档 Tab */}
+      {activeTab === "remote" && (
+      <div className="space-y-6">
+        {/* OneDrive 连接 */}
+        <div className="bg-white rounded-lg shadow-sm border p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-lg">☁️</span>
+            <span className="font-medium flex-1">Microsoft OneDrive / SharePoint</span>
+            {msGraphStatus?.connected && (
+              <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">已连接</span>
+            )}
+          </div>
+          <p className="text-sm text-gray-500 mb-3">
+            连接 OneDrive 后，可以在文档生成时自动搜索和引用远程文档。
+            使用两阶段检索：先通过关键词粗筛，再对候选文件做语义匹配。
+          </p>
+
+          {!msGraphStatus?.hasAppConfig && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-700">
+              ⚠️ 请先在 <strong>设置 → 知识库</strong> 中配置 Azure 应用信息（Tenant ID、Client ID、Client Secret）
+            </div>
+          )}
+
+          {msGraphStatus?.hasAppConfig && !msGraphStatus?.connected && (
+            <button
+              onClick={handleConnectOnedrive}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+            >
+              🔗 连接 OneDrive
+            </button>
+          )}
+
+          {msGraphStatus?.connected && (
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-gray-600">
+                ✅ {msGraphStatus.userDisplayName ?? msGraphStatus.userEmail ?? "Microsoft 账户"}
+              </span>
+              <button
+                onClick={handleDisconnectOnedrive}
+                className="text-sm text-red-500 hover:text-red-700 hover:underline"
+              >
+                断开连接
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* OneDrive 错误提示 */}
+        {onedriveError && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+            {onedriveError}
+          </div>
+        )}
+
+        {/* OneDrive 文件列表 */}
+        {onedriveFiles.length > 0 && (
+          <div className="bg-white rounded-lg shadow-sm border">
+            <div className="px-4 py-3 border-b font-medium">
+              OneDrive 文件 ({onedriveFiles.length})
+            </div>
+            <div className="divide-y max-h-96 overflow-y-auto">
+              {onedriveFiles.map((file) => (
+                <div key={file.id} className="px-4 py-3 flex items-center justify-between">
+                  <div>
+                    <div className="font-medium text-sm">{file.name}</div>
+                    <div className="text-xs text-gray-500">
+                      {file.mimeType} · {(file.size / 1024).toFixed(1)} KB
+                    </div>
+                  </div>
+                  <a
+                    href={file.webUrl}
+                    target="_blank"
+                    rel="noopener"
+                    className="text-blue-500 hover:underline text-sm"
+                  >
+                    打开
+                  </a>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 缓存统计 */}
+        <div className="bg-white rounded-lg shadow-sm border p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-lg">💾</span>
+            <span className="font-medium">本地缓存</span>
+          </div>
+          <div className="grid grid-cols-2 gap-4 mb-3">
+            <div className="text-center">
+              <div className="text-2xl font-bold text-blue-600">{cacheStats.entries}</div>
+              <div className="text-xs text-gray-500">缓存文件</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-green-600">{cacheStats.size}</div>
+              <div className="text-xs text-gray-500">缓存 chunks</div>
+            </div>
+          </div>
+          <p className="text-xs text-gray-400">
+            远程文件会缓存到本地，默认 24 小时过期。缓存命中时检索速度约 100ms，未命中时需 2-5 秒。
+          </p>
+        </div>
+
+        {/* 使用说明 */}
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+          <div className="font-medium text-blue-800 mb-2">💡 工作原理</div>
+          <ul className="text-sm text-blue-700 space-y-1">
+            <li>• <strong>Phase 1</strong>: 使用 Graph Search API 做关键词粗筛，快速找到候选文件</li>
+            <li>• <strong>Phase 2</strong>: 对 top-10 候选拉取内容 → 切片 → 向量化 → 语义匹配</li>
+            <li>• 文件内容会缓存到本地，避免重复拉取</li>
+            <li>• 检索结果与本地知识库融合，通过 RRF 算法排序</li>
+          </ul>
+        </div>
+      </div>
+      )}
+
+      {/* 文档 Tab */}
+      {activeTab === "sources" && (
+      <div className="space-y-6">
       {/* 上传区域 */}
-      <div className="mb-6">
+      <div className="bg-white rounded-lg shadow-sm border p-4">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-lg">📁</span>
+          <span className="font-medium">上传本地文档</span>
+        </div>
         <div
-          className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-400 transition-colors cursor-pointer"
+          className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-blue-400 transition-colors cursor-pointer"
           onClick={() => fileInputRef.current?.click()}
           onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("border-blue-400", "bg-blue-50"); }}
           onDragLeave={(e) => { e.currentTarget.classList.remove("border-blue-400", "bg-blue-50"); }}
@@ -109,9 +828,8 @@ export default function KnowledgePanel() {
             handleUpload(e.dataTransfer.files);
           }}
         >
-          <div className="text-4xl mb-2">📁</div>
-          <p className="text-gray-600 mb-2">拖拽文件到这里，或点击选择</p>
-          <p className="text-sm text-gray-400">支持 PDF、DOCX、TXT、HTML、Markdown、EML、JSON、XLSX、PPTX</p>
+          <p className="text-gray-600 mb-1">拖拽文件到这里，或点击选择</p>
+          <p className="text-xs text-gray-400">支持 PDF、DOCX、TXT、HTML、Markdown、EML、JSON、XLSX、PPTX</p>
           <input
             ref={fileInputRef}
             type="file"
@@ -131,41 +849,43 @@ export default function KnowledgePanel() {
         )}
       </div>
 
-      {/* 知识源列表 */}
-      <div className="bg-white rounded-lg shadow-sm border">
-        <div className="px-4 py-3 border-b font-medium">知识源列表</div>
-        {sources.length === 0 ? (
-          <div className="p-8 text-center text-gray-400">暂无知识源，请上传文件</div>
-        ) : (
+      {/* 文档列表 */}
+      {sources.length > 0 && (
+        <div className="bg-white rounded-lg shadow-sm border">
+          <div className="px-4 py-3 border-b flex items-center justify-between">
+            <span className="font-medium">已索引文档 ({sources.length})</span>
+          </div>
           <div className="divide-y">
             {sources.map((s) => (
-              <div key={s.id} className="px-4 py-3 flex items-center justify-between">
-                <div>
-                  <div className="font-medium">{s.name}</div>
-                  <div className="text-sm text-gray-500">
-                    {s.type.toUpperCase()} · {s.chunkCount} 块 · {new Date(s.createdAt).toLocaleDateString()}
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className={`px-2 py-1 rounded text-xs ${
-                    s.status === "ready" ? "bg-green-100 text-green-700" :
-                    s.status === "processing" ? "bg-yellow-100 text-yellow-700" :
-                    "bg-red-100 text-red-700"
-                  }`}>
-                    {s.status}
-                  </span>
+              <div key={s.id} className="px-4 py-3">
+                <div className="flex items-center justify-between">
+                  <div className="font-medium text-sm">{s.name}</div>
                   <button
                     onClick={() => handleDelete(s.id, s.name)}
-                    className="text-red-500 hover:text-red-700 text-sm"
+                    className="px-3 py-1 bg-red-100 text-red-700 rounded text-xs hover:bg-red-200"
                   >
                     删除
                   </button>
                 </div>
+                <div className="text-xs text-gray-500 flex gap-4 mt-1">
+                  <span>📄 {s.type.toUpperCase()}</span>
+                  <span>🧩 {s.chunkCount} 块</span>
+                  <span>🕐 {new Date(s.createdAt).toLocaleDateString()}</span>
+                </div>
               </div>
             ))}
           </div>
-        )}
+        </div>
+      )}
+
+      {/* 空状态 */}
+      {sources.length === 0 && !uploading && (
+        <div className="text-center text-gray-400 py-12">
+          暂无本地文档，上传文件后即可使用
+        </div>
+      )}
       </div>
+      )}
     </div>
   );
 }

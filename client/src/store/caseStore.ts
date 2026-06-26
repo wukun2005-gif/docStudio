@@ -67,6 +67,7 @@ export const useCaseStore = create<CaseStore>((set, get) => ({
       createdAt: now,
       updatedAt: now,
     };
+    console.log("[CaseStore] createCase", { id: c.id, userRequest: userRequest.slice(0, 50) });
     repoCreateCase(c).catch(console.error);
     set((prev) => ({ cases: [c, ...prev.cases], currentCase: c }));
     return c;
@@ -85,7 +86,10 @@ export const useCaseStore = create<CaseStore>((set, get) => ({
     }));
   },
 
-  setCurrentCase: (c) => set({ currentCase: c }),
+  setCurrentCase: (c) => {
+    console.log("[CaseStore] setCurrentCase", { caseId: c?.id });
+    set({ currentCase: c });
+  },
 
   updateTitle: (title) => {
     const c = get().currentCase;
@@ -105,7 +109,11 @@ export const useCaseStore = create<CaseStore>((set, get) => ({
 
   updateOutline: (outline) => {
     const c = get().currentCase;
-    if (!c) return;
+    if (!c) {
+      console.warn("[CaseStore] updateOutline: no currentCase, skipping");
+      return;
+    }
+    console.log("[CaseStore] updateOutline", { caseId: c.id, outlineLength: outline.length });
     const updated = { ...c, outline };
     set({ currentCase: updated, cases: get().cases.map((x) => x.id === c.id ? updated : x) });
     persistCase(updated);

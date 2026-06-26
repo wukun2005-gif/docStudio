@@ -78,5 +78,5 @@ export const useChatStore = create<ChatStore>((set) => ({
 
   clearMessages: () => set({ messages: [] }),
 
-  setActiveSessionId: (id) => set({ activeSessionId: id, messages: [] }),
+  setActiveSessionId: (id) => set({ activeSessionId: id }),
 }));

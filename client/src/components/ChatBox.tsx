@@ -13,7 +13,7 @@ import type { ChatSession, ChatMessage } from "../../../shared/src/types/chat.js
 
 interface ChatBoxProps {
   collapsed?: boolean;
-  onOutlineRequest?: (outline: Array<{ title: string; description?: string }>) => void;
+  onOutlineRequest?: (outline: Array<{ title: string; description?: string }>, skipEdit?: boolean) => void;
 }
 
 export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
@@ -22,6 +22,21 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // 自动调整 textarea 高度
+  const adjustTextareaHeight = () => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    const maxHeight = 200; // 最大高度 200px
+    textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+  };
+
+  // input 变化时调整高度
+  useEffect(() => {
+    adjustTextareaHeight();
+  }, [input]);
 
   const {
     sessions,
@@ -41,21 +56,30 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
   // ── 按 caseId 加载 sessions + messages（照搬 patentExaminator）──
   useEffect(() => {
     const caseId = currentCase?.id;
-    if (!caseId) return;
+    console.log("[ChatBox] Loading chat history effect", { caseId });
+    if (!caseId) {
+      console.log("[ChatBox] No caseId, skipping load");
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {
+        console.log("[ChatBox] Fetching sessions for case", { caseId });
         const storedSessions = await getSessionsByCaseId(caseId);
         if (cancelled) return;
+        console.log("[ChatBox] Loaded sessions", { count: storedSessions.length });
         loadSessions(storedSessions);
         const allMessages: ChatMessage[] = [];
         for (const s of storedSessions) {
           const msgs = await getMessagesBySessionId(s.id);
           allMessages.push(...msgs);
         }
-        if (!cancelled) loadMessages(allMessages);
+        if (!cancelled) {
+          console.log("[ChatBox] Loaded messages", { count: allMessages.length });
+          loadMessages(allMessages);
+        }
       } catch (e) {
-        console.error("Failed to load chat history", e);
+        console.error("[ChatBox] Failed to load chat history", e);
       }
     })();
     return () => { cancelled = true; };
@@ -104,6 +128,8 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
     if (!input.trim() || loading) return;
 
     let sessionId = effectiveSessionId;
+    console.log("[ChatBox] handleSend start", { sessionId, currentCaseId: currentCase?.id, input: input.slice(0, 50) });
+
     if (!sessionId) {
       const id = crypto.randomUUID();
       const now = localIso();
@@ -114,6 +140,7 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
         createdAt: now,
         updatedAt: now,
       };
+      console.log("[ChatBox] Creating new session", { id, caseId: currentCase?.id });
       addSession(session);
       setActiveSessionId(id);
       sessionId = id;
@@ -126,6 +153,7 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
       content: input,
       createdAt: localIso(),
     };
+    console.log("[ChatBox] Adding user message", { messageId: userMessage.id, sessionId });
     addMessage(userMessage);
 
     // 如果有 case，同步更新 userRequest
@@ -134,9 +162,14 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
     }
 
     setInput("");
+    // 重置 textarea 高度
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
+    }
     setLoading(true);
 
     try {
+      console.log("[ChatBox] Sending request to /api/chat");
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -146,6 +179,7 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
         }),
       });
       const data = await res.json();
+      console.log("[ChatBox] Received response", { ok: data.ok, type: data.type, hasOutline: !!data.suggestedOutline, contentLength: data.content?.length });
 
       if (data.ok) {
         const assistantMessage: ChatMessage = {
@@ -157,6 +191,7 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
           followUpQuestions: data.followUpQuestions,
           createdAt: localIso(),
         };
+        console.log("[ChatBox] Adding assistant message", { messageId: assistantMessage.id, type: data.type });
         addMessage(assistantMessage);
 
         if (sessionMessages.length === 0) {
@@ -168,11 +203,14 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
         }
 
         if (data.type === "outline_request" && data.suggestedOutline) {
+          console.log("[ChatBox] Outline request detected", { outlineLength: data.suggestedOutline.length, skipEdit: data.skipEdit, hasOnOutlineRequest: !!onOutlineRequest });
           if (onOutlineRequest) {
-            onOutlineRequest(data.suggestedOutline);
+            console.log("[ChatBox] Calling onOutlineRequest callback");
+            onOutlineRequest(data.suggestedOutline, data.skipEdit);
           } else {
             // 跨组件通信：通过 window event，附带用户原始消息
-            window.dispatchEvent(new CustomEvent("outline-request", { detail: { outline: data.suggestedOutline, userRequest: input } }));
+            console.log("[ChatBox] Dispatching outline-request event", { userRequest: input, skipEdit: data.skipEdit });
+            window.dispatchEvent(new CustomEvent("outline-request", { detail: { outline: data.suggestedOutline, userRequest: input, skipEdit: data.skipEdit } }));
           }
         }
       }
@@ -332,20 +370,28 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
 
       {/* 输入框 */}
       <div className="border-t p-3 shrink-0">
-        <div className="flex gap-2">
-          <input
-            type="text"
+        <div className="flex gap-2 items-end">
+          <textarea
+            ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-            placeholder="输入你的需求..."
-            className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSend();
+              }
+            }}
+            placeholder="输入你的需求... (Shift+Enter 换行)"
+            className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none overflow-y-auto"
+            style={{ minHeight: "40px", maxHeight: "200px" }}
+            rows={1}
             disabled={loading}
           />
           <button
             onClick={handleSend}
             disabled={loading || !input.trim()}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm transition-colors"
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm transition-colors shrink-0"
+            style={{ height: "40px" }}
           >
             发送
           </button>

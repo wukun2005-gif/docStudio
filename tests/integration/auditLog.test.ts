@@ -1,43 +1,31 @@
 /**
- * 审计日志集成测试
+ * 审计日志集成测试 — 文件方案
  */
-import { describe, it, expect, beforeAll, beforeEach } from "vitest";
-import Database from "better-sqlite3";
-import { resetDbForTesting, getDb } from "../../server/src/lib/db.js";
-import { logAudit, queryAuditLogs } from "../../server/src/lib/auditLog.js";
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
+import { resetDbForTesting, getDb, closeDb } from "../../server/src/lib/db.js";
+import { logAudit, queryAuditLogs, setTestLogFile, clearTestLogFile } from "../../server/src/lib/auditLog.js";
 import { addSource, deleteSource, updateSourceStatus } from "../../server/src/lib/knowledgeDb.js";
 import { addPerson, deletePerson } from "../../server/src/lib/peopleGraph.js";
+import { writeFileSync, unlinkSync, existsSync } from "fs";
+import { join } from "path";
 
-let db: Database.Database;
+const TEST_LOG = join(process.cwd(), "data", "test-audit.log");
 
 beforeAll(() => {
   resetDbForTesting(":memory:");
-  db = getDb();
+  setTestLogFile(TEST_LOG);
+});
+
+afterAll(() => {
+  clearTestLogFile();
+  closeDb();
+  // 清理测试日志文件
+  try { if (existsSync(TEST_LOG)) unlinkSync(TEST_LOG); } catch { /* ignore */ }
 });
 
 beforeEach(() => {
-  // 清空审计日志表
-  db.prepare("DELETE FROM audit_log").run();
-});
-
-describe("audit_log 表创建", () => {
-  it("audit_log 表存在", () => {
-    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_log'").all();
-    expect(tables).toHaveLength(1);
-  });
-
-  it("audit_log 表有正确的列", () => {
-    const columns = db.prepare("PRAGMA table_info(audit_log)").all() as Array<{ name: string }>;
-    const colNames = columns.map(c => c.name);
-    expect(colNames).toContain("id");
-    expect(colNames).toContain("timestamp");
-    expect(colNames).toContain("table_name");
-    expect(colNames).toContain("operation");
-    expect(colNames).toContain("record_id");
-    expect(colNames).toContain("old_data");
-    expect(colNames).toContain("new_data");
-    expect(colNames).toContain("source");
-  });
+  // 清空测试日志文件
+  writeFileSync(TEST_LOG, "");
 });
 
 describe("logAudit 基本功能", () => {
@@ -95,6 +83,7 @@ describe("logAudit 基本功能", () => {
 
 describe("知识库操作审计", () => {
   beforeEach(() => {
+    const db = getDb();
     db.prepare("DELETE FROM kb_sources").run();
   });
 
@@ -124,7 +113,7 @@ describe("知识库操作审计", () => {
     });
 
     // 清空审计日志，只关注 delete 操作
-    db.prepare("DELETE FROM audit_log").run();
+    writeFileSync(TEST_LOG, "");
 
     deleteSource("src-002");
 
@@ -143,7 +132,7 @@ describe("知识库操作审计", () => {
     });
 
     // 清空审计日志
-    db.prepare("DELETE FROM audit_log").run();
+    writeFileSync(TEST_LOG, "");
 
     updateSourceStatus("src-003", "processing");
 
@@ -156,6 +145,7 @@ describe("知识库操作审计", () => {
 
 describe("People 操作审计", () => {
   beforeEach(() => {
+    const db = getDb();
     db.prepare("DELETE FROM people").run();
   });
 
@@ -181,7 +171,7 @@ describe("People 操作审计", () => {
     });
 
     // 清空审计日志
-    db.prepare("DELETE FROM audit_log").run();
+    writeFileSync(TEST_LOG, "");
 
     deletePerson("person-002");
 
@@ -193,8 +183,9 @@ describe("People 操作审计", () => {
 
 describe("审计日志异常处理", () => {
   it("审计失败不影响业务操作", () => {
-    // 模拟审计失败（表不存在）
-    db.exec("DROP TABLE IF EXISTS audit_log");
+    // 设置一个不存在的目录路径，模拟写入失败
+    const origPath = join(process.cwd(), "nonexistent-dir", "audit.log");
+    setTestLogFile(origPath);
 
     // 调用 logAudit 应该不会抛出异常
     expect(() => {
@@ -206,27 +197,12 @@ describe("审计日志异常处理", () => {
       });
     }).not.toThrow();
 
-    // 恢复 audit_log 表
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS audit_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-        table_name TEXT NOT NULL,
-        operation TEXT NOT NULL,
-        record_id TEXT NOT NULL,
-        old_data TEXT,
-        new_data TEXT,
-        source TEXT
-      )
-    `);
+    // 恢复正常路径
+    setTestLogFile(TEST_LOG);
   });
 });
 
 describe("queryAuditLogs 查询功能", () => {
-  beforeEach(() => {
-    db.prepare("DELETE FROM audit_log").run();
-  });
-
   it("按 table 查询", () => {
     logAudit({ table: "table_a", operation: "INSERT", recordId: "1", source: "test" });
     logAudit({ table: "table_b", operation: "INSERT", recordId: "2", source: "test" });

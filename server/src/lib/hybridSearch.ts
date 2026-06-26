@@ -315,3 +315,154 @@ export function hybridSearch(
 
   return results;
 }
+
+// ── 跨源混合检索（本地 + 远程） ─────────────────────────
+
+export interface RemoteSearchConfig {
+  /** MS Graph access token */
+  msAccessToken?: string;
+  /** GitHub token */
+  githubToken?: string;
+  /** Embedding 配置 */
+  embedding?: {
+    baseUrl: string;
+    apiKey: string;
+    modelId: string;
+  };
+  /** 是否启用远程检索 */
+  enableRemote?: boolean;
+}
+
+export interface CrossSourceSearchResult {
+  chunkId: string;
+  content: string;
+  sourceId: string;
+  score: number;
+  matchType: "bm25" | "vector" | "hybrid" | "remote";
+  /** 来源平台 */
+  platform?: "local" | "onedrive" | "github";
+  /** 远程来源的额外信息 */
+  remoteInfo?: {
+    fileName: string;
+    fileUrl?: string;
+  };
+}
+
+/**
+ * 跨源混合检索：本地知识库 + GitHub + OneDrive
+ *
+ * 流程:
+ * 1. 并行执行本地检索和远程 Phase 1
+ * 2. 远程 Phase 2（如果需要）
+ * 3. 跨源 RRF 融合
+ */
+export async function hybridSearchWithRemote(
+  query: string,
+  config: HybridSearchConfig & RemoteSearchConfig = {},
+): Promise<CrossSourceSearchResult[]> {
+  const { enableRemote = true, limit = 10 } = config;
+
+  // 1. 本地知识库检索
+  const localResults = hybridSearch(query, config);
+  const localMapped: CrossSourceSearchResult[] = localResults.map(r => ({
+    ...r,
+    platform: "local" as const,
+  }));
+
+  if (!enableRemote) {
+    return localMapped;
+  }
+
+  // 2. 远程检索（并行执行）
+  const remotePromises: Promise<CrossSourceSearchResult[]>[] = [];
+
+  // OneDrive 两阶段检索
+  if (config.msAccessToken) {
+    remotePromises.push(
+      (async () => {
+        try {
+          // 动态导入避免循环依赖
+          const { twoStageRetrieve } = await import("./remoteRetrieval.js");
+          const results = await twoStageRetrieve(query, {
+            msAccessToken: config.msAccessToken,
+            queryEmbedding: config.queryEmbedding,
+            embedding: config.embedding,
+            candidateLimit: 20,
+            fetchLimit: 10,
+          });
+          return results.map((r, idx) => ({
+            chunkId: `remote-${r.platform}-${idx}`,
+            content: r.content,
+            sourceId: r.fileName,
+            score: r.score,
+            matchType: r.matchType === "keyword" ? "remote" as const : r.matchType as "vector" | "hybrid",
+            platform: r.platform as "onedrive",
+            remoteInfo: {
+              fileName: r.fileName,
+              fileUrl: r.fileUrl,
+            },
+          }));
+        } catch (err) {
+          logger.warn(`[HybridSearch] OneDrive 检索失败: ${err instanceof Error ? err.message : String(err)}`);
+          return [];
+        }
+      })(),
+    );
+  }
+
+  // GitHub 检索（在已 clone 的 repo 中搜索）
+  if (config.githubToken) {
+    remotePromises.push(
+      (async () => {
+        try {
+          // GitHub 检索通过本地已索引的 chunks 完成
+          // 已经在本地知识库中，不需要额外处理
+          return [];
+        } catch (err) {
+          logger.warn(`[HybridSearch] GitHub 检索失败: ${err instanceof Error ? err.message : String(err)}`);
+          return [];
+        }
+      })(),
+    );
+  }
+
+  // 等待远程检索完成
+  const remoteResults = await Promise.all(remotePromises);
+  const allRemote = remoteResults.flat();
+
+  // 3. 跨源 RRF 融合
+  if (allRemote.length === 0) {
+    return localMapped;
+  }
+
+  // 使用 RRF 融合本地和远程结果
+  const K = 60;
+  const scores = new Map<string, { result: CrossSourceSearchResult; localRank: number; remoteRank: number }>();
+
+  localMapped.forEach((r, rank) => {
+    scores.set(r.chunkId, { result: r, localRank: rank + 1, remoteRank: Infinity });
+  });
+
+  allRemote.forEach((r, rank) => {
+    const existing = scores.get(r.chunkId);
+    if (existing) {
+      existing.remoteRank = rank + 1;
+    } else {
+      scores.set(r.chunkId, { result: r, localRank: Infinity, remoteRank: rank + 1 });
+    }
+  });
+
+  const fused = Array.from(scores.values()).map(s => {
+    const localScore = s.localRank < Infinity ? 1 / (K + s.localRank) : 0;
+    const remoteScore = s.remoteRank < Infinity ? 1 / (K + s.remoteRank) : 0;
+    return {
+      ...s.result,
+      score: localScore + remoteScore,
+      matchType: (s.localRank < Infinity && s.remoteRank < Infinity) ? "hybrid" as const : s.result.matchType,
+    };
+  }).sort((a, b) => b.score - a.score);
+
+  logger.info(`[HybridSearch] 跨源融合: local=${localMapped.length}, remote=${allRemote.length}, fused=${fused.length}`);
+
+  return fused.slice(0, limit);
+}

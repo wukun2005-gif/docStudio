@@ -253,7 +253,24 @@ CREATE TABLE user_settings (
   key TEXT PRIMARY KEY,
   value JSON
 );
+
+-- People Graph（组织架构）
+CREATE TABLE people (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  title TEXT,
+  department TEXT,
+  email TEXT,
+  attributes JSON,                -- { relationships: [...], ... }
+  created_at DATETIME DEFAULT (datetime('now','localtime')),
+  updated_at DATETIME DEFAULT (datetime('now','localtime'))
+);
 ```
+
+**People Graph 数据模型**：
+- 人员信息存储在 `people` 表
+- 关系数据存储在 `attributes.relationships` JSON 字段中（非独立表）
+- 导入 API 支持 `{ nodes, edges }` 格式，自动将 edges 转换为 relationships
 
 ---
 
@@ -374,6 +391,45 @@ PUT  /api/settings/reranker
   Body: { provider: string, model: string, apiKey: string, baseUrl: string }
   Response: { success: boolean, connected: boolean }
 ```
+
+### People Graph API
+
+```
+GET  /api/people
+  Response: { ok: true, people: Person[] }
+
+GET  /api/people/org-tree
+  Response: { ok: true, tree: Record<string, Person[]> }
+
+GET  /api/people/export
+  Response: { ok: true, people: Person[] }
+
+POST /api/people/import
+  Body: { people: [...] } | { nodes: [...], edges: [...] } | [...]
+  Response: { ok: true, imported: number, relationships: number }
+
+GET  /api/people/:id
+  Response: { ok: true, person: Person }
+
+GET  /api/people/:id/relationships
+  Response: { ok: true, relationships: Array<{ person: Person, relationship: Relationship }> }
+
+GET  /api/people/:id/context
+  Response: { ok: true, context: string }
+
+POST /api/people
+  Body: { name, title?, department?, email?, attributes? }
+  Response: { ok: true, id: string }
+
+PUT  /api/people/:id
+  Body: { name?, title?, department?, email? }
+  Response: { ok: true }
+
+DELETE /api/people/:id
+  Response: { ok: true }
+```
+
+**路由顺序注意**：`/export` 和 `/import` 必须在 `/:id` 之前定义，否则会被 `/:id` 匹配。
 
 ---
 
@@ -510,6 +566,35 @@ async function checkGroundedness(
   return { verdict, groundedRatio, sentenceResults };
 }
 ```
+
+#### 统一入库 Pipeline 原则
+
+**所有知识源入库渠道必须走同一个预处理+分块+去噪+向量化 pipeline。**
+
+无论数据来自文件上传、GitHub、MS Graph、arXiv 还是其他 connector，入库前必须经过以下完整步骤：
+
+1. **去重检查** — `computeTextHash` + `findDuplicateByHash`，重复数据直接跳过
+2. **文本预处理** — `preprocessText`（清理页眉页脚、全角半角、日期标准化）
+3. **智能分块** — `chunkText`（smartChunk），按语义边界分块
+4. **去噪过滤** — `isNoise` / `isGarbled`，过滤噪声和乱码
+5. **入库** — `addSource` + `addChunks`，写入 `kb_sources` + `kb_chunks`
+6. **向量化** — `embedChunks`（如有 embedding 配置），写入 `kb_vectors`
+
+```
+文件上传 ─┐
+GitHub ───┤                ┌─ computeTextHash (去重)
+MS Graph ─┼─ extractText ──┤─ preprocessText (预处理)
+arXiv ────┤                ├─ chunkText (分块)
+其他 ─────┘                ├─ isNoise/isGarbled (去噪)
+                           ├─ addSource + addChunks (入库)
+                           └─ embedChunks (向量化)
+```
+
+❌ **禁止**：connector 直接调用 `addSource`/`addChunks` 绕过预处理 pipeline
+❌ **禁止**：不同渠道使用不同的分块/去重/向量化策略
+✅ **正确做法**：所有渠道的文本提取后，调用统一的 `ingestText()` 函数完成入库
+
+> **注意**：connector 的职责是**数据拉取和格式转换**（将外部数据转为纯文本），不负责入库逻辑。入库由统一 pipeline 处理。
 
 ### 5.4 Document Generator (docGenerator.ts)
 
@@ -863,20 +948,72 @@ Office Add-in 的侧边栏 React 应用复用 client 的核心组件：
 
 **对应 PRD**: 7. Demo 场景设计
 
+#### 实现方案
+
 ```
-1. 配置 MSA 测试账号（.env 文件）
-2. 准备 OneDrive 上的 sample 文档
-   - 产品 PRD 文档（最近 1 周）
-   - 设计文档（最近 1 周）
-   - 项目进度表 Excel（最近 1 周）
-   - 项目进度文档（最近 1 周）
-3. 准备 GitHub sample 数据
-   - i-Write 仓库的代码 commits（最近 1 周）
-4. 准备 Teams/Outlook sample 数据
-   - 会议纪要（最近 1 周）
-   - 邮件往来（最近 1 周）
-5. 验证所有 sample 数据可访问
+samples/                          # 样本文件目录
+├── meetings/                     # 8 篇会议纪要 (.docx)
+├── tech-docs/                    # 10 篇技术文档 (.docx)
+├── emails/                       # 15 封邮件 (.eml)
+├── chat/                         # Teams 聊天记录 (.json)
+├── data/                         # 4 份 Excel 数据 (.xlsx)
+├── presentations/                # 3 份 PPT 演示 (.pptx)
+└── charts/
+    └── people-graph.json         # 18 人组织架构
 ```
+
+#### 生成脚本
+
+| 脚本 | 用途 |
+|------|------|
+| `server/src/scripts/generateSamples.ts` | 生成 Word、邮件、Teams、Excel 文件 |
+| `server/src/scripts/generatePpt.py` | 生成 PPT 文件（含图表） |
+
+#### 关键设计决策
+
+1. **文件生成 vs 数据库注入**：样本数据生成为物理文件，通过标准上传流程导入知识库，不绕过 embedding/chunking 管道
+2. **People Graph 导入**：通过 `POST /api/people/import` API 导入，支持 `{ nodes, edges }` 格式
+3. **内容长度**：长文档 3000-5000 字符，确保 chunker 产出多个 chunk
+4. **图文比例**：Word 文档含表格，PPT 含图表（柱状图、饼图）
+
+#### E2E 测试
+
+```bash
+# 全链路测试（27 个用例）
+node tests/e2e-sample-data.mjs
+
+# 数据质量指标计算
+node tests/data-quality-metrics.mjs
+```
+
+测试覆盖：知识库上传、搜索召回、People Graph CRUD、文档生成 Citation 链路、数据质量 Metrics 报告。
+
+#### 数据质量指标实现
+
+**Self-BLEU（文档间相似度）**：
+- 算法：计算文档间 BLEU 分数平均值
+- 实现：对 .eml 和 .json 文件提取文本，采样计算 1-4 gram 精确度
+- 阈值：< 0.50
+
+**Uniqueness（非近重复文档比例）**：
+- 算法：Jaccard 相似度，> 0.85 视为近重复
+- 实现：对采样文档计算 token 集合相似度
+- 阈值：>= 0.90
+
+**Type Coverage（类型覆盖度）**：
+- 算法：实际类型 / 目标类型
+- 目标类型：docx, email, json, excel, ppt
+- 阈值：100%
+
+**Structural Conformance（结构符合度）**：
+- 算法：检查文档结构要素（如 email 必含 subject/from/to）
+- 实现：正则匹配 + 模板检查
+- 阈值：>= 80%
+
+**Fluency（流畅度）**：
+- 算法：LLM-as-judge 评分 1-5 分
+- 实现：调用 MiMo API，采样 5 个文件评分
+- 阈值：>= 3.5/5
 
 ### Phase 13: 打磨 + 演示
 

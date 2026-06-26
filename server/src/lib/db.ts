@@ -171,6 +171,37 @@ function migrate(db: Database.Database): void {
 
     -- 审计日志已改为文件方案，见 auditLog.ts（日志文件: server/data/db-audit.log）
 
+    -- 远程知识源轻量索引
+    CREATE TABLE IF NOT EXISTS kb_remote_index (
+      id            TEXT PRIMARY KEY,
+      source_type   TEXT NOT NULL,          -- 'github_repo' | 'onedrive' | 'sharepoint'
+      remote_id     TEXT NOT NULL,          -- 平台侧 ID（GitHub: owner/repo path, OneDrive: fileId）
+      name          TEXT NOT NULL,
+      url           TEXT,
+      metadata      TEXT,                   -- JSON: { owner, repo, branch, path, mimeType, size, lastModified }
+      content_hash  TEXT,                   -- 内容 hash（用于增量同步判断）
+      indexed_at    TEXT,                   -- 最后索引时间
+      chunk_count   INTEGER DEFAULT 0,
+      status        TEXT DEFAULT 'indexed'  -- 'indexed' | 'syncing' | 'error'
+    );
+    CREATE INDEX IF NOT EXISTS idx_remote_source_type ON kb_remote_index(source_type);
+    CREATE INDEX IF NOT EXISTS idx_remote_remote_id ON kb_remote_index(remote_id);
+
+    -- 同步任务管理
+    CREATE TABLE IF NOT EXISTS kb_sync_jobs (
+      id            TEXT PRIMARY KEY,
+      source_type   TEXT NOT NULL,          -- 'github_repo' | 'onedrive'
+      config        TEXT NOT NULL,           -- JSON: { owner, repo, branch } 或 { folderId }
+      status        TEXT DEFAULT 'pending',  -- 'pending' | 'running' | 'completed' | 'error'
+      progress      TEXT,                   -- JSON: { total, processed, skipped, errors }
+      last_sync_at  TEXT,
+      error_message TEXT,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      updated_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sync_source_type ON kb_sync_jobs(source_type);
+    CREATE INDEX IF NOT EXISTS idx_sync_status ON kb_sync_jobs(status);
+
     -- 生成树（段落级来源追溯）
     CREATE TABLE IF NOT EXISTS provenance_nodes (
       id            TEXT PRIMARY KEY,
@@ -215,9 +246,44 @@ function migrate(db: Database.Database): void {
   }
 
   // 设置版本号
-  if (versionRow < 2) {
-    db.pragma("user_version = 2");
+  if (versionRow < 3) {
+    db.pragma("user_version = 3");
   }
 
-  logger.info(`[DB] Migration 完成, version=2`);
+  // ── 种子数据：当前用户（黄薇）──
+  seedCurrentUser(db);
+
+  logger.info(`[DB] Migration 完成, version=3`);
+}
+
+/** 首次启动时自动创建当前用户到 People Graph + sender_profile */
+function seedCurrentUser(db: Database.Database): void {
+  const SENDER_ID = "current-user";
+  const SENDER_NAME = "黄薇";
+
+  // 检查是否已有 sender_profile
+  const existingProfile = db.prepare("SELECT value FROM user_settings WHERE key = 'sender_profile'").get() as { value: string } | undefined;
+  if (existingProfile) return; // 已配置过，不覆盖
+
+  // 检查 people 表是否已有此人（按姓名匹配）
+  const existingPerson = db.prepare("SELECT id FROM people WHERE name = ?").get(SENDER_NAME) as { id: string } | undefined;
+
+  if (!existingPerson) {
+    // 插入 People Graph
+    db.prepare(`INSERT OR REPLACE INTO people (id, name, title, department, email, attributes, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))`)
+      .run(SENDER_ID, SENDER_NAME, null, null, null, JSON.stringify({ isCurrentUser: true }));
+    logger.info(`[DB] 种子数据: 创建当前用户 ${SENDER_NAME}（People Graph）`);
+  } else {
+    // 已有同名 person，标记为当前用户
+    const attrs = db.prepare("SELECT attributes FROM people WHERE id = ?").get(existingPerson.id) as { attributes: string | null } | undefined;
+    let parsed: Record<string, unknown> = {};
+    try { parsed = attrs?.attributes ? JSON.parse(attrs.attributes) : {}; } catch { /* ignore */ }
+    parsed.isCurrentUser = true;
+    db.prepare("UPDATE people SET attributes = ? WHERE id = ?").run(JSON.stringify(parsed), existingPerson.id);
+  }
+
+  // 写入 sender_profile
+  db.prepare("INSERT OR REPLACE INTO user_settings (key, value, updated_at) VALUES (?, ?, datetime('now','localtime'))")
+    .run("sender_profile", JSON.stringify({ name: SENDER_NAME }));
+  logger.info(`[DB] 种子数据: 创建 sender_profile（${SENDER_NAME}）`);
 }

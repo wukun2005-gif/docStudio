@@ -254,16 +254,85 @@ async function callJudge(
 
     throw new Error("JSON 解析失败");
   } catch (err) {
-    logger.warn(`[Groundedness] Judge 调用失败: ${err instanceof Error ? err.message : String(err)}`);
-    // 降级：全部通过（照搬 patentExaminator 的降级策略）
+    logger.warn(`[Groundedness] Judge 调用失败: ${err instanceof Error ? err.message : String(err)}，重试一次...`);
+
+    // ── 重试一次 ──
+    try {
+      const dbSettings = readSettingsFromDb();
+      const providers = config.providerPreference ?? dbSettings.providerPreference ?? ["mimo"];
+      const providerApiKeys: Record<string, string> = {};
+      for (const pid of providers) {
+        const key = config.apiKey ?? getApiKey(pid);
+        if (key) providerApiKeys[pid] = key;
+      }
+
+      const { response: retryResponse } = await registry.runWithFallback(
+        providers,
+        {
+          modelId: config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro",
+          messages: [
+            { role: "system", content: buildJudgePrompt(sentences, groundingDocs).system },
+            { role: "user", content: buildJudgePrompt(sentences, groundingDocs).user },
+          ],
+          apiKey: "",
+          maxTokens: 2000,
+          temperature: 0,
+          timeoutMs: config.timeoutMs ?? 180_000,
+          responseFormat: {
+            type: "json_schema",
+            json_schema: {
+              name: "groundedness_result",
+              strict: true,
+              schema: {
+                type: "object",
+                properties: {
+                  claims: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      properties: {
+                        text: { type: "string" },
+                        verdict: { type: "string", enum: ["grounded", "ungrounded", "not_verifiable"] },
+                        evidence: { type: "string" },
+                        reason: { type: "string" },
+                      },
+                      required: ["text", "verdict"],
+                    },
+                  },
+                  groundedRatio: { type: "number" },
+                  overallVerdict: { type: "string", enum: ["pass", "fail", "partial"] },
+                },
+                required: ["claims", "groundedRatio", "overallVerdict"],
+              },
+            },
+          },
+        },
+        undefined, undefined,
+        providerApiKeys,
+        config.providerBaseUrls,
+      );
+
+      if (!retryResponse.error) {
+        const retryParsed = extractJudgeJson(retryResponse.text);
+        if (retryParsed) {
+          logger.info(`[Groundedness] 重试成功`);
+          return retryParsed;
+        }
+      }
+    } catch (retryErr) {
+      logger.warn(`[Groundedness] 重试也失败: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`);
+    }
+
+    // ── 最终降级：使用 partial 而非 pass，避免放行不合格内容 ──
+    logger.warn(`[Groundedness] Judge 两次调用均失败，降级为 partial`);
     return {
       claims: sentences.map((s) => ({
         text: s,
-        verdict: "grounded" as const,
-        reason: "Judge 调用失败，默认通过",
+        verdict: "not_verifiable" as const,
+        reason: "Judge 调用失败，保守标记为无法验证",
       })),
-      groundedRatio: 1,
-      overallVerdict: "pass",
+      groundedRatio: 0.5,
+      overallVerdict: "partial",
     };
   }
 }

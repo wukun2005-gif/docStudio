@@ -1,21 +1,23 @@
-From: 陈强（技术负责人） <chenqiang@nexora-tech.com>
-To: 刘伟（高级后端工程师） <liuwei@nexora-tech.com>
-Date: 2026-06-17（周二）11:45
-Subject: Re: [紧急] Azure AD redirect_uri 配置问题
+From: 陈强 <chenqiang@nexora-tech.com>
+To: 刘伟 <liuwei@nexora-tech.com>
+Date: 2026-06-17 15:10 +0800
+Subject: Re: Azure AD redirect_uri 配置问题 — 解决方案
 MIME-Version: 1.0
 Content-Type: text/plain; charset="UTF-8"
 Content-Transfer-Encoding: 7bit
 
 刘伟，
 
-用方案 1，在一个 App Registration 里配置多个 redirect_uri：
-- http://localhost:3000/auth/callback（开发）
-- https://app.i-write.com/auth/callback（生产）
+我查了一下，问题在于 Azure AD 的 redirect_uri 必须精确匹配，包括路径和查询参数。
 
-环境变量里配置：
-MS_REDIRECT_URI=http://localhost:3000/auth/callback  # 开发
-MS_REDIRECT_URI=https://app.i-write.com/auth/callback  # 生产
+解决方案：
+1. 在 Azure Portal 中，确保 redirect_uri 是：http://localhost:3000/auth/microsoft/callback
+2. 注意：不要有尾部斜杠（/），Azure AD 会区分 http://localhost:3000/auth/microsoft/callback 和 http://localhost:3000/auth/microsoft/callback/
+3. 确保代码中的 redirect_uri 参数与 Azure Portal 中配置的完全一致
 
-这样最简单，不需要维护两个 App。
+另外，Azure AD 有缓存机制，修改配置后可能需要等待 5-10 分钟才能生效。
+
+我已经更新了配置文档，放在 docs/azure-ad-setup.md，你可以参考。
 
 陈强
+技术负责人 | Nexora Tech

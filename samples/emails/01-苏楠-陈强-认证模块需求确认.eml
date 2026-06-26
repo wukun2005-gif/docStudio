@@ -1,22 +1,31 @@
-From: 苏楠（产品总监） <sunan@nexora-tech.com>
-To: 陈强（技术负责人） <chenqiang@nexora-tech.com>
-Date: 2026-06-15（周日）20:30
-Subject: 认证模块需求确认 - 请周一评审前看一下
+From: 苏楠 <sunan@nexora-tech.com>
+To: 陈强 <chenqiang@nexora-tech.com>
+Date: 2026-06-15 10:30 +0800
+Subject: 认证模块需求变更通知 — 3 条变更
 MIME-Version: 1.0
 Content-Type: text/plain; charset="UTF-8"
 Content-Transfer-Encoding: 7bit
 
-陈强你好，
+陈强，
 
-明天下午的认证模块需求评审，我把需求文档整理好了，主要变化：
+认证模块需求评审完成，有 3 条需求变更需要你确认：
 
-1. 新增 Microsoft OAuth2 支持 — 之前只计划了 GitHub OAuth，但考虑到我们的目标用户很多用 Microsoft 365，需要加上
-2. Token 刷新策略调整 — 从 2 小时改为 1 小时，安全性更高
-3. 多账号绑定 — 用户可以同时绑定 Microsoft 和 GitHub 账号
+1. 原需求 7（CSRF 防护）增加 SameSite Cookie 属性
+   - 原因：额外防护层，防止 CSRF 攻击
+   - 影响：前端 Cookie 设置需要增加 SameSite=Lax
+   - 你之前提出，全员同意
 
-另外，设计团队（罗茜）已经出了登录页面的初稿，评审时一起看。
+2. 原需求 17（会话管理）改为默认单设备登录
+   - 原因：企业客户反馈，多设备登录有安全风险
+   - 影响：后端需要增加设备管理逻辑
+   - 苏楠提出，企业客户 Acme Corp 要求
 
-需求文档链接：[OneDrive: 认证模块 PRD v2.pdf]
+3. 新增需求 19：支持 API Key 认证（用于 CLI 工具）
+   - 原因：工程师用户需要通过 CLI 调用 API
+   - 影响：需要新增 API Key 生成和验证逻辑
+   - 你提出，排入 Sprint 4
 
-Best,
+请确认以上变更，如有问题请回复。
+
 苏楠
+产品总监 | Nexora Tech

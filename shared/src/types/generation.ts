@@ -39,7 +39,7 @@ export interface DocumentMetadata {
   style: "email" | "ppt" | "table" | "code" | "report" | "general";
   guide: string;
   // 邮件特有
-  recipient?: { name: string; email?: string; title?: string; department?: string };
+  recipient?: { name: string; email?: string; title?: string; department?: string; personId?: string };
   subject?: string;
   cc?: string[];
   // 通用

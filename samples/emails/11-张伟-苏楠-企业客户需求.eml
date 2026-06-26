@@ -1,26 +1,35 @@
-From: 张伟（企业销售经理） <zhangwei@nexora-tech.com>
-To: 苏楠（产品总监） <sunan@nexora-tech.com>
-Date: 2026-06-20（周五）10:00
-Subject: Acme Corp 客户需求清单 - 请评审
+From: 张伟 <zhangwei@nexora-tech.com>
+To: 苏楠 <sunan@nexora-tech.com>
+Date: 2026-06-20 09:30 +0800
+Subject: Acme Corp 企业客户需求清单
 MIME-Version: 1.0
 Content-Type: text/plain; charset="UTF-8"
 Content-Transfer-Encoding: 7bit
 
 苏楠，
 
-Acme Corp（200 人团队）的需求清单整理好了，他们对 i-Write 非常感兴趣：
+与 Acme Corp CTO 沟通后，整理了他们的核心需求：
 
-核心需求：
-1. SSO 集成 — 必须支持 Azure AD（已有）
-2. 批量文档生成 — 一次生成 50+ 份文档
-3. 团队权限管理 — Admin/Editor/Viewer 三级权限
-4. API 接入 — 通过 API 集成到现有系统
-5. 数据安全 — 必须满足 SOC 2 Type II
+【必须满足（P0）】
+1. SSO 集成 — 支持 Azure AD SAML 2.0
+2. 团队管理 — 管理后台、成员邀请、权限控制
+3. 批量文档生成 — 一次生成 10+ 份文档
+4. 数据安全 — 符合 SOC 2 Type II 标准
 
-预算：$49/人/月 × 200 人 = $9,800/月（$117,600/年）
+【最好满足（P1）】
+5. 自定义模板 — 企业文档模板管理
+6. API 集成 — 与内部系统集成
+7. 审计日志 — 可导出的审计报告
 
-时间线：希望 7 月底前开始试用，8 月底正式上线。
+【可以后续（P2）】
+8. 自定义品牌 — 使用企业 logo 和配色
+9. 多语言支持 — 英文、中文、日文
 
-请评审需求优先级，我下周安排技术 demo。
+预算：$49/月/人 × 50 人 = $2,450/月（年付 $23,520）
+决策人：CTO（赵军对接）
+时间线：希望 7 月底前上线
+
+请评估哪些需求可以在 Sprint 4-5 完成。
 
 张伟
+企业销售经理 | Nexora Tech

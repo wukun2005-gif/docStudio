@@ -58,10 +58,19 @@ generationRouter.post("/generate", async (req, res) => {
       return;
     }
 
-    const runId = crypto.randomUUID();
-
-    // 创建生成记录
+    // ── 并发去重：检查是否已有同名文档正在生成 ──
     const db = getDb();
+    const existing = db.prepare(
+      "SELECT id FROM generation_runs WHERE title = ? AND status = 'generating'"
+    ).get(title) as { id: string } | undefined;
+
+    if (existing) {
+      logger.warn(`[Generation] 拒绝并发请求: "${title}" 已有生成任务 ${existing.id}`);
+      res.status(409).json({ ok: false, error: "同名文档正在生成中，请等待完成", existingRunId: existing.id });
+      return;
+    }
+
+    const runId = crypto.randomUUID();
     db.prepare(`INSERT INTO generation_runs (id, title, outline, format, status) VALUES (?, ?, ?, ?, ?)`)
       .run(runId, title, JSON.stringify(outline), format ?? "html", "generating");
 

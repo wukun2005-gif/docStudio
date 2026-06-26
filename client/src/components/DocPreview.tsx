@@ -488,7 +488,11 @@ export default function DocPreview({
                                   >
                                     <div className="flex items-start justify-between gap-2 pr-1">
                                       <div className="flex-1 min-w-0">
-                                        {src.sourceId ? (
+                                        {src.sourceUrl ? (
+                                          <a href={src.sourceUrl} target="_blank" rel="noopener" className="text-blue-600 hover:underline font-medium">
+                                            📄 {src.sourceName || src.chunkId}
+                                          </a>
+                                        ) : src.sourceId ? (
                                           <a href={`/api/knowledge/sources/${src.sourceId}/file`} target="_blank" rel="noopener" className="text-blue-600 hover:underline font-medium">
                                             📄 {src.sourceName || src.chunkId}
                                           </a>

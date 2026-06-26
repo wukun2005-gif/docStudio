@@ -12,3 +12,6 @@ coverage/
 *.tsbuildinfo
 docs/backlog.md
 docs/sample-data-upgrade-plan.md
+.trae/
+samples_old/
+server/repos/

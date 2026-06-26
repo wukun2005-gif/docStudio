@@ -1,22 +1,40 @@
-From: 刘伟（高级后端工程师） <liuwei@nexora-tech.com>
-To: 陈强（技术负责人） <chenqiang@nexora-tech.com>
-Date: 2026-06-19（周四）18:00
-Subject: BUG-215 已修复 - Token 刷新竞态问题
+From: 刘伟 <liuwei@nexora-tech.com>
+To: 陈强 <chenqiang@nexora-tech.com>
+Date: 2026-06-19 18:30 +0800
+Subject: BUG-215 Token 刷新竞态修复 — 已完成
 MIME-Version: 1.0
 Content-Type: text/plain; charset="UTF-8"
 Content-Transfer-Encoding: 7bit
 
 陈强，
 
-BUG-215（Token 刷新时偶尔 401）已修复。
+BUG-215 Token 刷新竞态条件已修复，PR #132 已提交。
 
-解决方案：
-1. Token 刷新时设置 isRefreshing 标志
-2. 后续请求检测到 isRefreshing 时，加入等待队列
-3. Token 刷新完成后，用新 Token 重发队列中的请求
+问题原因：
+- 多个请求同时检测到 Token 过期
+- 同时发起刷新请求
+- 导致只有一个成功，其他失败
+- 用户被踢出登录
 
-PR: #132 — fix: token refresh race condition
+修复方案：
+- 使用 Promise 队列机制
+- 第一个检测到过期的请求发起刷新
+- 其他请求等待 Promise 结果
+- 刷新成功后，所有等待的请求自动重试
+- 刷新失败后，所有等待的请求收到 401，跳转登录页
 
-测试通过，并发 100 个请求不会出现 401。
+代码示例：
+let refreshPromise: Promise<string> | null = null;
+async function refreshToken() {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = doRefresh().finally(() => refreshPromise = null);
+  return refreshPromise;
+}
+
+测试结果：
+- 并发 100 个请求，Token 过期时只有一个刷新请求发出 ✅
+- 刷新成功后，所有请求自动重试 ✅
+- 刷新失败后，所有请求跳转登录页 ✅
 
 刘伟
+高级后端工程师 | Nexora Tech

@@ -12,6 +12,7 @@ import { logger } from "./logger.js";
 import { mcpClient } from "../mcp/mcpClient.js";
 import type { ToolDefinition, ToolCall } from "../providers/openai.js";
 import { localRerank, type RerankInput } from "./reranker.js";
+import { getDb } from "./db.js";
 
 const MAX_TOOL_ROUNDS = 3;
 const TOP_K = 5;
@@ -122,9 +123,25 @@ async function fuseAndRank(
   }
 
   // RAG 结果转为统一格式（保留 sourceId 用于知识库文件链接）
+  // 批量查询 source URL，citation 链接指向原始文件
+  const ragSourceIds = [...new Set(ragCitations.map((c) => c.sourceId).filter(Boolean))] as string[];
+  const sourceUrlMap = new Map<string, string>();
+  if (ragSourceIds.length > 0) {
+    try {
+      const db = getDb();
+      const placeholders = ragSourceIds.map(() => "?").join(",");
+      const rows = db.prepare(`SELECT id, url FROM kb_sources WHERE id IN (${placeholders}) AND url IS NOT NULL`).all(...ragSourceIds) as Array<{ id: string; url: string }>;
+      for (const row of rows) {
+        sourceUrlMap.set(row.id, row.url);
+      }
+    } catch (err) {
+      logger.warn(`[ToolExecutor] 查询 source URL 失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   const ragAsFused: FusedCitation[] = ragCitations.map((c) => ({
     title: c.source,
-    url: "",
+    url: (c.sourceId && sourceUrlMap.get(c.sourceId)) || "",
     snippet: c.excerpt,
     engine: "rag",
     sourceId: c.sourceId,
@@ -238,6 +255,19 @@ export async function executeWithTools(input: ToolExecutorInput): Promise<ToolEx
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     // 第 1 轮强制搜索，后续轮次 LLM 自主判断
     let toolChoice: "auto" | "required" = round === 0 ? "required" : "auto";
+
+    // ── web_search 门控：第 2+ 轮时，如果 RAG 已充分命中，提示 LLM 跳过搜索 ──
+    if (round === 1 && ragCitations.length >= 3) {
+      const avgScore = ragCitations.reduce((s, c) => s + c.score, 0) / ragCitations.length;
+      if (avgScore >= 0.4) {
+        messages.push({
+          role: "system",
+          content: `【提示】知识库已检索到 ${ragCitations.length} 条高度相关文档（平均相似度 ${avgScore.toFixed(2)}）。如果这些文档已足够回答问题，请直接回答，无需再调用 web_search。仅在知识库明显不足时才搜索网络。`,
+        });
+        logger.info(`[ToolExecutor] RAG 门控: ${ragCitations.length} docs, avgScore=${avgScore.toFixed(2)}, 提示 LLM 优先使用知识库`);
+      }
+    }
+
     logger.info(`[ToolExecutor] LLM call #${round + 1} (tool_choice=${toolChoice})`);
 
     let result = await callLLM({ messages, tools, tool_choice: toolChoice, timeoutMs });

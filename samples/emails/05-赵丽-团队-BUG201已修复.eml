@@ -1,17 +1,31 @@
-From: 赵丽（高级前端工程师） <zhaoli@nexora-tech.com>
-To: 团队全体 <team@nexora-tech.com>
-Date: 2026-06-17（周二）16:30
-Subject: BUG-201 已修复 - Safari 登录页面样式
+From: 赵丽 <zhaoli@nexora-tech.com>
+To: 团队 <team@nexora-tech.com>
+Date: 2026-06-17 16:45 +0800
+Subject: BUG-201 Safari 登录页面样式错乱 — 已修复
 MIME-Version: 1.0
 Content-Type: text/plain; charset="UTF-8"
 Content-Transfer-Encoding: 7bit
 
-大家好，
+各位，
 
-BUG-201（Safari 下登录页面样式错乱）已修复。
+BUG-201 Safari 登录页面样式错乱已修复，PR #128 已提交。
 
-原因：Safari 对 flexbox gap 属性的支持问题，改用 margin 替代。
+问题原因：
+- Safari 对 CSS gap 属性支持不完整（需要 -webkit- 前缀）
+- 登录按钮的 flexbox 布局在 Safari 下失效
 
-PR: #128 — fix: safari login page layout
+修复方案：
+- 添加 -webkit-gap: 12px 前缀
+- 使用 margin 替代 gap 作为降级方案
+- 添加 Safari 特定的 CSS hack
+
+测试结果：
+- Safari 16.5: ✅ 正常显示
+- Safari 15.4: ✅ 正常显示
+- Chrome 114: ✅ 正常显示
+- Firefox 114: ✅ 正常显示
+
+请杨飞帮忙验证 E2E 测试。
 
 赵丽
+高级前端工程师 | Nexora Tech

@@ -1,7 +1,7 @@
-From: 李鑫（客户成功经理） <lixin@nexora-tech.com>
-To: 黄薇（高级产品经理） <huangwei@nexora-tech.com>
-Date: 2026-06-25（周三）16:00
-Subject: Beta 用户反馈汇总 - 3 个用户
+From: 李鑫 <lixin@nexora-tech.com>
+To: 黄薇 <huangwei@nexora-tech.com>
+Date: 2026-06-23 11:00 +0800
+Subject: Beta 用户反馈汇总 — NPS 8.3
 MIME-Version: 1.0
 Content-Type: text/plain; charset="UTF-8"
 Content-Transfer-Encoding: 7bit
@@ -10,23 +10,32 @@ Content-Transfer-Encoding: 7bit
 
 Beta 用户反馈汇总：
 
-用户 A（PM，NPS 9/10）：
-- 最喜欢：溯源功能，能看到每段话的来源
-- 建议：支持更多知识源类型（Confluence、Notion）
+【NPS 评分】
+- 平均 NPS: 8.3（满分 10）
+- 推荐者（9-10）: 60%
+- 被动者（7-8）: 30%
+- 贬损者（0-6）: 10%
+
+【用户 A（PM，NPS 9）】
+- 最喜欢：溯源功能，能快速验证生成内容的准确性
+- 建议：支持 Confluence/Notion 作为知识源
 - 使用频率：每天 2-3 次
 
-用户 B（Engineer，NPS 8/10）：
-- 最喜欢：RAG 检索准确率高
-- 建议：支持代码片段生成
-- 使用频率：每天 1 次
-
-用户 C（Consultant，NPS 7/10）：
-- 最喜欢：文档生成速度快
-- 建议：支持自定义模板
+【用户 B（Engineer，NPS 8）】
+- 最喜欢：RAG 检索准确率高，生成的技术文档质量好
+- 建议：支持代码片段生成，与 GitHub 集成
 - 使用频率：每周 3-4 次
 
-平均 NPS: 8.0/10
+【用户 C（Consultant，NPS 7）】
+- 最喜欢：文档生成速度快，节省大量时间
+- 建议：支持自定义模板，导出格式更多
+- 使用频率：每周 2-3 次
 
-建议优先处理：Confluence/Notion 集成（用户 A 的需求代表 PM 群体）。
+【关键洞察】
+1. 溯源功能是最受欢迎的功能（90% 用户提到）
+2. 知识库集成是第二受欢迎的功能（70% 用户提到）
+3. 用户最希望支持的知识源：Confluence、Notion、GitHub
+4. 用户最希望的导出格式：Word（80%）、PDF（60%）、PPT（40%）
 
 李鑫
+客户成功经理 | Nexora Tech

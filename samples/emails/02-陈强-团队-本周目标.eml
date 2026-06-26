@@ -1,30 +1,34 @@
-From: 陈强（技术负责人） <chenqiang@nexora-tech.com>
-To: 团队全体 <team@nexora-tech.com>
-Date: 2026-06-16（周一）08:00
-Subject: 本周目标 - 认证模块 + Bug 修复
+From: 陈强 <chenqiang@nexora-tech.com>
+To: 团队 <team@nexora-tech.com>
+Date: 2026-06-16 09:00 +0800
+Subject: Sprint 3 本周目标分配
 MIME-Version: 1.0
 Content-Type: text/plain; charset="UTF-8"
 Content-Transfer-Encoding: 7bit
 
-大家好，
+各位，
 
-本周目标：
+Sprint 3 正式开始，本周目标如下：
 
-1. 认证模块开发（优先级 P0）
-   - OAuth2 基础框架 — 陈强
-   - Microsoft OAuth2 — 陈强、刘伟
-   - GitHub OAuth — 刘伟
-   - 登录页面 UI — 赵丽
-   - E2E 测试 — 杨飞
+【认证模块】
+- 王超：完成 Microsoft OAuth2 集成（MSAL.js + Azure AD 配置）
+- 刘伟：完成 GitHub OAuth 集成（passport.js + GitHub OAuth App）
+- 赵丽：登录页面 UI + Token 管理组件
+- 杨飞：E2E 测试框架搭建（Playwright）
 
-2. Bug 修复（优先级 P0）
-   - BUG-201: Safari 样式问题 — 赵丽
-   - BUG-205: Token 刷新失败 — 刘伟
-   - BUG-210: 密码重置延迟 — 刘伟
+【Bug 修复】
+- 赵丽：BUG-201 Safari 样式错乱（周二前）
+- 刘伟：BUG-205 Token 刷新失败（周三前）
+- 刘伟：BUG-210 密码重置延迟（周四前）
 
-3. 支付系统技术方案（优先级 P1）
-   - 初稿 — 陈强、刘伟
+【支付系统】
+- 陈强、刘伟：支付系统技术方案初稿（周五前）
 
-请各位确认任务分配，有问题今天 Standup 讨论。
+【其他】
+- 徐骏：CI/CD pipeline 优化（目标 < 5 分钟）
+- 周敏：大纲编辑器 UI 调研
+
+每日 Standup 09:30，15 分钟。有问题及时在 #dev-team 频道反馈。
 
 陈强
+技术负责人 | Nexora Tech

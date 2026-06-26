@@ -22,6 +22,8 @@ export interface DbSettings {
   knowledgeReranker?: { baseUrl: string; apiKey: string; modelId: string };
   // Search providers
   searchProviders?: Array<{ providerId: string; apiKey: string; baseUrl?: string; enabled: boolean }>;
+  // 发件人身份（当前用户）
+  senderProfile?: { name: string; title?: string; department?: string; email?: string };
 }
 
 let cachedSettings: DbSettings | null = null;
@@ -83,6 +85,22 @@ export function readSettingsFromDb(): DbSettings {
     logger.warn(`[SettingsReader] 读取 DB settings 失败: ${err}`);
     cachedSettings = {};
     return cachedSettings;
+  }
+}
+
+/** 读取发件人身份配置（独立于 provider 缓存，每次实时读取） */
+export function readSenderProfile(): { name: string; title?: string; department?: string; email?: string } | null {
+  try {
+    const db = getDb();
+    const row = db.prepare("SELECT value FROM user_settings WHERE key = 'sender_profile'").get() as { value: string } | undefined;
+    if (!row) return null;
+    const profile = JSON.parse(row.value);
+    if (profile && typeof profile.name === "string" && profile.name.trim()) {
+      return profile;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 

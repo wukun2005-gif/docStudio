@@ -1,24 +1,34 @@
-From: 杨飞（QA 负责人） <yangfei@nexora-tech.com>
-To: 陈强（技术负责人） <chenqiang@nexora-tech.com>
-Date: 2026-06-18（周三）17:00
-Subject: E2E 测试进展 - 认证模块
+From: 杨飞 <yangfei@nexora-tech.com>
+To: 陈强 <chenqiang@nexora-tech.com>
+Date: 2026-06-18 17:30 +0800
+Subject: 认证模块 E2E 测试进展 — 28 个用例，覆盖率 85%
 MIME-Version: 1.0
 Content-Type: text/plain; charset="UTF-8"
 Content-Transfer-Encoding: 7bit
 
 陈强，
 
-E2E 测试进展：
+认证模块 E2E 测试进展汇报：
 
 已完成：
-- ✅ 登录流程测试（Microsoft + GitHub）
-- ✅ Token 刷新测试
-- ✅ 登出流程测试
+- 测试框架搭建（Playwright + Vitest）
+- 28 个测试用例编写
+- 覆盖率 85%（目标 85%）
 
-进行中：
-- 🔄 并发 Token 刷新测试（发现 BUG-215）
-- 🔄 网络中断恢复测试
+测试用例分布：
+- Microsoft OAuth2 登录流程：5 个（成功、失败、取消、超时、网络错误）
+- GitHub OAuth 登录流程：5 个（成功、失败、取消、scope 不足、token 过期）
+- Token 管理：5 个（刷新成功、刷新失败、并发刷新、过期检测、存储加密）
+- 安全测试：5 个（CSRF、XSS、Rate Limiting、SQL 注入、Token 泄露）
+- UI 测试：4 个（响应式、深色模式、无障碍、多语言）
+- 集成测试：4 个（多设备登录、会话管理、审计日志、错误恢复）
 
-预计周五完成 80%，剩余 20%（边界测试）下周继续。
+未覆盖（15%）：
+- SSO SAML 2.0（Sprint 5）
+- API Key 认证（Sprint 4）
+- 多设备管理（Sprint 4）
+
+明天继续完善，目标覆盖率 90%。
 
 杨飞
+QA 负责人 | Nexora Tech

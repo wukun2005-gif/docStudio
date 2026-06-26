@@ -1,7 +1,8 @@
 /**
  * 知识库 API 路由 — 完整 RAG Pipeline
  *
- * 流程: 提取文本 → 预处理 → 分块 → 去噪 → 存储 → Embedding → 向量入库
+ * 所有渠道共用统一分块 pipeline（ingestion.ts）:
+ * 提取文本 → 预处理 → 智能分块 → 去噪 → 存储 → Embedding
  */
 import { Router } from "express";
 import multer from "multer";
@@ -12,29 +13,37 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import {
-  addSource,
   getAllSources,
   deleteSource,
-  addChunks,
-  addVectors,
   getAllChunks,
   getAllVectors,
   getStats,
   clearKnowledgeDb,
-  findDuplicateByHash,
   computeTextHash,
-  updateSourceStatus,
-  markChunksEmbedded,
-  findEmbeddedHashes,
   getUnembeddedChunks,
+  addRemoteIndex,
+  getRemoteIndexesByType,
+  getRemoteIndexByRemoteId,
+  deleteRemoteIndex,
+  addSyncJob,
+  updateSyncJob,
+  getSyncJobsByType,
 } from "../lib/knowledgeDb.js";
-import { preprocessText } from "../lib/textPreprocess.js";
-import { chunkText as smartChunk, isNoise, isGarbled } from "../lib/textChunker.js";
+import { ingestFile, getFileType, embedBatch, embedChunks, type EmbeddingConfig } from "../lib/ingestion.js";
 import { hybridSearch } from "../lib/hybridSearch.js";
 import { rerank, type RerankInput } from "../lib/reranker.js";
 import { readSettingsFromDb } from "../lib/settingsReader.js";
 import { logger } from "../lib/logger.js";
 import { getDb } from "../lib/db.js";
+import {
+  cloneRepo,
+  listRepoFiles,
+  readFileContent,
+  computeFileHash,
+  syncRepo,
+  isRepoCloned,
+  removeRepo,
+} from "../lib/connectors/githubRepo.js";
 
 export const knowledgeRouter = Router();
 const db = getDb();
@@ -54,12 +63,6 @@ const upload = multer({
 });
 
 // ── Embedding 配置（内存单例） ──────────────────────────
-
-interface EmbeddingConfig {
-  baseUrl: string;
-  apiKey: string;
-  modelId: string;
-}
 
 let embeddingConfig: EmbeddingConfig | null = null;
 
@@ -101,259 +104,9 @@ function getEmbeddingConfig(body?: Record<string, unknown>): EmbeddingConfig | n
   return null;
 }
 
-// ── Embedding API 调用 ─────────────────────────────────
-
-const EMBED_BATCH_SIZE = 50;
-const EMBED_TIMEOUT = 30_000;
-
-/** 调用远程 embedding API */
-async function embedBatch(texts: string[], config: EmbeddingConfig): Promise<number[][]> {
-  const url = `${config.baseUrl}/embeddings`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: config.modelId,
-      input: texts.map((t) => t.slice(0, 500)), // 截断到 500 字符
-    }),
-    signal: AbortSignal.timeout(EMBED_TIMEOUT),
-  });
-
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => "");
-    throw new Error(`Embedding API error ${resp.status}: ${errText.slice(0, 200)}`);
-  }
-
-  const data = (await resp.json()) as {
-    data: Array<{ embedding: number[] }>;
-  };
-
-  return data.data.map((d) => d.embedding);
-}
-
-/** 对 chunks 做 embedding 并入库 */
-async function embedChunks(
-  chunkRecords: Array<{ id: string; content: string }>,
-  config: EmbeddingConfig,
-): Promise<{ embedded: number; errors: string[] }> {
-  // 计算 text_hash，跳过已 embedding 的
-  const hashes = chunkRecords.map((c) => computeTextHash(c.content));
-  const embeddedHashes = findEmbeddedHashes(hashes);
-
-  const toEmbed: Array<{ id: string; content: string; hash: string }> = [];
-  for (let i = 0; i < chunkRecords.length; i++) {
-    if (!embeddedHashes.has(hashes[i])) {
-      toEmbed.push({ ...chunkRecords[i], hash: hashes[i] });
-    }
-  }
-
-  // 过滤太短的 chunks（和噪声过滤阈值一致）
-  const validChunks = toEmbed.filter((c) => c.content.length >= 10);
-  const skippedCount = toEmbed.length - validChunks.length + embeddedHashes.size;
-
-  if (validChunks.length === 0) {
-    logger.info(`[Embed] 所有 chunks 已有 embedding 或太短，跳过`);
-    return { embedded: 0, errors: [] };
-  }
-
-  logger.info(`[Embed] 待处理: ${validChunks.length} chunks (跳过 ${skippedCount} 个已embedding/太短)`);
-
-  // 按文本长度排序（短的先处理，减少 padding 浪费）
-  validChunks.sort((a, b) => a.content.length - b.content.length);
-
-  const errors: string[] = [];
-  let embeddedCount = 0;
-  for (let i = 0; i < validChunks.length; i += EMBED_BATCH_SIZE) {
-    const batch = validChunks.slice(i, i + EMBED_BATCH_SIZE);
-    try {
-      const vectors = await embedBatch(
-        batch.map((c) => c.content),
-        config,
-      );
-
-      const vectorRecords = batch.map((c, idx) => ({
-        chunkId: c.id,
-        embedding: vectors[idx],
-        modelId: config.modelId,
-      }));
-
-      addVectors(vectorRecords);
-      markChunksEmbedded(batch.map((c) => c.id));
-      embeddedCount += batch.length;
-
-      logger.info(`[Embed] 进度: ${embeddedCount}/${validChunks.length}`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      errors.push(msg);
-      logger.error(`[Embed] 批次失败 (${batch.length} chunks): ${msg}`);
-      // 继续处理下一批
-    }
-  }
-
-  return { embedded: embeddedCount, errors };
-}
-
-// ── 文本提取辅助函数 ──────────────────────────────────
-
-/** 剥离 HTML 标签，保留文本内容 */
-function stripHtml(html: string): string {
-  // 移除 script/style 标签及其内容
-  let text = html.replace(/<script[\s\S]*?<\/script>/gi, " ");
-  text = text.replace(/<style[\s\S]*?<\/style>/gi, " ");
-  // 移除 HTML 注释
-  text = text.replace(/<!--[\s\S]*?-->/g, " ");
-  // 将 <br>, <p>, <div>, <li>, <tr>, <h1>-<h6> 等块级标签转为换行
-  text = text.replace(/<\/?(br|p|div|li|tr|h[1-6]|blockquote|section|article)[^>]*\/?>/gi, "\n");
-  // 剩余标签直接移除
-  text = text.replace(/<[^>]+>/g, " ");
-  // 解码常见 HTML 实体
-  text = text.replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&[a-z]+;/gi, " ");
-  // 清理多余空白
-  text = text.replace(/[ \t]+/g, " ");
-  text = text.replace(/\n\s*\n/g, "\n\n");
-  return text.trim();
-}
-
-/** 提取 EML 邮件正文 */
-function extractEml(buffer: Buffer): string {
-  const raw = buffer.toString("utf-8");
-  // 分离 header 和 body（空行分隔）
-  const headerEnd = raw.indexOf("\r\n\r\n");
-  const bodyStart = headerEnd >= 0 ? headerEnd + 4 : raw.indexOf("\n\n") + 2;
-  let body = raw.slice(bodyStart);
-
-  // 处理 quoted-printable 编码
-  const encoding = raw.match(/Content-Transfer-Encoding:\s*(\S+)/i)?.[1]?.toLowerCase();
-  if (encoding === "quoted-printable") {
-    body = body.replace(/=\r?\n/g, "") // 软换行
-      .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
-  }
-
-  // 如果 body 是 HTML，剥离标签
-  if (raw.includes("text/html") || body.trim().startsWith("<")) {
-    return stripHtml(body);
-  }
-
-  return body.trim();
-}
-
-// ── 文本提取 ────────────────────────────────────────
-
-async function extractText(buffer: Buffer, filename: string): Promise<string> {
-  const ext = path.extname(filename).toLowerCase();
-
-  // 纯文本格式
-  if ([".txt", ".md", ".markdown"].includes(ext)) {
-    return buffer.toString("utf-8");
-  }
-
-  // HTML — 剥离标签，保留文本
-  if ([".html", ".htm"].includes(ext)) {
-    const html = buffer.toString("utf-8");
-    return stripHtml(html);
-  }
-
-  // EML — 提取正文（可能含 HTML）
-  if (ext === ".eml") {
-    return extractEml(buffer);
-  }
-
-  // JSON（Teams 聊天等）
-  if (ext === ".json") {
-    try {
-      const json = JSON.parse(buffer.toString("utf-8"));
-      if (json.messages && Array.isArray(json.messages)) {
-        return json.messages.map((m: any) => `${m.date} ${m.time} ${m.user}: ${m.content}`).join("\n");
-      }
-      return JSON.stringify(json, null, 2);
-    } catch {
-      return buffer.toString("utf-8");
-    }
-  }
-
-  // DOCX
-  if (ext === ".docx") {
-    try {
-      const JSZip = (await import("jszip")).default;
-      const zip = await JSZip.loadAsync(buffer);
-      const docXml = await zip.file("word/document.xml")?.async("text");
-      if (docXml) {
-        const matches = docXml.match(/<w:t[^>]*>([^<]+)<\/w:t>/g);
-        if (matches) return matches.map((m) => m.replace(/<[^>]+>/g, "")).join(" ");
-      }
-    } catch { /* fallback */ }
-    return "";
-  }
-
-  // PPTX
-  if (ext === ".pptx") {
-    try {
-      const JSZip = (await import("jszip")).default;
-      const zip = await JSZip.loadAsync(buffer);
-      const texts: string[] = [];
-      for (const [name, file] of Object.entries(zip.files)) {
-        if (name.startsWith("ppt/slides/slide") && name.endsWith(".xml")) {
-          const content = await (file as any).async("text");
-          const matches = content.match(/<a:t>([^<]+)<\/a:t>/g);
-          if (matches) texts.push(...matches.map((m: string) => m.replace(/<[^>]+>/g, "")));
-        }
-      }
-      return texts.join(" ");
-    } catch { /* fallback */ }
-    return "";
-  }
-
-  // XLSX
-  if (ext === ".xlsx") {
-    try {
-      const JSZip = (await import("jszip")).default;
-      const zip = await JSZip.loadAsync(buffer);
-      const texts: string[] = [];
-      for (const [name, file] of Object.entries(zip.files)) {
-        if (name.startsWith("xl/worksheets/sheet") && name.endsWith(".xml")) {
-          const content = await (file as any).async("text");
-          const matches = content.match(/<v>([^<]+)<\/v>/g);
-          if (matches) texts.push(...matches.map((m: string) => m.replace(/<[^>]+>/g, "")));
-        }
-      }
-      return texts.join(" ");
-    } catch { /* fallback */ }
-    return "";
-  }
-
-  // PDF（简化版提取）
-  if (ext === ".pdf") {
-    const text = buffer.toString("utf-8");
-    return text.replace(/[^\x20-\x7E一-鿿\n]/g, " ").replace(/\s+/g, " ").trim();
-  }
-
-  return buffer.toString("utf-8");
-}
-
-function getFileType(filename: string): string {
-  const ext = path.extname(filename).toLowerCase();
-  const map: Record<string, string> = {
-    ".pdf": "pdf", ".docx": "docx", ".doc": "docx",
-    ".txt": "txt", ".md": "md", ".markdown": "md",
-    ".html": "html", ".htm": "html",
-    ".eml": "email", ".json": "json",
-    ".xlsx": "excel", ".pptx": "ppt",
-  };
-  return map[ext] ?? "txt";
-}
-
 // ── API Routes ──────────────────────────────────────
 
-/** POST /api/knowledge/upload — 上传 + 预处理 + 分块 + Embedding */
+/** POST /api/knowledge/upload — 上传 + 预处理 + 分块 + Embedding（复用统一分块 pipeline） */
 knowledgeRouter.post("/upload", upload.any(), async (req, res) => {
   try {
     const files = req.files as Express.Multer.File[];
@@ -362,94 +115,26 @@ knowledgeRouter.post("/upload", upload.any(), async (req, res) => {
       return;
     }
 
-    // 获取 embedding 配置（可选，来自请求体或环境变量）
     const embConfig = getEmbeddingConfig(req.body as Record<string, unknown>);
 
     const results: Array<{ id: string; name: string; status: string; chunks?: number; embedded?: number }> = [];
 
     for (const file of files) {
-      const rawHash = computeTextHash(file.buffer.toString("utf-8"));
-
-      // 检查重复
-      const existingId = findDuplicateByHash(rawHash);
-      if (existingId) {
-        results.push({ id: existingId, name: file.originalname, status: "duplicate" });
-        continue;
-      }
-
-      const sourceId = crypto.randomUUID();
-      const fileType = getFileType(file.originalname);
-
-      // Step 1: 提取文本
-      const rawText = await extractText(file.buffer, file.originalname);
-      if (!rawText.trim()) {
-        results.push({ id: sourceId, name: file.originalname, status: "empty" });
-        continue;
-      }
-
-      // Step 2: 预处理（清理页眉页脚、全角半角、日期标准化）
-      const cleanText = preprocessText(rawText);
-
-      // Step 3: 智能分块
-      const chunks = smartChunk(cleanText, file.originalname);
-
-      // Step 4: 去噪 + 乱码过滤
-      const validChunks = chunks.filter((c) => !isNoise(c.text) && !isGarbled(c.text));
-
-      if (validChunks.length === 0) {
-        results.push({ id: sourceId, name: file.originalname, status: "empty" });
-        continue;
-      }
-
-      // Step 5: 构建 chunk 记录
-      const chunkRecords = validChunks.map((c) => ({
-        id: `${sourceId}-c${c.idx}`,
-        sourceId,
-        content: c.text,
-        chunkIndex: c.idx,
-        tokenCount: c.text.length,
-        metadata: c.metadata,
-      }));
-
-      // Step 6: 存入数据库
-      addSource({
-        id: sourceId,
-        name: file.originalname,
-        type: fileType,
-        filePath: file.originalname,
-        contentHash: rawHash,
-        chunkCount: validChunks.length,
-        status: "processing",
+      // 复用统一分块 pipeline
+      const result = await ingestFile({
+        content: file.buffer,
+        fileName: file.originalname,
+        sourceType: getFileType(file.originalname),
+        embedding: embConfig ?? undefined,
       });
-      addChunks(chunkRecords);
-
-      // Step 7: Embedding（如果有配置）
-      let embeddedCount = 0;
-      if (embConfig) {
-        try {
-          const embedResult = await embedChunks(chunkRecords, embConfig);
-          embeddedCount = embedResult.embedded;
-          if (embedResult.errors.length > 0) {
-            logger.error(`[Knowledge] Embedding 部分失败: ${file.originalname}: ${embedResult.errors.join("; ")}`);
-          }
-          updateSourceStatus(sourceId, "ready");
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          logger.error(`[Knowledge] Embedding 失败: ${file.originalname}: ${msg}`);
-          updateSourceStatus(sourceId, "ready"); // 仍然标记为 ready，向量可以后续补充
-        }
-      } else {
-        updateSourceStatus(sourceId, "ready");
-      }
 
       results.push({
-        id: sourceId,
+        id: result.sourceId,
         name: file.originalname,
-        status: "ok",
-        chunks: validChunks.length,
-        embedded: embeddedCount,
+        status: result.status,
+        chunks: result.chunkCount,
+        embedded: result.embeddedCount,
       });
-      logger.info(`[Knowledge] 上传: ${file.originalname}, ${validChunks.length} chunks, ${embeddedCount} embedded`);
     }
 
     res.json({ ok: true, results });
@@ -738,12 +423,20 @@ knowledgeRouter.post("/search", async (req, res) => {
 
     const reranked = await rerank(rerankInput, query);
 
-    // 构建最终结果
+    // 构建最终结果（包含 source URL）
     const chunkMap = new Map(getAllChunks().map((c) => [c.id, c]));
+    const sourceMap = new Map(getAllSources().map((s) => [s.id, s]));
     const results = reranked.slice(0, limit).map((r) => {
       const chunk = chunkMap.get(r.chunkId);
-      return chunk ? { chunk, score: r.score } : null;
-    }).filter(Boolean);
+      if (!chunk) return null;
+      const source = sourceMap.get(chunk.sourceId);
+      return {
+        chunk,
+        score: r.score,
+        sourceUrl: source?.url,
+        sourceName: source?.name,
+      };
+    }).filter((r): r is NonNullable<typeof r> => r !== null);
 
     res.json({ ok: true, results, total: results.length });
   } catch (err) {
@@ -758,6 +451,372 @@ knowledgeRouter.delete("/clear", (_req, res) => {
   try {
     clearKnowledgeDb();
     res.json({ ok: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+// ── GitHub Repo 同步 ────────────────────────────────────
+
+/**
+ * POST /api/knowledge/github/sync — Clone + 全量索引 GitHub repo
+ *
+ * 复用统一分块 pipeline（ingestion.ts）：extractText → preprocess → smartChunk → 去噪 → 存储 → embedding
+ */
+knowledgeRouter.post("/github/sync", async (req, res) => {
+  try {
+    const { owner, repo, branch = "main" } = req.body;
+    if (!owner || !repo) {
+      res.status(400).json({ ok: false, error: "owner and repo are required" });
+      return;
+    }
+
+    const remoteId = `${owner}/${repo}`;
+    const embConfig = getEmbeddingConfig(req.body as Record<string, unknown>);
+
+    const jobId = crypto.randomUUID();
+    addSyncJob({ id: jobId, sourceType: "github_repo", config: { owner, repo, branch }, status: "running" });
+
+    // 异步执行（不阻塞响应）
+    res.json({ ok: true, jobId, message: "同步已开始" });
+
+    try {
+      logger.info(`[GitHubSync] 开始同步: ${remoteId} (branch: ${branch})`);
+      const cloneResult = await cloneRepo(owner, repo, branch);
+      const files = listRepoFiles(cloneResult.repoDir);
+      logger.info(`[GitHubSync] 可索引文件: ${files.length} 个`);
+
+      updateSyncJob(jobId, { progress: { total: files.length, processed: 0, skipped: 0, errors: 0 } });
+
+      let processed = 0, skipped = 0, errors = 0;
+
+      for (const fileInfo of files) {
+        try {
+          const fileHash = computeFileHash(fileInfo.absolutePath);
+          const existing = getRemoteIndexByRemoteId("github_repo", `${remoteId}/${fileInfo.relativePath}`);
+          if (existing && existing.contentHash === fileHash) { skipped++; continue; }
+
+          const content = readFileContent(fileInfo.absolutePath, "utf-8");
+          if (!content || (typeof content === "string" && content.trim().length < 10)) { skipped++; continue; }
+
+          // 删除旧索引（如果是更新）
+          if (existing) deleteSource(existing.id);
+
+          // ★ 复用统一分块 pipeline
+          const result = await ingestFile({
+            content: typeof content === "string" ? content : content,
+            fileName: fileInfo.relativePath,
+            sourceType: "github_file",
+            url: `https://github.com/${remoteId}/blob/${branch}/${fileInfo.relativePath}`,
+            filePath: fileInfo.relativePath,
+            contentHash: fileHash,
+            skipDuplicateCheck: true,
+            embedding: embConfig ?? undefined,
+          });
+
+          if (result.status === "empty") { skipped++; continue; }
+
+          addRemoteIndex({
+            id: result.sourceId,
+            sourceType: "github_repo",
+            remoteId: `${remoteId}/${fileInfo.relativePath}`,
+            name: fileInfo.relativePath,
+            url: `https://github.com/${remoteId}/blob/${branch}/${fileInfo.relativePath}`,
+            metadata: { owner, repo, branch, path: fileInfo.relativePath },
+            contentHash: fileHash,
+            chunkCount: result.chunkCount,
+            status: "indexed",
+          });
+
+          processed++;
+        } catch (err) {
+          errors++;
+          logger.warn(`[GitHubSync] 文件处理失败: ${fileInfo.relativePath}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        if ((processed + skipped + errors) % 10 === 0) {
+          updateSyncJob(jobId, { progress: { total: files.length, processed, skipped, errors } });
+        }
+      }
+
+      updateSyncJob(jobId, { status: "completed", progress: { total: files.length, processed, skipped, errors }, lastSyncAt: new Date().toISOString() });
+      logger.info(`[GitHubSync] 同步完成: ${remoteId}, processed=${processed}, skipped=${skipped}, errors=${errors}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      updateSyncJob(jobId, { status: "error", errorMessage: msg });
+      logger.error(`[GitHubSync] 同步失败: ${remoteId}: ${msg}`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[GitHubSync] 请求处理失败: ${msg}`);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/**
+ * POST /api/knowledge/github/sync/incremental — 增量同步
+ *
+ * 复用统一分块 pipeline：git pull + diff → 对变化文件调用 ingestFile
+ */
+knowledgeRouter.post("/github/sync/incremental", async (req, res) => {
+  try {
+    const { owner, repo, branch = "main" } = req.body;
+    if (!owner || !repo) {
+      res.status(400).json({ ok: false, error: "owner and repo are required" });
+      return;
+    }
+
+    const remoteId = `${owner}/${repo}`;
+    const embConfig = getEmbeddingConfig(req.body as Record<string, unknown>);
+
+    if (!isRepoCloned(owner, repo)) {
+      res.status(400).json({ ok: false, error: "Repo 未 clone，请先调用 /api/knowledge/github/sync" });
+      return;
+    }
+
+    const jobId = crypto.randomUUID();
+    addSyncJob({ id: jobId, sourceType: "github_repo", config: { owner, repo, branch, incremental: true }, status: "running" });
+    res.json({ ok: true, jobId, message: "增量同步已开始" });
+
+    try {
+      const syncResult = await syncRepo(owner, repo, branch);
+
+      if (!syncResult.hasChanges) {
+        updateSyncJob(jobId, { status: "completed", progress: { total: 0, processed: 0, skipped: 0, errors: 0 }, lastSyncAt: new Date().toISOString() });
+        logger.info(`[GitHubSync] 无新变化: ${remoteId}`);
+        return;
+      }
+
+      const changedFiles = [...syncResult.changedFiles, ...syncResult.addedFiles];
+      const totalFiles = changedFiles.length + syncResult.deletedFiles.length;
+      updateSyncJob(jobId, { progress: { total: totalFiles, processed: 0, skipped: 0, errors: 0 } });
+
+      let processed = 0, skipped = 0, errors = 0;
+
+      // 处理删除的文件
+      for (const deletedFile of syncResult.deletedFiles) {
+        try {
+          const existing = getRemoteIndexByRemoteId("github_repo", `${remoteId}/${deletedFile}`);
+          if (existing) { deleteSource(existing.id); deleteRemoteIndex(existing.id); }
+          processed++;
+        } catch (err) {
+          errors++;
+          logger.warn(`[GitHubSync] 删除文件处理失败: ${deletedFile}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      // 处理变化和新增的文件
+      const repoDir = path.resolve(process.cwd(), "repos", `${owner}_${repo}`);
+      for (const changedFile of changedFiles) {
+        try {
+          const filePath = path.join(repoDir, changedFile);
+          if (!fs.existsSync(filePath)) { skipped++; continue; }
+
+          const fileHash = computeFileHash(filePath);
+          const content = fs.readFileSync(filePath, "utf-8");
+          if (!content || content.trim().length < 10) { skipped++; continue; }
+
+          // 删除旧索引
+          const existing = getRemoteIndexByRemoteId("github_repo", `${remoteId}/${changedFile}`);
+          if (existing) deleteSource(existing.id);
+
+          // ★ 复用统一分块 pipeline
+          const result = await ingestFile({
+            content,
+            fileName: changedFile,
+            sourceType: "github_file",
+            url: `https://github.com/${remoteId}/blob/${branch}/${changedFile}`,
+            filePath: changedFile,
+            contentHash: fileHash,
+            skipDuplicateCheck: true,
+            embedding: embConfig ?? undefined,
+          });
+
+          if (result.status === "empty") { skipped++; continue; }
+
+          addRemoteIndex({
+            id: result.sourceId,
+            sourceType: "github_repo",
+            remoteId: `${remoteId}/${changedFile}`,
+            name: changedFile,
+            url: `https://github.com/${remoteId}/blob/${branch}/${changedFile}`,
+            metadata: { owner, repo, branch, path: changedFile },
+            contentHash: fileHash,
+            chunkCount: result.chunkCount,
+            status: "indexed",
+          });
+
+          processed++;
+        } catch (err) {
+          errors++;
+          logger.warn(`[GitHubSync] 文件处理失败: ${changedFile}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      updateSyncJob(jobId, { status: "completed", progress: { total: totalFiles, processed, skipped, errors }, lastSyncAt: new Date().toISOString() });
+      logger.info(`[GitHubSync] 增量同步完成: ${remoteId}, processed=${processed}, skipped=${skipped}, errors=${errors}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      updateSyncJob(jobId, { status: "error", errorMessage: msg });
+      logger.error(`[GitHubSync] 增量同步失败: ${remoteId}: ${msg}`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[GitHubSync] 请求处理失败: ${msg}`);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/**
+ * GET /api/knowledge/github/status — 查看同步状态
+ *
+ * Query: { owner, repo }
+ */
+knowledgeRouter.get("/github/status", (req, res) => {
+  try {
+    const { owner, repo } = req.query;
+    if (!owner || !repo) {
+      res.status(400).json({ ok: false, error: "owner and repo are required" });
+      return;
+    }
+
+    const remoteId = `${owner}/${repo}`;
+    const cloned = isRepoCloned(owner as string, repo as string);
+
+    // 获取该 repo 的所有同步任务
+    const jobs = getSyncJobsByType("github_repo").filter(j => {
+      const cfg = j.config;
+      return cfg.owner === owner && cfg.repo === repo;
+    });
+
+    // 获取该 repo 的已索引文件
+    const indexedFiles = getRemoteIndexesByType("github_repo").filter(idx =>
+      idx.remoteId.startsWith(remoteId + "/"),
+    );
+
+    res.json({
+      ok: true,
+      status: {
+        cloned,
+        indexedFileCount: indexedFiles.length,
+        totalChunks: indexedFiles.reduce((sum, idx) => sum + idx.chunkCount, 0),
+        lastSyncJob: jobs[0] ?? null,
+        recentJobs: jobs.slice(0, 5),
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** GET /api/knowledge/sync/job/:jobId — 按 jobId 查询同步进度 */
+knowledgeRouter.get("/sync/job/:jobId", (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const db = getDb();
+    const job = db.prepare("SELECT * FROM kb_sync_jobs WHERE id = ?").get(jobId) as Record<string, unknown> | undefined;
+
+    if (!job) {
+      res.status(404).json({ ok: false, error: "任务不存在" });
+      return;
+    }
+
+    // 解析 JSON 字段
+    const config = typeof job.config === "string" ? JSON.parse(job.config as string) : job.config;
+    const progress = typeof job.progress === "string" ? JSON.parse(job.progress as string) : job.progress;
+
+    res.json({
+      ok: true,
+      job: {
+        id: job.id,
+        sourceType: job.source_type,
+        config,
+        status: job.status,
+        progress,
+        lastSyncAt: job.last_sync_at,
+        errorMessage: job.error_message,
+        createdAt: job.created_at,
+        updatedAt: job.updated_at,
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/**
+ * DELETE /api/knowledge/github/repo — 删除已 clone 的 repo 及其索引
+ *
+ * Body: { owner, repo }
+ */
+knowledgeRouter.delete("/github/repo", (req, res) => {
+  try {
+    const { owner, repo } = req.body;
+    if (!owner || !repo) {
+      res.status(400).json({ ok: false, error: "owner and repo are required" });
+      return;
+    }
+
+    const remoteId = `${owner}/${repo}`;
+
+    // 删除已索引的文件
+    const indexedFiles = getRemoteIndexesByType("github_repo").filter(idx =>
+      idx.remoteId.startsWith(remoteId + "/"),
+    );
+    for (const idx of indexedFiles) {
+      deleteSource(idx.id);
+      deleteRemoteIndex(idx.id);
+    }
+
+    // 删除本地 clone
+    removeRepo(owner, repo);
+
+    logger.info(`[GitHubSync] 已删除 repo: ${remoteId}, ${indexedFiles.length} 个索引文件`);
+    res.json({ ok: true, deletedFiles: indexedFiles.length });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/**
+ * GET /api/knowledge/github/repos — 列出所有已索引的 repo
+ */
+knowledgeRouter.get("/github/repos", (_req, res) => {
+  try {
+    const indexes = getRemoteIndexesByType("github_repo");
+
+    // 按 repo 分组
+    const repoMap = new Map<string, { owner: string; repo: string; fileCount: number; totalChunks: number; lastIndexed: string }>();
+    for (const idx of indexes) {
+      const parts = idx.remoteId.split("/");
+      if (parts.length < 3) continue;
+      const repoKey = `${parts[0]}/${parts[1]}`;
+      const existing = repoMap.get(repoKey);
+      if (existing) {
+        existing.fileCount++;
+        existing.totalChunks += idx.chunkCount;
+        if (idx.indexedAt > existing.lastIndexed) {
+          existing.lastIndexed = idx.indexedAt;
+        }
+      } else {
+        repoMap.set(repoKey, {
+          owner: parts[0],
+          repo: parts[1],
+          fileCount: 1,
+          totalChunks: idx.chunkCount,
+          lastIndexed: idx.indexedAt,
+        });
+      }
+    }
+
+    res.json({
+      ok: true,
+      repos: Array.from(repoMap.values()),
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ ok: false, error: msg });

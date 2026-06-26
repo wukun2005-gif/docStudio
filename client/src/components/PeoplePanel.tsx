@@ -6,20 +6,38 @@ interface Person {
   title?: string;
   department?: string;
   email?: string;
+  attributes?: { relationships?: Array<{ targetPersonId: string; type: string }>; isCurrentUser?: boolean };
   createdAt: string;
 }
 
 export default function PeoplePanel() {
   const [people, setPeople] = useState<Person[]>([]);
   const [orgTree, setOrgTree] = useState<Record<string, Array<{ id: string; name: string; title?: string; email?: string }>>>({});
-  const [showAdd, setShowAdd] = useState(false);
-  const [newPerson, setNewPerson] = useState({ name: "", title: "", department: "", email: "" });
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState({ name: "", title: "", department: "", email: "" });
+  const [syncing, setSyncing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hasAppConfig, setHasAppConfig] = useState(false);
+  const [lastSyncCount, setLastSyncCount] = useState<number | null>(null);
+  const [currentUserName, setCurrentUserName] = useState<string | null>(null);
 
   useEffect(() => {
+    checkConfig();
     loadData();
+    // 加载当前用户身份
+    fetch("/api/settings/sender_profile")
+      .then(r => r.json())
+      .then(data => { if (data.value?.name) setCurrentUserName(data.value.name); })
+      .catch(() => {});
   }, []);
+
+  async function checkConfig() {
+    try {
+      const res = await fetch("/api/connectors/msgraph/config");
+      const data = await res.json();
+      setHasAppConfig(data.ok && (data.configured || !!data.config));
+    } catch {
+      // ignore
+    }
+  }
 
   async function loadData() {
     try {
@@ -27,134 +45,148 @@ export default function PeoplePanel() {
         fetch("/api/people").then((r) => r.json()),
         fetch("/api/people/org-tree").then((r) => r.json()),
       ]);
-      if (peopleRes.ok) setPeople(peopleRes.people);
-      if (treeRes.ok) setOrgTree(treeRes.tree);
+      if (peopleRes.ok) {
+        // 过滤掉外部来宾用户（邮箱含 #EXT#），但始终保留当前用户
+        const filtered = peopleRes.people.filter(
+          (p: Person) => !p.email?.includes("#EXT#") && (p.department || p.title || p.attributes?.isCurrentUser),
+        );
+        setPeople(filtered);
+      }
+      if (treeRes.ok) {
+        // 过滤掉空部门和外部用户
+        const tree: Record<string, typeof treeRes.tree[string]> = {};
+        for (const [dept, members] of Object.entries(treeRes.tree)) {
+          if (!dept) continue; // 跳过"未分配"
+          const filtered = (members as typeof treeRes.tree[string]).filter(
+            (m: any) => !m.email?.includes("#EXT#"),
+          );
+          if (filtered.length > 0) tree[dept] = filtered;
+        }
+        setOrgTree(tree);
+      }
     } catch (err) {
       console.error("Failed to load people data:", err);
     }
   }
 
-  async function handleAdd() {
-    if (!newPerson.name.trim()) return;
+  async function handleSync() {
+    setSyncing(true);
+    setError(null);
     try {
-      await fetch("/api/people", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(newPerson),
-      });
-      setNewPerson({ name: "", title: "", department: "", email: "" });
-      setShowAdd(false);
-      loadData();
+      const res = await fetch("/api/people/sync-msgraph", { method: "POST" });
+      const result = await res.json();
+      if (result.ok) {
+        setLastSyncCount(result.imported);
+        if (result.errors?.length) {
+          setError(`${result.errors.length} 个警告: ${result.errors[0]}`);
+        }
+        loadData();
+      } else {
+        setError(result.error || "同步失败");
+      }
     } catch (err) {
-      console.error("Add person failed:", err);
-    }
-  }
-
-  async function handleDelete(id: string, name: string) {
-    if (!confirm(`确定删除 "${name}"？`)) return;
-    try {
-      await fetch(`/api/people/${id}`, { method: "DELETE" });
-      loadData();
-    } catch (err) {
-      console.error("Delete failed:", err);
-    }
-  }
-
-  function startEdit(p: Person) {
-    setEditingId(p.id);
-    setEditForm({ name: p.name, title: p.title ?? "", department: p.department ?? "", email: p.email ?? "" });
-  }
-
-  async function handleUpdate() {
-    if (!editingId || !editForm.name.trim()) return;
-    try {
-      await fetch(`/api/people/${editingId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editForm),
-      });
-      setEditingId(null);
-      loadData();
-    } catch (err) {
-      console.error("Update failed:", err);
+      setError(err instanceof Error ? err.message : "同步失败");
+    } finally {
+      setSyncing(false);
     }
   }
 
   const departments = Object.keys(orgTree);
+  const peopleCount = people.length;
 
   return (
-    <div className="max-w-4xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="text-2xl font-bold">People Graph</h2>
-        <button
-          onClick={() => setShowAdd(!showAdd)}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-        >
-          添加人员
-        </button>
+    <div className="space-y-6">
+      {/* Entra ID 连接卡片 */}
+      <div className="bg-white rounded-lg shadow-sm border p-4">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-lg">🏢</span>
+          <span className="font-medium flex-1">Microsoft Entra ID</span>
+          {peopleCount > 0 && (
+            <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">已同步</span>
+          )}
+        </div>
+        <p className="text-sm text-gray-500 mb-3">
+          从 Microsoft Entra ID 同步组织架构。同步后，人员信息和上下级关系会在文档生成时自动引用。
+        </p>
+
+        {!hasAppConfig && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-700">
+            ⚠️ 请先在 <strong>设置 → 知识库</strong> 中配置 Azure 应用信息（Tenant ID、Client ID、Client Secret）
+          </div>
+        )}
+
+        {hasAppConfig && (
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleSync}
+              disabled={syncing}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
+            >
+              {syncing ? "同步中..." : "🔗 同步组织架构"}
+            </button>
+            {lastSyncCount !== null && !syncing && (
+              <span className="text-sm text-gray-500">
+                上次同步: {lastSyncCount} 人
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* 添加人员表单 */}
-      {showAdd && (
-        <div className="bg-white rounded-lg p-4 shadow-sm border mb-6">
-          <div className="grid grid-cols-2 gap-4 mb-4">
-            <input
-              placeholder="姓名 *"
-              value={newPerson.name}
-              onChange={(e) => setNewPerson({ ...newPerson, name: e.target.value })}
-              className="border rounded px-3 py-2"
-            />
-            <input
-              placeholder="职位"
-              value={newPerson.title}
-              onChange={(e) => setNewPerson({ ...newPerson, title: e.target.value })}
-              className="border rounded px-3 py-2"
-            />
-            <input
-              placeholder="部门"
-              value={newPerson.department}
-              onChange={(e) => setNewPerson({ ...newPerson, department: e.target.value })}
-              className="border rounded px-3 py-2"
-            />
-            <input
-              placeholder="邮箱"
-              value={newPerson.email}
-              onChange={(e) => setNewPerson({ ...newPerson, email: e.target.value })}
-              className="border rounded px-3 py-2"
-            />
+      {/* 错误提示 */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      {/* 统计卡片 */}
+      {peopleCount > 0 && (
+        <div className="grid grid-cols-3 gap-4">
+          <div className="bg-white rounded-lg p-4 shadow-sm border text-center">
+            <div className="text-3xl font-bold text-blue-600">{peopleCount}</div>
+            <div className="text-sm text-gray-500">人员</div>
           </div>
-          <div className="flex gap-2">
-            <button onClick={handleAdd} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">
-              保存
-            </button>
-            <button onClick={() => setShowAdd(false)} className="px-4 py-2 border rounded hover:bg-gray-50">
-              取消
-            </button>
+          <div className="bg-white rounded-lg p-4 shadow-sm border text-center">
+            <div className="text-3xl font-bold text-green-600">{departments.length}</div>
+            <div className="text-sm text-gray-500">部门</div>
+          </div>
+          <div className="bg-white rounded-lg p-4 shadow-sm border text-center">
+            <div className="text-3xl font-bold text-purple-600">
+              {people.reduce((n, p) => n + (p.attributes?.relationships?.length ?? 0), 0)}
+            </div>
+            <div className="text-sm text-gray-500">关系</div>
           </div>
         </div>
       )}
 
       {/* 组织架构树 */}
       {departments.length > 0 && (
-        <div className="mb-8">
-          <h3 className="text-lg font-semibold mb-4">组织架构</h3>
-          <div className="space-y-4">
+        <div className="bg-white rounded-lg shadow-sm border">
+          <div className="px-4 py-3 border-b font-medium">组织架构</div>
+          <div className="p-4 space-y-4">
             {departments.map((dept) => (
-              <div key={dept} className="bg-white rounded-lg p-4 shadow-sm border">
-                <h4 className="font-medium text-gray-700 mb-2">{dept}</h4>
+              <div key={dept} className="border rounded-lg p-3">
+                <h4 className="font-medium text-gray-700 mb-2">{dept || "未分配"}</h4>
                 <div className="flex flex-wrap gap-3">
-                  {orgTree[dept].map((p) => (
-                    <div key={p.id} className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
-                      <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 text-sm font-medium">
-                        {p.name[0]}
+                  {orgTree[dept].map((p) => {
+                    const isCurrentUser = currentUserName && p.name === currentUserName;
+                    return (
+                      <div key={p.id} className={`flex items-center gap-2 rounded-lg px-3 py-2 ${isCurrentUser ? "bg-blue-50 border border-blue-300 ring-1 ring-blue-200" : "bg-gray-50"}`}>
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${isCurrentUser ? "bg-blue-500 text-white" : "bg-blue-100 text-blue-600"}`}>
+                          {p.name[0]}
+                        </div>
+                        <div>
+                          <div className="text-sm font-medium flex items-center gap-1.5">
+                            {p.name}
+                            {isCurrentUser && <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-500 text-white font-medium">我</span>}
+                          </div>
+                          {p.title && <div className="text-xs text-gray-500">{p.title}</div>}
+                          {p.email && <div className="text-xs text-gray-400">{p.email}</div>}
+                        </div>
                       </div>
-                      <div>
-                        <div className="text-sm font-medium">{p.name}</div>
-                        {p.title && <div className="text-xs text-gray-500">{p.title}</div>}
-                        {p.email && <div className="text-xs text-gray-400">{p.email}</div>}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             ))}
@@ -162,85 +194,12 @@ export default function PeoplePanel() {
         </div>
       )}
 
-      {/* 人员列表 */}
-      <div className="bg-white rounded-lg shadow-sm border">
-        <div className="px-4 py-3 border-b font-medium">人员列表 ({people.length})</div>
-        {people.length === 0 ? (
-          <div className="p-8 text-center text-gray-400">暂无人员数据</div>
-        ) : (
-          <div className="divide-y">
-            {people.map((p) => (
-              editingId === p.id ? (
-                <div key={p.id} className="px-4 py-3 bg-blue-50">
-                  <div className="grid grid-cols-2 gap-3 mb-3">
-                    <input
-                      placeholder="姓名 *"
-                      value={editForm.name}
-                      onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                      className="border rounded px-3 py-2 text-sm"
-                    />
-                    <input
-                      placeholder="职位"
-                      value={editForm.title}
-                      onChange={(e) => setEditForm({ ...editForm, title: e.target.value })}
-                      className="border rounded px-3 py-2 text-sm"
-                    />
-                    <input
-                      placeholder="部门"
-                      value={editForm.department}
-                      onChange={(e) => setEditForm({ ...editForm, department: e.target.value })}
-                      className="border rounded px-3 py-2 text-sm"
-                    />
-                    <input
-                      placeholder="邮箱"
-                      value={editForm.email}
-                      onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
-                      className="border rounded px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div className="flex gap-2">
-                    <button onClick={handleUpdate} className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">
-                      保存
-                    </button>
-                    <button onClick={() => setEditingId(null)} className="px-3 py-1.5 border rounded text-sm hover:bg-gray-50">
-                      取消
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div key={p.id} className="px-4 py-3 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-medium">
-                      {p.name[0]}
-                    </div>
-                    <div>
-                      <div className="font-medium">{p.name}</div>
-                      <div className="text-sm text-gray-500">
-                        {[p.title, p.department].filter(Boolean).join(" · ")}
-                        {p.email && ` · ${p.email}`}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => startEdit(p)}
-                      className="text-blue-500 hover:text-blue-700 text-sm"
-                    >
-                      编辑
-                    </button>
-                    <button
-                      onClick={() => handleDelete(p.id, p.name)}
-                      className="text-red-500 hover:text-red-700 text-sm"
-                    >
-                      删除
-                    </button>
-                  </div>
-                </div>
-              )
-            ))}
-          </div>
-        )}
-      </div>
+      {/* 空状态 */}
+      {peopleCount === 0 && hasAppConfig && !syncing && (
+        <div className="text-center text-gray-400 py-12">
+          点击"同步组织架构"从 Entra ID 拉取人员数据
+        </div>
+      )}
     </div>
   );
 }

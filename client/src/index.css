@@ -39,3 +39,31 @@ body {
 .doc-content footer.citations .citation-list { padding-left: 0; }
 .doc-content footer.citations .citation-item { margin-bottom: 0.375rem; }
 .doc-content footer.citations .citation-num { font-weight: 500; color: #374151; margin-right: 0.25rem; }
+
+/* Provider 配置面板样式 */
+.drag-handle {
+  cursor: grab;
+  color: #9ca3af;
+  font-size: 14px;
+  user-select: none;
+  padding: 2px 4px;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+  color: #6b7280;
+}
+
+/* 拖拽时的视觉反馈 */
+tr[draggable="true"] {
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+tr[draggable="true"]:hover {
+  background-color: #f9fafb;
+}
+
+tr[draggable="true"]:active {
+  background-color: #f3f4f6;
+  transform: scale(1.01);
+}

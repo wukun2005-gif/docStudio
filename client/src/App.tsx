@@ -1,20 +1,17 @@
 import { useState } from "react";
 import Settings from "./components/Settings";
 import KnowledgePanel from "./components/KnowledgePanel";
-import PeoplePanel from "./components/PeoplePanel";
 import GenerationPage from "./components/GenerationPage";
 import CaseList from "./components/CaseList";
 import ChatBox from "./components/ChatBox";
 import { useCaseStore } from "./store/caseStore.js";
-import type { OutlineSection } from "../../shared/src/types/generation.js";
 
-type Page = "home" | "generate" | "knowledge" | "people" | "settings";
+type Page = "home" | "generate" | "knowledge" | "settings";
 
 const NAV_ITEMS: Array<{ id: Page; label: string }> = [
   { id: "home", label: "首页" },
   { id: "generate", label: "生成文档" },
   { id: "knowledge", label: "知识库" },
-  { id: "people", label: "People Graph" },
   { id: "settings", label: "设置" },
 ];
 
@@ -98,11 +95,6 @@ export default function App() {
           {page === "knowledge" && (
             <div className="h-full overflow-auto px-6 py-6">
               <KnowledgePanel />
-            </div>
-          )}
-          {page === "people" && (
-            <div className="h-full overflow-auto px-6 py-6">
-              <PeoplePanel />
             </div>
           )}
           {page === "settings" && (

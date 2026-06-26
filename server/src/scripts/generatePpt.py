@@ -5,6 +5,8 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
+from pptx.chart.data import CategoryChartData
+from pptx.enum.chart import XL_CHART_TYPE
 from lxml import etree
 import os
 
@@ -118,32 +120,27 @@ def create_ppt(output_path):
             run.text = text
             set_run_font(run, 14, False, '333333')
 
-    # ── Slide 4: Metrics ──
+    # ── Slide 4: Sprint 进度（柱状图）──
     slide4 = prs.slides.add_slide(prs.slide_layouts[6])
     txBox4 = slide4.shapes.add_textbox(Inches(1), Inches(0.5), Inches(11), Inches(1))
     tf4 = txBox4.text_frame
     p4 = tf4.paragraphs[0]
     run4 = p4.add_run()
-    run4.text = "关键数据"
+    run4.text = "Sprint 进度"
     set_run_font(run4, 32, True, '000000')
 
-    metrics = [("23", "代码 PR", 1.5), ("3", "Bug 修复", 4.5), ("85%", "测试覆盖率", 7.5), ("100%", "认证模块", 10.5)]
-    for value, label, left in metrics:
-        txBox = slide4.shapes.add_textbox(Inches(left), Inches(2.5), Inches(2.5), Inches(1))
-        tf = txBox.text_frame
-        p = tf.paragraphs[0]
-        p.alignment = PP_ALIGN.CENTER
-        run = p.add_run()
-        run.text = value
-        set_run_font(run, 48, True, '1a56db')
-
-        txBox2 = slide4.shapes.add_textbox(Inches(left), Inches(3.8), Inches(2.5), Inches(0.5))
-        tf2 = txBox2.text_frame
-        p2 = tf2.paragraphs[0]
-        p2.alignment = PP_ALIGN.CENTER
-        run2 = p2.add_run()
-        run2.text = label
-        set_run_font(run2, 14, False, '666666')
+    # Sprint progress bar chart
+    chart_data = CategoryChartData()
+    chart_data.categories = ['Sprint 1', 'Sprint 2', 'Sprint 3', 'Sprint 4']
+    chart_data.add_series('计划任务', (42, 51, 47, 55))
+    chart_data.add_series('完成任务', (42, 51, 42, 55))
+    chart = slide4.shapes.add_chart(
+        XL_CHART_TYPE.COLUMN_CLUSTERED,
+        Inches(1), Inches(1.5), Inches(11), Inches(5),
+        chart_data
+    ).chart
+    chart.has_legend = True
+    chart.legend.include_in_layout = False
 
     # ── Slide 5: Issues ──
     slide5 = prs.slides.add_slide(prs.slide_layouts[6])
@@ -238,7 +235,7 @@ def create_ppt(output_path):
     for item in auth_items:
         add_text_run(tf8b, item, 18, False, '333333')
 
-    # ── Slide 9: Bug 趋势 ──
+    # ── Slide 9: Bug 趋势（柱状图）──
     slide9 = prs.slides.add_slide(prs.slide_layouts[6])
     txBox9 = slide9.shapes.add_textbox(Inches(1), Inches(0.5), Inches(11), Inches(1))
     tf9 = txBox9.text_frame
@@ -247,21 +244,18 @@ def create_ppt(output_path):
     run9.text = "Bug 趋势"
     set_run_font(run9, 32, True, '000000')
 
-    # Bug trend data as text
-    txBox9b = slide9.shapes.add_textbox(Inches(1), Inches(2), Inches(11), Inches(4))
-    tf9b = txBox9b.text_frame
-    tf9b.word_wrap = True
-    bug_items = [
-        "Sprint 1: 新增 3 / 修复 0 — 基础设施搭建阶段",
-        "Sprint 2: 新增 5 / 修复 3 — 知识管理模块开发",
-        "Sprint 3: 新增 4 / 修复 5 — RAG + 认证模块",
-        "Sprint 4: 新增 3 / 修复 4 — 文档生成 + 评估",
-        "",
-        "累计: 新增 15 / 修复 12 / 待修复 3",
-        "高优 Bug: 0（所有高优 Bug 已修复）",
-    ]
-    for item in bug_items:
-        add_text_run(tf9b, item, 18, False, '333333')
+    # Bug trend bar chart
+    chart_data = CategoryChartData()
+    chart_data.categories = ['Sprint 1', 'Sprint 2', 'Sprint 3', 'Sprint 4']
+    chart_data.add_series('新增 Bug', (3, 5, 4, 3))
+    chart_data.add_series('修复 Bug', (0, 3, 5, 4))
+    chart = slide9.shapes.add_chart(
+        XL_CHART_TYPE.COLUMN_CLUSTERED,
+        Inches(1), Inches(1.5), Inches(11), Inches(5),
+        chart_data
+    ).chart
+    chart.has_legend = True
+    chart.legend.include_in_layout = False
 
     # ── Slide 10: 遇到的问题与解决方案 ──
     slide10 = prs.slides.add_slide(prs.slide_layouts[6])
@@ -375,7 +369,7 @@ def create_roadmap_ppt(output_path):
     ]:
         add_text_run(tf2b, item, 20, False, '333333')
 
-    # ── Slide 3: 市场机会 ──
+    # ── Slide 3: 市场机会（饼图）──
     slide3 = prs.slides.add_slide(prs.slide_layouts[6])
     txBox3 = slide3.shapes.add_textbox(Inches(1), Inches(0.5), Inches(11), Inches(1))
     tf3 = txBox3.text_frame
@@ -383,18 +377,34 @@ def create_roadmap_ppt(output_path):
     run3 = p3.add_run()
     run3.text = "市场机会"
     set_run_font(run3, 32, True, '000000')
-    txBox3b = slide3.shapes.add_textbox(Inches(1), Inches(2), Inches(11), Inches(4))
+
+    # Market size pie chart
+    chart_data = CategoryChartData()
+    chart_data.categories = ['Jasper', 'Copy.ai', 'Notion AI', '其他', 'i-Write 目标']
+    chart_data.add_series('市场份额', (35, 25, 20, 10, 10))
+    chart = slide3.shapes.add_chart(
+        XL_CHART_TYPE.PIE,
+        Inches(1), Inches(1.5), Inches(5), Inches(5),
+        chart_data
+    ).chart
+    chart.has_legend = True
+    chart.legend.include_in_layout = False
+
+    # Market data text
+    txBox3b = slide3.shapes.add_textbox(Inches(7), Inches(2), Inches(5), Inches(4))
     tf3b = txBox3b.text_frame
     tf3b.word_wrap = True
     for item in [
-        "全球企业内容生成市场规模：$4.2B（2026 年）",
-        "年增长率：28%（2026-2030）",
-        "i-Write 目标市场：$420M（10% 市场份额）",
+        "全球市场规模：$4.2B（2026）",
+        "年增长率：28%",
+        "i-Write 目标：$420M",
         "",
-        "竞品：Jasper ($49) / Copy.ai ($36) / Notion AI ($10)",
-        "i-Write: $19/月 — 溯源 + 知识库 + Trust Score",
+        "竞品定价：",
+        "Jasper: $49/月",
+        "Copy.ai: $36/月",
+        "i-Write: $19/月",
     ]:
-        add_text_run(tf3b, item, 20, False, '333333')
+        add_text_run(tf3b, item, 18, False, '333333')
 
     # ── Slide 4: 核心功能 ──
     slide4 = prs.slides.add_slide(prs.slide_layouts[6])
@@ -626,7 +636,7 @@ def create_investor_ppt(output_path):
     ]:
         add_text_run(tf3b, item, 20, False, '333333')
 
-    # ── Slide 4: 市场数据 ──
+    # ── Slide 4: 市场数据（用户增长柱状图）──
     slide4 = prs.slides.add_slide(prs.slide_layouts[6])
     txBox4 = slide4.shapes.add_textbox(Inches(1), Inches(0.5), Inches(11), Inches(1))
     tf4 = txBox4.text_frame
@@ -634,18 +644,32 @@ def create_investor_ppt(output_path):
     run4 = p4.add_run()
     run4.text = "市场数据"
     set_run_font(run4, 32, True, '000000')
-    txBox4b = slide4.shapes.add_textbox(Inches(1), Inches(2), Inches(11), Inches(4))
+
+    # User growth bar chart
+    chart_data = CategoryChartData()
+    chart_data.categories = ['7 月', '8 月', '9 月', '10 月', '11 月', '12 月']
+    chart_data.add_series('注册用户', (100, 500, 1500, 3000, 5000, 8000))
+    chart_data.add_series('付费用户', (5, 25, 75, 150, 250, 400))
+    chart = slide4.shapes.add_chart(
+        XL_CHART_TYPE.COLUMN_CLUSTERED,
+        Inches(1), Inches(1.5), Inches(6), Inches(5),
+        chart_data
+    ).chart
+    chart.has_legend = True
+    chart.legend.include_in_layout = False
+
+    # Market data text
+    txBox4b = slide4.shapes.add_textbox(Inches(8), Inches(2), Inches(4), Inches(4))
     tf4b = txBox4b.text_frame
     tf4b.word_wrap = True
     for item in [
-        "市场规模：$4.2B（2026 年）",
-        "年增长率：28%（2026-2030）",
-        "目标市场：$420M（10% 市场份额）",
-        "",
-        "Beta 用户 NPS: 8.0/10",
-        "意向客户：Acme Corp（200 人，$117,600/年）",
+        "NPS: 8.0/10",
+        "意向客户：",
+        "Acme Corp",
+        "200 人",
+        "$117,600/年",
     ]:
-        add_text_run(tf4b, item, 20, False, '333333')
+        add_text_run(tf4b, item, 18, False, '333333')
 
     # ── Slide 5: 技术优势 ──
     slide5 = prs.slides.add_slide(prs.slide_layouts[6])
@@ -692,7 +716,7 @@ def create_investor_ppt(output_path):
     ]:
         add_text_run(tf6b, item, 20, False, '333333')
 
-    # ── Slide 7: 财务预测 ──
+    # ── Slide 7: 财务预测（柱状图）──
     slide7 = prs.slides.add_slide(prs.slide_layouts[6])
     txBox7 = slide7.shapes.add_textbox(Inches(1), Inches(0.5), Inches(11), Inches(1))
     tf7 = txBox7.text_frame
@@ -700,18 +724,31 @@ def create_investor_ppt(output_path):
     run7 = p7.add_run()
     run7.text = "财务预测"
     set_run_font(run7, 32, True, '000000')
-    txBox7b = slide7.shapes.add_textbox(Inches(1), Inches(2), Inches(11), Inches(4))
+
+    # Revenue forecast bar chart
+    chart_data = CategoryChartData()
+    chart_data.categories = ['2026 Q3', '2026 Q4', '2027 Q1', '2027 Q2']
+    chart_data.add_series('ARR ($M)', (1.29, 3.5, 6.5, 10))
+    chart = slide7.shapes.add_chart(
+        XL_CHART_TYPE.COLUMN_CLUSTERED,
+        Inches(1), Inches(1.5), Inches(6), Inches(5),
+        chart_data
+    ).chart
+    chart.has_legend = True
+    chart.legend.include_in_layout = False
+
+    # Financial text
+    txBox7b = slide7.shapes.add_textbox(Inches(8), Inches(2), Inches(4), Inches(4))
     tf7b = txBox7b.text_frame
     tf7b.word_wrap = True
     for item in [
-        "2026 Q3: $1.29M ARR（目标）",
-        "2026 Q4: $3.5M ARR（目标）",
-        "2027 Q2: $10M ARR（目标）",
-        "",
         "烧钱率：$150K/月",
-        "Runway：18 个月（含本次融资）",
+        "Runway：18 个月",
+        "",
+        "盈亏平衡：",
+        "2027 Q4（预计）",
     ]:
-        add_text_run(tf7b, item, 20, False, '333333')
+        add_text_run(tf7b, item, 18, False, '333333')
 
     # ── Slide 8: 融资需求 ──
     slide8 = prs.slides.add_slide(prs.slide_layouts[6])

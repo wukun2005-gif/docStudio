@@ -1,115 +1,215 @@
 {
   "channel": "#dev-team",
-  "team": "i-Write 开发团队",
-  "dateRange": "2026-06-16 ~ 2026-06-20",
   "messages": [
     {
       "date": "2026-06-16",
-      "time": "09:52",
+      "time": "09:30",
       "user": "陈强",
-      "content": "Standup 结束，本周目标已同步。大家有问题随时在群里讨论。"
+      "content": "Sprint 3 开始！今天的目标：认证模块基础框架 + 3 个 Bug 修复"
     },
     {
       "date": "2026-06-16",
-      "time": "10:15",
-      "user": "赵丽",
-      "content": "@陈强 Safari 登录页面的问题我看了，是 gap 属性兼容性问题，今天能修完。"
+      "time": "09:32",
+      "user": "王超",
+      "content": "Microsoft OAuth2 配置已经开始了，Azure AD 的 redirect_uri 有点坑"
     },
     {
       "date": "2026-06-16",
-      "time": "10:18",
-      "user": "陈强",
-      "content": "@赵丽 好的，修完提 PR 让刘伟 review。"
-    },
-    {
-      "date": "2026-06-16",
-      "time": "14:30",
+      "time": "09:33",
       "user": "刘伟",
-      "content": "OAuth2 基础框架 PR 已提：#120，大家帮忙 review。"
+      "content": "GitHub OAuth 这边也开始了，passport.js 文档还挺全的"
     },
     {
       "date": "2026-06-16",
-      "time": "15:00",
+      "time": "09:35",
+      "user": "赵丽",
+      "content": "登录页面 UI 已经开始做了，参考罗茜的设计稿"
+    },
+    {
+      "date": "2026-06-16",
+      "time": "09:36",
       "user": "杨飞",
-      "content": "PR #120 看了，LGTM。测试覆盖很全。"
+      "content": "E2E 测试框架今天搞定，Playwright + Vitest"
     },
     {
-      "date": "2026-06-17",
-      "time": "09:45",
-      "user": "刘伟",
-      "content": "@陈强 Azure AD redirect_uri 的问题，我按你说的方案 1 处理了，一个 App Registration 配多个 uri。"
-    },
-    {
-      "date": "2026-06-17",
-      "time": "09:47",
-      "user": "陈强",
-      "content": "👍 这样最简单。"
-    },
-    {
-      "date": "2026-06-17",
-      "time": "11:20",
-      "user": "赵丽",
-      "content": "BUG-201 修完了，PR #128。Safari 下 gap 改成 margin 就好了。"
-    },
-    {
-      "date": "2026-06-17",
+      "date": "2026-06-16",
       "time": "14:00",
-      "user": "杨飞",
-      "content": "Token 刷新的 E2E 测试发现一个问题：并发请求时偶尔 401。@刘伟 你看看？"
+      "user": "苏楠",
+      "content": "认证模块需求评审开始，18 条需求逐条过"
+    },
+    {
+      "date": "2026-06-16",
+      "time": "15:30",
+      "user": "苏楠",
+      "content": "需求评审完成，3 条变更：CSRF SameSite、单设备登录、API Key 认证"
     },
     {
       "date": "2026-06-17",
-      "time": "14:15",
+      "time": "10:00",
+      "user": "赵丽",
+      "content": "BUG-201 Safari 样式问题找到了，是 CSS gap 兼容性问题"
+    },
+    {
+      "date": "2026-06-17",
+      "time": "14:20",
       "user": "刘伟",
-      "content": "收到，我看看。应该是刷新竞态问题。"
+      "content": "Azure AD redirect_uri 配置遇到问题，@陈强 帮忙看一下"
+    },
+    {
+      "date": "2026-06-17",
+      "time": "15:10",
+      "user": "陈强",
+      "content": "@刘伟 Azure AD 的 redirect_uri 必须精确匹配，不要有尾部斜杠"
+    },
+    {
+      "date": "2026-06-17",
+      "time": "16:45",
+      "user": "赵丽",
+      "content": "BUG-201 已修复，PR #128 已提交，Safari 16.5/15.4 都测试通过"
     },
     {
       "date": "2026-06-18",
       "time": "10:00",
-      "user": "苏楠",
-      "content": "设计评审会议开始了，大家准备一下。"
+      "user": "陈强",
+      "content": "设计评审会议开始，后端、前端、测试各自汇报进展"
     },
     {
       "date": "2026-06-18",
-      "time": "15:30",
-      "user": "刘伟",
-      "content": "Token 刷新竞态问题定位了，用队列机制解决。今天提 PR。"
+      "time": "11:30",
+      "user": "陈强",
+      "content": "设计评审完成，整体进展良好，Token 刷新队列方案确定"
     },
     {
       "date": "2026-06-18",
-      "time": "16:00",
+      "time": "17:30",
       "user": "杨飞",
-      "content": "E2E 测试进展：登录流程、Token 刷新、登出都覆盖了。明天继续并发测试。"
+      "content": "E2E 测试 28 个用例完成，覆盖率 85%"
     },
     {
       "date": "2026-06-19",
       "time": "09:30",
-      "user": "陈强",
-      "content": "认证模块联调开始，大家准备一下各自的环境。"
+      "user": "刘伟",
+      "content": "BUG-205 Token 刷新失败已修复，PR #130"
     },
     {
       "date": "2026-06-19",
       "time": "15:00",
       "user": "陈强",
-      "content": "联调通过！🎉 认证模块基本功能都 OK 了。发现两个小问题（BUG-215、BUG-216），刘伟在修。"
+      "content": "联调会议开始，Microsoft OAuth2 和 GitHub OAuth 联调结果"
     },
     {
       "date": "2026-06-19",
-      "time": "17:45",
+      "time": "15:30",
       "user": "刘伟",
-      "content": "BUG-215 修完了，PR #132。并发 100 请求测试通过，0 个 401。"
+      "content": "发现 BUG-215：Token 刷新竞态条件，多个请求同时刷新"
+    },
+    {
+      "date": "2026-06-19",
+      "time": "18:30",
+      "user": "刘伟",
+      "content": "BUG-215 已修复！使用 Promise 队列机制，并发 100 请求测试通过"
     },
     {
       "date": "2026-06-20",
-      "time": "16:30",
+      "time": "10:00",
+      "user": "陈强",
+      "content": "Sprint 3 最后一天，还有 5 个任务未完成，移入 Sprint 4"
+    },
+    {
+      "date": "2026-06-20",
+      "time": "16:00",
       "user": "苏楠",
-      "content": "Retro 会议总结发到邮件了，大家看一下。"
+      "content": "Sprint 3 回顾会议开始，15 人参加"
     },
     {
       "date": "2026-06-20",
       "time": "17:00",
+      "user": "苏楠",
+      "content": "Sprint 3 完成！42/47 任务（89%），感谢大家的努力！🎉"
+    },
+    {
+      "date": "2026-06-23",
+      "time": "09:30",
       "user": "陈强",
-      "content": "本周辛苦大家！认证模块完成度很高，下周继续支付系统。🎉🎉🎉"
+      "content": "Sprint 4 开始！目标：文档生成 + 评估体系 + GoToMarket"
+    },
+    {
+      "date": "2026-06-23",
+      "time": "14:00",
+      "user": "陈强",
+      "content": "支付系统设计评审开始，Stripe 集成方案讨论"
+    },
+    {
+      "date": "2026-06-23",
+      "time": "15:30",
+      "user": "唐敏",
+      "content": "合规评审完成，PCI DSS 使用 Stripe Checkout 可以避免直接处理信用卡"
+    },
+    {
+      "date": "2026-06-24",
+      "time": "10:00",
+      "user": "苏楠",
+      "content": "GoToMarket 策略会议开始，目标客户画像和定价策略讨论"
+    },
+    {
+      "date": "2026-06-24",
+      "time": "11:30",
+      "user": "王莉",
+      "content": "GoToMarket 时间线确认，7 月中旬 Product Hunt 发布"
+    },
+    {
+      "date": "2026-06-24",
+      "time": "16:00",
+      "user": "徐骏",
+      "content": "CI/CD pipeline 优化完成，构建时间 8 分钟 → 5 分钟"
+    },
+    {
+      "date": "2026-06-25",
+      "time": "14:00",
+      "user": "唐敏",
+      "content": "法务合规评审开始，GDPR 合规检查清单逐条确认"
+    },
+    {
+      "date": "2026-06-25",
+      "time": "15:30",
+      "user": "唐敏",
+      "content": "合规评审完成，数据留存政策确认，责任人分工明确"
+    },
+    {
+      "date": "2026-06-26",
+      "time": "10:00",
+      "user": "刘伟",
+      "content": "文档生成引擎基本完成，Word/PPT/Excel 三种格式都支持"
+    },
+    {
+      "date": "2026-06-26",
+      "time": "14:00",
+      "user": "孙娜",
+      "content": "评估体系搭建完成，Trust Metrics 5 维度：faithfulness/groundedness/coherence/fluency/completeness"
+    },
+    {
+      "date": "2026-06-26",
+      "time": "17:00",
+      "user": "赵丽",
+      "content": "生成树可视化完成，可以溯源到 chunk 级别"
+    },
+    {
+      "date": "2026-06-27",
+      "time": "09:30",
+      "user": "陈强",
+      "content": "Sprint 4 最后一天，i-Write Alpha 版本就绪！"
+    },
+    {
+      "date": "2026-06-27",
+      "time": "16:00",
+      "user": "苏楠",
+      "content": "Sprint 4 回顾会议，月度总结：195 个 PR，测试覆盖率 68% → 87%"
+    },
+    {
+      "date": "2026-06-27",
+      "time": "17:00",
+      "user": "陈强",
+      "content": "i-Write Alpha 版本发布！感谢团队 4 个月的努力！🎉🎉🎉"
     }
   ]
 }

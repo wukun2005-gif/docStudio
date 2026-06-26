@@ -18,8 +18,6 @@ import { workflowsRouter } from "./routes/workflows.js";
 import { dataRouter } from "./routes/data.js";
 import { getDb, closeDb } from "./lib/db.js";
 import { logger } from "./lib/logger.js";
-import { injectSampleData } from "./lib/sampleDataGenerator.js";
-import { injectDemoPeople } from "./lib/peopleGraph.js";
 
 // 加载 .env
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -116,9 +114,16 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
 // 静态文件服务（client build）
 const clientDist = path.resolve(__dirname, "../../client/dist");
 app.use(express.static(clientDist));
-app.get("*", (_req, res) => {
-  res.sendFile(path.join(clientDist, "index.html"), () => {
-    res.status(404).json({ ok: false, error: "Not found" });
+app.get("*", (req, res, next) => {
+  // 跳过 API 路由，让它们返回自己的响应
+  if (req.path.startsWith("/api/")) {
+    next();
+    return;
+  }
+  res.sendFile(path.join(clientDist, "index.html"), (err) => {
+    if (err) {
+      res.status(404).json({ ok: false, error: "Not found" });
+    }
   });
 });
 
@@ -127,9 +132,6 @@ function start() {
   // 初始化 DB
   getDb();
 
-  // 注入 sample 数据（首次启动时）
-  injectSampleData();
-  injectDemoPeople();
 
   app.listen(PORT, () => {
     logger.info(`[Server] i-Write server running on http://localhost:${PORT}`);
