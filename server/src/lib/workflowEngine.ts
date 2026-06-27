@@ -10,8 +10,8 @@
 import crypto from "crypto";
 import { localIso } from "../../../shared/src/datetime.js";
 import { getDb } from "./db.js";
+import { dbRun, dbGet, dbAll } from "./dbQuery.js";
 import { logger } from "./logger.js";
-import { logAudit } from "./auditLog.js";
 import { generateDocument } from "./docGenerator.js";
 import { registry } from "../providers/registry.js";
 
@@ -91,11 +91,10 @@ function ensureWorkflowTable(): void {
 
 function saveWorkflow(workflow: Workflow): void {
   ensureWorkflowTable();
-  const db = getDb();
-  db.prepare(`
+  dbRun(`
     INSERT OR REPLACE INTO workflows (id, name, description, steps, trigger_type, trigger_config, status, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
-  `).run(
+  `, [
     workflow.id,
     workflow.name,
     workflow.description,
@@ -103,13 +102,12 @@ function saveWorkflow(workflow: Workflow): void {
     workflow.triggerType,
     JSON.stringify(workflow.triggerConfig ?? {}),
     workflow.status,
-  );
+  ], { table: "workflows", recordId: workflow.id, source: "workflow", newData: workflow });
 }
 
 function loadWorkflow(id: string): Workflow | null {
   ensureWorkflowTable();
-  const db = getDb();
-  const row = db.prepare("SELECT * FROM workflows WHERE id = ?").get(id) as {
+  const row = dbGet<{
     id: string;
     name: string;
     description: string;
@@ -119,7 +117,7 @@ function loadWorkflow(id: string): Workflow | null {
     status: string;
     created_at: string;
     updated_at: string;
-  } | undefined;
+  }>("SELECT * FROM workflows WHERE id = ?", [id]);
 
   if (!row) return null;
 
@@ -138,8 +136,7 @@ function loadWorkflow(id: string): Workflow | null {
 
 function loadAllWorkflows(): Workflow[] {
   ensureWorkflowTable();
-  const db = getDb();
-  const rows = db.prepare("SELECT * FROM workflows ORDER BY updated_at DESC").all() as Array<{
+  const rows = dbAll<{
     id: string;
     name: string;
     description: string;
@@ -149,7 +146,7 @@ function loadAllWorkflows(): Workflow[] {
     status: string;
     created_at: string;
     updated_at: string;
-  }>;
+  }>("SELECT * FROM workflows ORDER BY updated_at DESC");
 
   return rows.map(row => ({
     id: row.id,
@@ -166,11 +163,10 @@ function loadAllWorkflows(): Workflow[] {
 
 function saveWorkflowRun(run: WorkflowRun): void {
   ensureWorkflowTable();
-  const db = getDb();
-  db.prepare(`
+  dbRun(`
     INSERT OR REPLACE INTO workflow_runs (id, workflow_id, status, step_results, started_at, finished_at, error)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(
+  `, [
     run.id,
     run.workflowId,
     run.status,
@@ -178,7 +174,7 @@ function saveWorkflowRun(run: WorkflowRun): void {
     run.startedAt,
     run.finishedAt ?? null,
     run.error ?? null,
-  );
+  ], { table: "workflow_runs", recordId: run.id, source: "workflow" });
 }
 
 // ── Workflow CRUD ──────────────────────────────────────
@@ -203,15 +199,6 @@ export function createWorkflow(
   };
 
   saveWorkflow(workflow);
-
-  logAudit({
-    table: "workflows",
-    operation: "INSERT",
-    recordId: workflow.id,
-    newData: workflow,
-    source: "workflow",
-  });
-
   return workflow;
 }
 
@@ -226,38 +213,17 @@ export function updateWorkflow(id: string, updates: Partial<Pick<Workflow, "name
   };
 
   saveWorkflow(updated);
-
-  logAudit({
-    table: "workflows",
-    operation: "UPDATE",
-    recordId: id,
-    oldData: existing,
-    newData: updated,
-    source: "workflow",
-  });
-
   return updated;
 }
 
 export function deleteWorkflow(id: string): boolean {
   ensureWorkflowTable();
-  const db = getDb();
-  // 查询旧数据用于审计
-  const oldRow = db.prepare("SELECT * FROM workflows WHERE id = ?").get(id) as any;
-
-  db.prepare("DELETE FROM workflow_runs WHERE workflow_id = ?").run(id);
-  const result = db.prepare("DELETE FROM workflows WHERE id = ?").run(id);
-
-  if (result.changes > 0) {
-    logAudit({
-      table: "workflows",
-      operation: "DELETE",
-      recordId: id,
-      oldData: oldRow,
-      source: "workflow",
-    });
-  }
-
+  // 删除关联的 runs
+  dbRun("DELETE FROM workflow_runs WHERE workflow_id = ?", [id],
+    { table: "workflow_runs", recordId: id, source: "workflow", operation: "DELETE" });
+  // 删除 workflow 本身
+  const result = dbRun("DELETE FROM workflows WHERE id = ?", [id],
+    { table: "workflows", recordId: id, source: "workflow", operation: "DELETE" });
   return result.changes > 0;
 }
 
@@ -444,10 +410,7 @@ function resolvePlaceholders(template: string, data: Record<string, unknown>): s
 
 export function getWorkflowRuns(workflowId: string): WorkflowRun[] {
   ensureWorkflowTable();
-  const db = getDb();
-  const rows = db.prepare(
-    "SELECT * FROM workflow_runs WHERE workflow_id = ? ORDER BY started_at DESC"
-  ).all(workflowId) as Array<{
+  const rows = dbAll<{
     id: string;
     workflow_id: string;
     status: string;
@@ -455,7 +418,10 @@ export function getWorkflowRuns(workflowId: string): WorkflowRun[] {
     started_at: string;
     finished_at: string | null;
     error: string | null;
-  }>;
+  }>(
+    "SELECT * FROM workflow_runs WHERE workflow_id = ? ORDER BY started_at DESC",
+    [workflowId],
+  );
 
   return rows.map(row => ({
     id: row.id,

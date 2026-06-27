@@ -34,7 +34,7 @@ import { hybridSearch } from "../lib/hybridSearch.js";
 import { rerank, type RerankInput } from "../lib/reranker.js";
 import { readSettingsFromDb } from "../lib/settingsReader.js";
 import { logger } from "../lib/logger.js";
-import { getDb } from "../lib/db.js";
+import { dbGet, dbAll } from "../lib/dbQuery.js";
 import {
   cloneRepo,
   listRepoFiles,
@@ -46,7 +46,6 @@ import {
 } from "../lib/connectors/githubRepo.js";
 
 export const knowledgeRouter = Router();
-const db = getDb();
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -188,11 +187,11 @@ knowledgeRouter.get("/sources", (_req, res) => {
 /** GET /api/knowledge/sources/:id — 获取单个知识源详情（含 chunks） */
 knowledgeRouter.get("/sources/:id", (req, res) => {
   try {
-    const source = db.prepare("SELECT * FROM kb_sources WHERE id = ?").get(req.params.id);
+    const source = dbGet<any>("SELECT * FROM kb_sources WHERE id = ?", [req.params.id]);
     if (!source) {
       return res.status(404).json({ ok: false, error: "知识源不存在" });
     }
-    const chunks = db.prepare("SELECT id, content, chunk_index FROM kb_chunks WHERE source_id = ? ORDER BY chunk_index").all(req.params.id);
+    const chunks = dbAll<any>("SELECT id, content, chunk_index FROM kb_chunks WHERE source_id = ? ORDER BY chunk_index", [req.params.id]);
     res.json({ ok: true, source, chunks });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -203,13 +202,13 @@ knowledgeRouter.get("/sources/:id", (req, res) => {
 /** GET /api/knowledge/sources/:id/file — 下载/预览知识源原始文件 */
 knowledgeRouter.get("/sources/:id/file", (req, res) => {
   try {
-    const source = db.prepare("SELECT name, file_path, type FROM kb_sources WHERE id = ?").get(req.params.id) as { name: string; file_path: string; type: string } | undefined;
+    const source = dbGet<{ name: string; file_path: string; type: string }>("SELECT name, file_path, type FROM kb_sources WHERE id = ?", [req.params.id]);
     if (!source) {
       return res.status(404).json({ ok: false, error: "知识源不存在" });
     }
     if (!source.file_path) {
       // 无原始文件路径时，从数据库 chunks 重建内容返回
-      const chunks = db.prepare("SELECT content FROM kb_chunks WHERE sourceId = ? ORDER BY chunkIndex").all(req.params.id) as { content: string }[];
+      const chunks = dbAll<{ content: string }>("SELECT content FROM kb_chunks WHERE source_id = ? ORDER BY chunk_index", [req.params.id]);
       if (chunks.length === 0) {
         return res.status(404).json({ ok: false, error: "该知识源无原始文件" });
       }
@@ -258,7 +257,7 @@ knowledgeRouter.get("/sources/:id/file", (req, res) => {
 
     if (!filePath || !fs.existsSync(filePath)) {
       // 没有物理文件时，从数据库 chunks 重建内容返回
-      const chunks = db.prepare("SELECT content FROM kb_chunks WHERE sourceId = ? ORDER BY chunkIndex").all(req.params.id) as { content: string }[];
+      const chunks = dbAll<{ content: string }>("SELECT content FROM kb_chunks WHERE source_id = ? ORDER BY chunk_index", [req.params.id]);
       if (chunks.length === 0) {
         return res.status(404).json({ ok: false, error: "文件不存在" });
       }
@@ -540,8 +539,25 @@ knowledgeRouter.post("/github/sync", async (req, res) => {
         }
       }
 
+      // ── 清理已删除文件的残留索引 ──
+      const currentPaths = new Set(files.map(f => `${remoteId}/${f.relativePath}`));
+      const allIndexed = getRemoteIndexesByType("github_repo");
+      const orphaned = allIndexed.filter(idx => idx.remoteId.startsWith(`${remoteId}/`) && !currentPaths.has(idx.remoteId));
+      let cleaned = 0;
+      for (const orphan of orphaned) {
+        try {
+          deleteSource(orphan.id);
+          deleteRemoteIndex(orphan.id);
+          cleaned++;
+          logger.info(`[GitHubSync] 清理已删除文件: ${orphan.name}`);
+        } catch (err) {
+          logger.warn(`[GitHubSync] 清理失败: ${orphan.name}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (cleaned > 0) logger.info(`[GitHubSync] 共清理 ${cleaned} 个已删除文件的残留索引`);
+
       updateSyncJob(jobId, { status: "completed", progress: { total: files.length, processed, skipped, errors }, lastSyncAt: new Date().toISOString() });
-      logger.info(`[GitHubSync] 同步完成: ${remoteId}, processed=${processed}, skipped=${skipped}, errors=${errors}`);
+      logger.info(`[GitHubSync] 同步完成: ${remoteId}, processed=${processed}, skipped=${skipped}, errors=${errors}, cleaned=${cleaned}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       updateSyncJob(jobId, { status: "error", errorMessage: msg });
@@ -715,8 +731,7 @@ knowledgeRouter.get("/github/status", (req, res) => {
 knowledgeRouter.get("/sync/job/:jobId", (req, res) => {
   try {
     const { jobId } = req.params;
-    const db = getDb();
-    const job = db.prepare("SELECT * FROM kb_sync_jobs WHERE id = ?").get(jobId) as Record<string, unknown> | undefined;
+    const job = dbGet<Record<string, unknown>>("SELECT * FROM kb_sync_jobs WHERE id = ?", [jobId]);
 
     if (!job) {
       res.status(404).json({ ok: false, error: "任务不存在" });

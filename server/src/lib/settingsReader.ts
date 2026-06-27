@@ -4,7 +4,7 @@
  * 供各 LLM 消费模块共用，避免代码重复。
  * 结果缓存，避免每次请求都读 DB。
  */
-import { getDb } from "./db.js";
+import { dbGet, dbAll } from "./dbQuery.js";
 import { logger } from "./logger.js";
 import type { AppSettings, ProviderConnection, ProviderId } from "../../../shared/src/types/provider.js";
 
@@ -38,12 +38,11 @@ export function readSettingsFromDb(): DbSettings {
   if (cachedSettings) return cachedSettings;
 
   try {
-    const db = getDb();
-
     // 优先读取新格式（provider_all）
-    const row = db.prepare(
-      "SELECT value FROM user_settings WHERE key = 'provider_all'"
-    ).get() as { value: string } | undefined;
+    const row = dbGet<{ value: string }>(
+      "SELECT value FROM user_settings WHERE key = ?",
+      ["provider_all"],
+    );
 
     if (row) {
       const settings: AppSettings = JSON.parse(row.value);
@@ -53,9 +52,9 @@ export function readSettingsFromDb(): DbSettings {
     }
 
     // Fallback：旧格式（provider_{id} 独立行）
-    const rows = db.prepare(
-      "SELECT key, value FROM user_settings WHERE key LIKE 'provider_%' AND key != 'provider_all'"
-    ).all() as Array<{ key: string; value: string }>;
+    const rows = dbAll<{ key: string; value: string }>(
+      "SELECT key, value FROM user_settings WHERE key LIKE 'provider_%' AND key != 'provider_all'",
+    );
 
     if (rows.length > 0) {
       const providers: ProviderConnection[] = [];
@@ -91,8 +90,7 @@ export function readSettingsFromDb(): DbSettings {
 /** 读取发件人身份配置（独立于 provider 缓存，每次实时读取） */
 export function readSenderProfile(): { name: string; title?: string; department?: string; email?: string } | null {
   try {
-    const db = getDb();
-    const row = db.prepare("SELECT value FROM user_settings WHERE key = 'sender_profile'").get() as { value: string } | undefined;
+    const row = dbGet<{ value: string }>("SELECT value FROM user_settings WHERE key = ?", ["sender_profile"]);
     if (!row) return null;
     const profile = JSON.parse(row.value);
     if (profile && typeof profile.name === "string" && profile.name.trim()) {

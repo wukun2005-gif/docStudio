@@ -283,7 +283,24 @@ export function hybridSearch(
     rankings.push(vectorResults);
   }
   const fused = rrfFusion(rankings);
-  logger.info(`[HybridSearch] RRF fusion: ${fused.length} results`);
+
+  // 归一化 RRF 分数到 0-1 范围
+  if (fused.length > 0) {
+    const maxRRF = fused[0].score;
+    const minRRF = fused[fused.length - 1].score;
+    const range = maxRRF - minRRF;
+    if (range > 0) {
+      for (const item of fused) {
+        item.score = (item.score - minRRF) / range;
+      }
+    } else {
+      // 所有分数相同，设为 1
+      for (const item of fused) {
+        item.score = 1;
+      }
+    }
+  }
+  logger.info(`[HybridSearch] RRF fusion: ${fused.length} results (normalized)`);
 
   // 5. MMR 多样性排序（照搬 patentExaminator: Jaccard 相似度, lambda=0.7, topK=limit）
   const chunkMap = new Map(allChunks.map((c) => [c.id, c]));

@@ -5,7 +5,7 @@
  * 用户只需在 Settings 配置 Azure 应用信息，点击"连接 OneDrive"即可完成授权。
  */
 
-import { getDb } from "../db.js";
+import { dbRun, dbGet } from "../dbQuery.js";
 import { logger } from "../logger.js";
 
 // ── 类型定义 ─────────────────────────────────────────
@@ -47,10 +47,7 @@ const TOKENS_KEY = "msgraph_tokens";
 /** 读取 Azure 应用配置 */
 export function getMsGraphAppConfig(): MsGraphAppConfig | null {
   try {
-    const db = getDb();
-    const row = db.prepare("SELECT value FROM user_settings WHERE key = ?").get(CONFIG_KEY) as
-      | { value: string }
-      | undefined;
+    const row = dbGet<{ value: string }>("SELECT value FROM user_settings WHERE key = ?", [CONFIG_KEY]);
     if (!row) return null;
     const config = JSON.parse(row.value) as MsGraphAppConfig;
     if (!config.clientId || !config.clientSecret || !config.tenantId) return null;
@@ -62,19 +59,17 @@ export function getMsGraphAppConfig(): MsGraphAppConfig | null {
 
 /** 保存 Azure 应用配置 */
 export function saveMsGraphAppConfig(config: MsGraphAppConfig): void {
-  const db = getDb();
-  db.prepare(
-    "INSERT OR REPLACE INTO user_settings (key, value, updated_at) VALUES (?, ?, datetime('now','localtime'))"
-  ).run(CONFIG_KEY, JSON.stringify(config));
+  dbRun(
+    "INSERT OR REPLACE INTO user_settings (key, value, updated_at) VALUES (?, ?, datetime('now','localtime'))",
+    [CONFIG_KEY, JSON.stringify(config)],
+    { table: "user_settings", recordId: CONFIG_KEY, source: "connector", newData: config },
+  );
 }
 
 /** 读取 OAuth Token */
 export function getMsGraphTokens(): MsGraphTokens | null {
   try {
-    const db = getDb();
-    const row = db.prepare("SELECT value FROM user_settings WHERE key = ?").get(TOKENS_KEY) as
-      | { value: string }
-      | undefined;
+    const row = dbGet<{ value: string }>("SELECT value FROM user_settings WHERE key = ?", [TOKENS_KEY]);
     if (!row) return null;
     return JSON.parse(row.value) as MsGraphTokens;
   } catch {
@@ -84,16 +79,20 @@ export function getMsGraphTokens(): MsGraphTokens | null {
 
 /** 保存 OAuth Token */
 export function saveMsGraphTokens(tokens: MsGraphTokens): void {
-  const db = getDb();
-  db.prepare(
-    "INSERT OR REPLACE INTO user_settings (key, value, updated_at) VALUES (?, ?, datetime('now','localtime'))"
-  ).run(TOKENS_KEY, JSON.stringify(tokens));
+  dbRun(
+    "INSERT OR REPLACE INTO user_settings (key, value, updated_at) VALUES (?, ?, datetime('now','localtime'))",
+    [TOKENS_KEY, JSON.stringify(tokens)],
+    { table: "user_settings", recordId: TOKENS_KEY, source: "connector", newData: { hasToken: true } },
+  );
 }
 
 /** 清除 OAuth Token（断开连接） */
 export function clearMsGraphTokens(): void {
-  const db = getDb();
-  db.prepare("DELETE FROM user_settings WHERE key = ?").run(TOKENS_KEY);
+  dbRun(
+    "DELETE FROM user_settings WHERE key = ?",
+    [TOKENS_KEY],
+    { table: "user_settings", recordId: TOKENS_KEY, source: "connector", operation: "DELETE" },
+  );
 }
 
 // ── OAuth 流程 ───────────────────────────────────────

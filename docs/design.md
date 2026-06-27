@@ -659,29 +659,105 @@ async function regenerateParagraph(
 
 ### 5.6 Evaluation System
 
-#### evalMetrics.ts
+#### 5.6.1 Metrics 体系设计原则
+
+**用户可见指标（P0）**：只展示 3 个核心指标，回答用户 3 个核心问题：
+
+| 用户问题 | 指标 | 英文名 | 衡量什么 |
+|----------|------|--------|----------|
+| "我能信任这个文档吗？" | **有据可查度** | Groundedness | 内容是否有来源支撑，是否有幻觉 |
+| "这回答了我的需求吗？" | **内容相关度** | Relevance | 内容是否与用户需求相关 |
+| "有遗漏重要信息吗？" | **内容完整度** | Completeness | 是否覆盖了用户需求的所有要点 |
+
+**开发者调试指标（P1）**：用于离线评估和质量优化，不展示给用户：
+
+| 指标 | 用途 |
+|------|------|
+| Context Precision | 检索质量调试 |
+| Citation Precision | 引用准确性调试 |
+| Hallucination Rate | 幻觉率监控 |
+
+#### 5.6.2 用户可见指标实现
 
 ```typescript
-// 检索指标
-async function computeNDCG(query: string, results: SearchResult[]): Promise<number>;
-async function computeRecall(query: string, results: SearchResult[]): Promise<number>;
+// ===== 用户可见指标（4 个核心） =====
 
-// 事实准确性
-async function computeFaithfulness(answer: string, context: string[]): Promise<number>;
-async function computeGroundedness(answer: string, context: string[]): Promise<number>;
+/**
+ * 有据可查度 (Groundedness)
+ * 公式：(有来源支撑的声明数 + 常识声明数) / 总声明数
+ * 实现：逐句 LLM 验证，参照 RAGAS Faithfulness + FActScore
+ */
+async function computeGroundedness(
+  sections: DocumentSection[],
+  knowledgeChunks: Chunk[]
+): Promise<{
+  overall: number;           // 0-1
+  sectionScores: number[];   // 每章节分数
+  claimVerdicts: ClaimVerdict[];  // 每条声明的判定
+}>;
+
+/**
+ * 内容相关度 (Relevance)
+ * 公式：与用户需求相关的声明数 / 总声明数
+ * 实现：逐句验证是否与用户原始需求相关
+ */
+async function computeRelevance(
+  sections: DocumentSection[],
+  userRequirement: string
+): Promise<{
+  overall: number;
+  sectionScores: number[];
+  irrelevantClaims: string[];  // 不相关的声明列表
+}>;
+
+/**
+ * 内容完整度 (Completeness)
+ * 公式：覆盖的需求要点数 / 需求的总要点数
+ * 实现：从用户需求中提取要点，逐一检查是否覆盖
+ */
+async function computeCompleteness(
+  sections: DocumentSection[],
+  userRequirement: string
+): Promise<{
+  overall: number;
+  coveredPoints: string[];     // 已覆盖的要点
+  missingPoints: string[];     // 遗漏的要点
+}>;
+
+/**
+ * 内容冲突检测 (Conflict Detection)
+ * 公式：有冲突的声明数 / 总声明数
+ * 实现：LLM-as-Judge 对比跨源声明，识别矛盾
+ * 冲突类型：时间冲突、来源权威冲突、视角冲突、数据冲突
+ */
+async function detectConflicts(
+  sections: Array<{
+    title: string;
+    content: string;
+    sources: Array<{ name: string; content: string; authority?: number; timestamp?: string }>
+  }>
+): Promise<{
+  hasConflicts: boolean;
+  conflictRate: number;        // 0-1
+  conflicts: ConflictItem[];   // 冲突详情
+}>;
+```
+
+#### 5.6.3 开发者调试指标实现
+
+```typescript
+// ===== 开发者调试指标（不展示给用户） =====
+
+// 检索质量
+async function computeContextPrecision(query: string, results: SearchResult[]): Promise<number>;
+async function computeContextRecall(query: string, results: SearchResult[]): Promise<number>;
 
 // 引用质量
 async function computeCitationPrecision(answer: string, sources: Source[]): Promise<number>;
 async function computeCitationRecall(answer: string, sources: Source[]): Promise<number>;
 
-// 文档质量
-async function computeCoherence(document: string): Promise<number>;
-async function computeFluency(document: string): Promise<number>;
-async function computeCompleteness(document: string, outline: Outline): Promise<number>;
-
-// 端到端
-async function computeAnswerCorrectness(answer: string, expected: string): Promise<number>;
-async function computeFactCoverage(answer: string, facts: string[]): Promise<number>;
+// 幻觉监控
+async function computeHallucinationRate(claimVerdicts: ClaimVerdict[]): Promise<number>;
 ```
 
 #### multiJudge.ts
@@ -864,11 +940,19 @@ Office Add-in 的侧边栏 React 应用复用 client 的核心组件：
 
 ```
 1. 实现 trust_evaluation 表 + API
-2. 实现在线评估（5 个核心指标）
-3. 实现评估报告引导优化（低分段落识别）
-4. 实现历史对比（时间趋势 + 版本对比）
-5. 实现评估数据洞察（按文档类型分析质量）
-6. 前端: TrustReport + HistoryComparison
+2. 实现用户可见指标（4 个核心）：
+   - 有据可查度 (Groundedness) — 逐句验证，含常识门控
+   - 内容相关度 (Relevance) — 逐句验证是否与需求相关
+   - 内容完整度 (Completeness) — 逐要点验证覆盖情况
+   - 内容冲突检测 (Conflict Detection) — 跨源矛盾识别
+3. 实现开发者调试指标（离线评估用）：
+   - Context Precision / Recall — 检索质量
+   - Citation Precision / Recall — 引用质量
+   - Hallucination Rate — 幻觉率
+4. 实现评估报告引导优化（低分段落识别）
+5. 实现历史对比（时间趋势 + 版本对比）
+6. 实现评估数据洞察（按文档类型分析质量）
+7. 前端: TrustReport + HistoryComparison
 ```
 
 ### Phase 6: 配置与历史
@@ -901,7 +985,11 @@ Office Add-in 的侧边栏 React 应用复用 client 的核心组件：
 
 ```
 1. 实现 goldenSetGenerator.ts（自动生成 Golden Set）
-2. 实现 evalMetrics.ts（10+ 指标）
+2. 实现 evalMetrics.ts（开发者调试指标）：
+   - Context Precision / Recall — 检索质量
+   - Citation Precision / Recall — 引用质量
+   - Hallucination Rate — 幻觉率
+   - NDCG / Recall@K — 检索排序质量
 3. 实现 multiJudge.ts（2 个 LLM judge 独立评分）
 4. 实现 evalRunner.ts（4 阶段评估流程）
 5. 前端: EvalDashboard（指标展示 + 报告对比）

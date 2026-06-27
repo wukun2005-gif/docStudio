@@ -6,7 +6,7 @@
  * - 新格式：key = 'provider_all', value = JSON(AppSettings)
  */
 import { Router } from "express";
-import { getDb } from "../lib/db.js";
+import { dbRun, dbGet, dbAll, bulkUpsertSettings } from "../lib/dbQuery.js";
 import { setApiKey, removeApiKey } from "../security/keyStore.js";
 import { clearSettingsCache } from "../lib/settingsReader.js";
 import { getModelCatalog } from "../providers/model-capabilities-registry.js";
@@ -14,7 +14,6 @@ import { registry } from "../providers/registry.js";
 import { validateExternalUrl, BlockedUrlError } from "../lib/urlValidation.js";
 import { PRESET_MODEL_PROVIDERS, PRESET_SEARCH_PROVIDERS } from "../../../shared/src/types/provider.js";
 import { logger } from "../lib/logger.js";
-import { logAudit } from "../lib/auditLog.js";
 import type { AppSettings, ProviderConnection, ProviderId, SearchProviderId } from "../../../shared/src/types/provider.js";
 
 export const settingsRouter = Router();
@@ -22,8 +21,7 @@ export const settingsRouter = Router();
 /** GET /api/settings — 获取所有设置 */
 settingsRouter.get("/", (_req, res) => {
   try {
-    const db = getDb();
-    const rows = db.prepare("SELECT key, value FROM user_settings").all() as Array<{ key: string; value: string }>;
+    const rows = dbAll<{ key: string; value: string }>("SELECT key, value FROM user_settings");
     const settings: Record<string, unknown> = {};
     for (const row of rows) {
       try {
@@ -43,8 +41,7 @@ settingsRouter.get("/", (_req, res) => {
 /** GET /api/settings/:key — 获取单个设置 */
 settingsRouter.get("/:key", (req, res) => {
   try {
-    const db = getDb();
-    const row = db.prepare("SELECT value FROM user_settings WHERE key = ?").get(req.params.key) as { value: string } | undefined;
+    const row = dbGet<{ value: string }>("SELECT value FROM user_settings WHERE key = ?", [req.params.key]);
     if (!row) {
       res.json({ ok: true, value: null });
       return;
@@ -63,15 +60,13 @@ settingsRouter.get("/:key", (req, res) => {
 /** PUT /api/settings/:key — 更新设置 */
 settingsRouter.put("/:key", (req, res) => {
   try {
-    const db = getDb();
     const value = typeof req.body.value === "string" ? req.body.value : JSON.stringify(req.body.value);
 
-    // 查询旧数据用于审计
-    const oldRow = db.prepare("SELECT value FROM user_settings WHERE key = ?").get(req.params.key) as { value: string } | undefined;
-
-    db.prepare(
-      "INSERT INTO user_settings (key, value, updated_at) VALUES (?, ?, datetime('now','localtime')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
-    ).run(req.params.key, value);
+    dbRun(
+      "INSERT INTO user_settings (key, value, updated_at) VALUES (?, ?, datetime('now','localtime')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+      [req.params.key, value],
+      { table: "user_settings", recordId: req.params.key, source: "settings" },
+    );
 
     // 如果是 provider 配置，同步更新 keyStore 和缓存
     if (req.params.key.startsWith("provider_")) {
@@ -87,15 +82,6 @@ settingsRouter.put("/:key", (req, res) => {
       clearSettingsCache();
     }
 
-    logAudit({
-      table: "user_settings",
-      operation: oldRow ? "UPDATE" : "INSERT",
-      recordId: req.params.key,
-      oldData: oldRow ? oldRow.value : undefined,
-      newData: value,
-      source: "settings",
-    });
-
     logger.info(`[Settings] 更新: ${req.params.key}`);
     res.json({ ok: true });
   } catch (err) {
@@ -108,24 +94,17 @@ settingsRouter.put("/:key", (req, res) => {
 /** DELETE /api/settings/:key — 删除设置 */
 settingsRouter.delete("/:key", (req, res) => {
   try {
-    const db = getDb();
-    // 查询旧数据用于审计
-    const oldRow = db.prepare("SELECT value FROM user_settings WHERE key = ?").get(req.params.key) as { value: string } | undefined;
-    db.prepare("DELETE FROM user_settings WHERE key = ?").run(req.params.key);
+    dbRun(
+      "DELETE FROM user_settings WHERE key = ?",
+      [req.params.key],
+      { table: "user_settings", recordId: req.params.key, source: "settings", operation: "DELETE" },
+    );
 
     if (req.params.key.startsWith("provider_")) {
       const providerId = req.params.key.replace("provider_", "");
       removeApiKey(providerId);
       clearSettingsCache();
     }
-
-    logAudit({
-      table: "user_settings",
-      operation: "DELETE",
-      recordId: req.params.key,
-      oldData: oldRow ? oldRow.value : undefined,
-      source: "settings",
-    });
 
     res.json({ ok: true });
   } catch (err) {
@@ -137,7 +116,7 @@ settingsRouter.delete("/:key", (req, res) => {
 /** POST /api/settings/providers — 批量更新所有配置（LLM providers + search + knowledge） */
 settingsRouter.post("/providers", (req, res) => {
   try {
-    const { providers, enableProviderFallback, searchProviders, knowledgeProviders, knowledge } = req.body as {
+    const { providers, enableProviderFallback, searchProviders, knowledgeProviders, knowledge, _source } = req.body as {
       providers: Array<{
         providerId: string;
         apiKey?: string;
@@ -168,17 +147,13 @@ settingsRouter.post("/providers", (req, res) => {
         enabled?: boolean;
       }>;
       knowledge?: { enabled: boolean; topK?: number; scoreThreshold?: number };
+      _source?: string;
     };
 
     if (!Array.isArray(providers)) {
       res.status(400).json({ ok: false, error: "providers must be an array" });
       return;
     }
-
-    const db = getDb();
-    const upsert = db.prepare(
-      "INSERT INTO user_settings (key, value, updated_at) VALUES (?, ?, datetime('now','localtime')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
-    );
 
     // 构建 AppSettings 格式（包含所有配置）
     const appSettings: AppSettings = {
@@ -213,23 +188,44 @@ settingsRouter.post("/providers", (req, res) => {
       ...(knowledge ? { knowledge } : {}),
     };
 
-    const tx = db.transaction(() => {
-      // 存储新格式（完整 AppSettings）
-      upsert.run("provider_all", JSON.stringify(appSettings));
-
-      // 同时存储旧格式（每个 provider 独立行），向后兼容
-      for (const p of providers) {
-        upsert.run(`provider_${p.providerId}`, JSON.stringify(p));
-        const apiKey = p.apiKeyRef ?? p.apiKey;
-        if (apiKey) {
-          setApiKey(p.providerId, apiKey);
-        }
+    // [诊断] 在事务前读取 bailian 旧值，用于对比
+    const bailianIncoming = providers.find(p => p.providerId === "bailian");
+    let prevFallbacks: string[] = [];
+    if (bailianIncoming) {
+      const prevRow = dbGet<{ value: string }>("SELECT value FROM user_settings WHERE key = ?", ["provider_bailian"]);
+      if (prevRow) {
+        try { prevFallbacks = JSON.parse(prevRow.value).modelFallbacks ?? []; } catch { /* ignore */ }
       }
-    });
-    tx();
+    }
+
+    // 集中写 DB + 审计（每行独立审计）
+    const entries: Array<{ key: string; value: unknown }> = [
+      { key: "provider_all", value: appSettings },
+      ...providers.map(p => ({ key: `provider_${p.providerId}`, value: p })),
+    ];
+    bulkUpsertSettings(entries, `settings/providers:${_source ?? "unknown"}`);
+
+    // keyStore 内存缓存同步（apiKey 单独处理）
+    for (const p of providers) {
+      const apiKey = p.apiKeyRef ?? p.apiKey;
+      if (apiKey) {
+        setApiKey(p.providerId, apiKey);
+      }
+    }
 
     clearSettingsCache();
-    logger.info(`[Settings] 批量更新: ${providers.length} providers, ${searchProviders?.length ?? 0} search, ${knowledgeProviders?.length ?? 0} knowledge`);
+    logger.info(`[Settings] 批量更新: ${providers.length} providers, ${searchProviders?.length ?? 0} search, ${knowledgeProviders?.length ?? 0} knowledge, source=${_source ?? "unknown"}`);
+
+    // [诊断] 记录 bailian modelFallbacks 变更
+    if (bailianIncoming) {
+      const incomingFallbacks = bailianIncoming.modelFallbacks ?? [];
+      const top5Prev = prevFallbacks.slice(0, 5);
+      const top5New = incomingFallbacks.slice(0, 5);
+      const changed = JSON.stringify(top5Prev) !== JSON.stringify(top5New);
+      logger.info(`[Settings][诊断] source=${_source ?? "?"} bailian fallbacks 前5: ${JSON.stringify(top5Prev)} → ${JSON.stringify(top5New)} ${changed ? "⚠️ 顺序已变更" : "✓ 顺序未变"}`);
+      logger.info(`[Settings][诊断] source=${_source ?? "?"} bailian fallbacks 总数: ${prevFallbacks.length} → ${incomingFallbacks.length}`);
+    }
+
     res.json({ ok: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

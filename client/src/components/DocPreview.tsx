@@ -11,13 +11,12 @@
 import { useState, useRef, useMemo, useCallback } from "react";
 import DOMPurify from "dompurify";
 import type { OutlineSection } from "../../../shared/src/types/generation.js";
-import type { TrustMetrics } from "../../../shared/src/types/evaluation.js";
 
 export interface SectionData {
   title: string;
   content: string;
   sources: Array<{ chunkId: string; content: string; score: number; sourceId?: string; sourceName?: string; sourceUrl?: string }>;
-  webCitations: Array<{ title: string; url: string; snippet: string }>;
+  webCitations: Array<{ title: string; url: string; snippet: string; score?: number }>;
   groundingScore: number;
 }
 
@@ -30,28 +29,44 @@ interface PendingDrop {
   mouseY: number;
 }
 
+interface ConflictItem {
+  topic: string;
+  conflictType: "temporal" | "authority" | "perspective" | "data" | "other";
+  claims: Array<{ text: string; source: string; sourceAuthority?: number; timestamp?: string }>;
+  severity: "high" | "medium" | "low";
+  recommendation?: string;
+}
+
+interface EvaluationMetrics {
+  groundedness: { score: number; label: string; description: string };
+  relevance: { score: number; label: string; description: string; irrelevantSentences?: string[] };
+  completeness: { score: number; label: string; description: string; coveredPoints?: string[]; missingPoints?: string[] };
+  conflicts?: { hasConflicts: boolean; conflictRate: number; items: ConflictItem[]; label: string; description: string };
+}
+
 interface DocPreviewProps {
   content: string | null;
   trustScore: number | null;
-  evaluationMetrics?: TrustMetrics | null;
-  evaluating?: boolean;
   sections: SectionData[];
   generating: boolean;
   runId?: string | null;
   dirtySections?: Set<number>;
   regeneratingSections?: Set<number>;
   documentStyle?: string;
+  evaluationMetrics?: EvaluationMetrics | null;
+  evaluating?: boolean;
   onSectionClick?: (sectionIdx: number) => void;
   onSectionUpdate?: (sectionIdx: number, updated: SectionData) => void;
   onSourceMove?: (fromSectionIdx: number, sourceIdx: number, toSectionIdx: number, type?: string, mode?: "move" | "copy") => void;
   onRegenerateSection?: (sectionIdx: number) => void;
   onSave?: (content: string) => void;
+  onEvaluate?: () => void;
 }
 
 export default function DocPreview({
-  content, trustScore, evaluationMetrics, evaluating, sections, generating, runId,
+  content, trustScore, sections, generating, runId,
   dirtySections, regeneratingSections, documentStyle,
-  onSectionClick, onSectionUpdate, onSourceMove, onRegenerateSection, onSave,
+  evaluationMetrics, evaluating, onSectionClick, onSectionUpdate, onSourceMove, onRegenerateSection, onSave, onEvaluate,
 }: DocPreviewProps) {
   const [activeSection, setActiveSection] = useState<number | null>(null);
   const [dragOverSection, setDragOverSection] = useState<number | null>(null);
@@ -70,11 +85,14 @@ export default function DocPreview({
       ADD_ATTR: ["target", "rel", "class", "title", "id"],
     });
     // 给段落元素添加 id，供 insight 中的 [¶N] 引用跳转
+    // 先移除已有 id 属性，再注入 para-N id，避免重复 id
     let paraIdx = 0;
-    return clean.replace(/<(p|h[1-6]|li|div|section)(\s|>)/gi, (match, tag, after) => {
-      paraIdx++;
-      return `<${tag} id="para-${paraIdx}"${after}`;
-    });
+    return clean
+      .replace(/(<(?:p|h[1-6]|li|div|section)\s[^>]*?)\s*id\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "$1")
+      .replace(/<(p|h[1-6]|li|div|section)(\s|>)/gi, (match, tag, after) => {
+        paraIdx++;
+        return `<${tag} id="para-${paraIdx}"${after}`;
+      });
   }, [content]);
 
   function handleSectionClick(idx: number) {
@@ -82,35 +100,36 @@ export default function DocPreview({
     onSectionClick?.(idx);
   }
 
-  // ── 段落跳转 ──
-  function scrollToPara(paraNum: string) {
-    const el = document.getElementById(`para-${paraNum}`);
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-      el.style.transition = "background-color 0.3s";
-      el.style.backgroundColor = "#fef9c3"; // yellow-100
-      setTimeout(() => { el.style.backgroundColor = ""; }, 2000);
-    }
-  }
+  // 滚动到指定段落并高亮
+  function scrollToParagraph(text: string) {
+    if (!containerRef.current) return;
 
-  // 将 insight 文本中的 [¶N] 渲染为可点击链接
-  function renderInsight(text: string) {
-    const parts = text.split(/(\[¶\d+\])/g);
-    return parts.map((part, i) => {
-      const match = part.match(/\[¶(\d+)\]/);
-      if (match) {
-        return (
-          <button
-            key={i}
-            onClick={() => scrollToPara(match[1])}
-            className="text-blue-600 hover:underline font-medium cursor-pointer"
-          >
-            [¶{match[1]}]
-          </button>
-        );
+    // 在文档中搜索包含该文本的段落
+    const paragraphs = containerRef.current.querySelectorAll("p, h1, h2, h3, h4, h5, h6, li");
+    for (const para of paragraphs) {
+      if (para.textContent?.includes(text.substring(0, 30))) {
+        const htmlPara = para as HTMLElement;
+
+        // 滚动到该段落
+        htmlPara.scrollIntoView({ behavior: "smooth", block: "center" });
+
+        // 高亮效果
+        const originalBg = htmlPara.style.backgroundColor;
+        const originalTransition = htmlPara.style.transition;
+        htmlPara.style.transition = "background-color 0.3s ease";
+        htmlPara.style.backgroundColor = "#fef08a"; // yellow-200
+
+        // 3秒后恢复
+        setTimeout(() => {
+          htmlPara.style.backgroundColor = originalBg;
+          setTimeout(() => {
+            htmlPara.style.transition = originalTransition;
+          }, 300);
+        }, 3000);
+
+        break;
       }
-      return <span key={i}>{part}</span>;
-    });
+    }
   }
 
   // ── 删除来源 ──
@@ -119,6 +138,9 @@ export default function DocPreview({
     if (!section) return;
     const source = section.sources[sourceIdx];
     if (!source) return;
+
+    // 保存原始数据用于回滚
+    const originalSources = section.sources;
 
     // 1. 立即更新 UI：从 section.sources 中移除
     const updatedSources = section.sources.filter((_, i) => i !== sourceIdx);
@@ -138,6 +160,8 @@ export default function DocPreview({
         }
       } catch (err) {
         console.error("Delete provenance node failed:", err);
+        // 回滚 UI
+        onSectionUpdate?.(sectionIdx, { ...section, sources: originalSources });
       }
     }
   }, [sections, runId, onSectionUpdate]);
@@ -165,7 +189,10 @@ export default function DocPreview({
     setDragOverSection(sectionIdx);
   }, []);
 
-  const handleDragLeave = useCallback(() => {
+  const handleDragLeave = useCallback((e: React.DragEvent, sectionIdx: number) => {
+    // 只在鼠标真正离开 section 区域时才清除高亮，避免子元素触发的 dragleave 导致闪烁
+    const related = e.relatedTarget as HTMLElement | null;
+    if (related && e.currentTarget.contains(related)) return;
     setDragOverSection(null);
   }, []);
 
@@ -219,15 +246,20 @@ export default function DocPreview({
     try {
       // 纯文本 → HTML 再保存
       const htmlContent = plainTextToHtml(editedContent);
-      await fetch(`/api/generation/${runId}/content`, {
+      const res = await fetch(`/api/generation/${runId}/content`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: htmlContent }),
       });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `保存失败 (${res.status})`);
+      }
       onSave?.(htmlContent);
       setEditing(false);
     } catch (err) {
       console.error("Save failed:", err);
+      alert(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSaving(false);
     }
@@ -314,95 +346,219 @@ export default function DocPreview({
             <button
               onClick={() => setShowMetrics(!showMetrics)}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors hover:opacity-80 ${
-                evaluating ? "bg-blue-100 text-blue-700" :
                 trustScore >= 0.8 ? "bg-green-100 text-green-700" :
                 trustScore >= 0.5 ? "bg-yellow-100 text-yellow-700" :
                 "bg-red-100 text-red-700"
               }`}
             >
-              {evaluating ? (
-                <>
-                  <span className="animate-spin inline-block w-3 h-3 border border-blue-400 border-t-transparent rounded-full" />
-                  评估中...
-                </>
-              ) : (
-                <>
-                  置信度 {(trustScore * 100).toFixed(0)}%
-                  <span className="text-[10px]">{showMetrics ? "▲" : "▼"}</span>
-                </>
-              )}
+              有据可查度 {(trustScore * 100).toFixed(0)}%
+              <span className="text-[10px]">{showMetrics ? "▲" : "▼"}</span>
             </button>
           )}
           </div>
         </div>
-
-        {/* 置信度详情面板 */}
-        {showMetrics && (evaluating && !evaluationMetrics) && (
-          <div className="px-5 pb-4 border-t bg-gray-50">
-            <div className="pt-3 flex items-center gap-2 text-sm text-gray-500">
-              <span className="animate-spin inline-block w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full" />
-              正在分析文档质量，请稍候...
-            </div>
-          </div>
-        )}
-        {showMetrics && evaluationMetrics && (
-          <div className="px-5 pb-4 border-t bg-gray-50">
+        {showMetrics && (
+          <div className="px-5 pb-4 border-t bg-gray-50 max-h-[50vh] overflow-y-auto">
             <div className="pt-3">
+              {/* 三维度指标说明 */}
+              <div className="mb-3 px-3 py-2 rounded-lg bg-blue-50 border border-blue-200">
+                <p className="text-[11px] text-blue-700 font-medium mb-1">📊 文档质量评估（3 个核心指标）</p>
+                <p className="text-[10px] text-blue-600">
+                  按照 RAGAS/FActScore 业界标准，从三个维度评估文档质量：
+                  <br />
+                  • 有据可查度：内容是否有来源支撑（我能信任吗？）
+                  <br />
+                  • 内容相关度：内容是否与需求相关（这回答了我的问题吗？）
+                  <br />
+                  • 内容完整度：是否覆盖需求的所有要点（有遗漏吗？）
+                </p>
+              </div>
+
+              {/* 三维度指标卡片 */}
+              <div className="grid grid-cols-3 gap-3 mb-3">
+                {/* 有据可查度 */}
+                <div className="px-3 py-2 rounded-lg bg-white border">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] text-gray-500">有据可查度</span>
+                    <span className={`text-sm font-bold ${
+                      trustScore !== null && trustScore >= 0.8 ? "text-green-600" :
+                      trustScore !== null && trustScore >= 0.5 ? "text-yellow-600" :
+                      "text-red-600"
+                    }`}>
+                      {trustScore !== null ? `${(trustScore * 100).toFixed(0)}%` : "—"}
+                    </span>
+                  </div>
+                  <div className="w-full bg-gray-200 rounded-full h-1.5">
+                    <div
+                      className={`h-1.5 rounded-full ${
+                        trustScore !== null && trustScore >= 0.8 ? "bg-green-500" :
+                        trustScore !== null && trustScore >= 0.5 ? "bg-yellow-500" :
+                        "bg-red-500"
+                      }`}
+                      style={{ width: `${(trustScore ?? 0) * 100}%` }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1">内容是否有来源支撑</p>
+                </div>
+
+                {/* 内容相关度 */}
+                <div className="px-3 py-2 rounded-lg bg-white border">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] text-gray-500">内容相关度</span>
+                    <span className={`text-sm font-bold ${
+                      evaluationMetrics?.relevance.score != null && evaluationMetrics.relevance.score >= 0.8 ? "text-green-600" :
+                      evaluationMetrics?.relevance.score != null && evaluationMetrics.relevance.score >= 0.5 ? "text-yellow-600" :
+                      "text-gray-400"
+                    }`}>
+                      {evaluationMetrics?.relevance.score != null ? `${(evaluationMetrics.relevance.score * 100).toFixed(0)}%` : "待评估"}
+                    </span>
+                  </div>
+                  <div className="w-full bg-gray-200 rounded-full h-1.5">
+                    <div
+                      className={`h-1.5 rounded-full ${
+                        evaluationMetrics?.relevance.score != null && evaluationMetrics.relevance.score >= 0.8 ? "bg-green-500" :
+                        evaluationMetrics?.relevance.score != null && evaluationMetrics.relevance.score >= 0.5 ? "bg-yellow-500" :
+                        "bg-gray-300"
+                      }`}
+                      style={{ width: `${(evaluationMetrics?.relevance.score ?? 0) * 100}%` }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1">内容是否与需求相关</p>
+                </div>
+
+                {/* 内容完整度 */}
+                <div className="px-3 py-2 rounded-lg bg-white border">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] text-gray-500">内容完整度</span>
+                    <span className={`text-sm font-bold ${
+                      evaluationMetrics?.completeness.score != null && evaluationMetrics.completeness.score >= 0.8 ? "text-green-600" :
+                      evaluationMetrics?.completeness.score != null && evaluationMetrics.completeness.score >= 0.5 ? "text-yellow-600" :
+                      "text-gray-400"
+                    }`}>
+                      {evaluationMetrics?.completeness.score != null ? `${(evaluationMetrics.completeness.score * 100).toFixed(0)}%` : "待评估"}
+                    </span>
+                  </div>
+                  <div className="w-full bg-gray-200 rounded-full h-1.5">
+                    <div
+                      className={`h-1.5 rounded-full ${
+                        evaluationMetrics?.completeness.score != null && evaluationMetrics.completeness.score >= 0.8 ? "bg-green-500" :
+                        evaluationMetrics?.completeness.score != null && evaluationMetrics.completeness.score >= 0.5 ? "bg-yellow-500" :
+                        "bg-gray-300"
+                      }`}
+                      style={{ width: `${(evaluationMetrics?.completeness.score ?? 0) * 100}%` }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1">是否覆盖需求的所有要点</p>
+                </div>
+              </div>
+
+              {/* 评估按钮 */}
+              {onEvaluate && (
+                <button
+                  onClick={onEvaluate}
+                  disabled={evaluating}
+                  className="w-full px-3 py-2 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 text-xs font-medium hover:bg-blue-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {evaluating ? "⏳ 评估中..." : evaluationMetrics ? "🔄 重新评估" : "🔍 评估内容相关度和完整度"}
+                </button>
+              )}
+
+              {/* 详细信息 */}
+              {evaluationMetrics && (
+                <div className="space-y-2">
+                  {/* 不相关内容 */}
+                  {evaluationMetrics.relevance.irrelevantSentences && evaluationMetrics.relevance.irrelevantSentences.length > 0 && (
+                    <div className="px-3 py-2 rounded-lg bg-yellow-50 border border-yellow-200">
+                      <p className="text-[11px] text-yellow-700 font-medium mb-1">⚠️ 以下内容可能与需求无关（点击跳转）：</p>
+                      <ul className="text-[10px] text-yellow-600 space-y-0.5">
+                        {evaluationMetrics.relevance.irrelevantSentences.slice(0, 3).map((s, i) => (
+                          <li key={i} className="cursor-pointer hover:underline" onClick={() => scrollToParagraph(s)}>• {s.substring(0, 50)}...</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* 遗漏要点 */}
+                  {evaluationMetrics.completeness.missingPoints && evaluationMetrics.completeness.missingPoints.length > 0 && (
+                    <div className="px-3 py-2 rounded-lg bg-orange-50 border border-orange-200">
+                      <p className="text-[11px] text-orange-700 font-medium mb-1">⚠️ 以下需求要点可能未覆盖：</p>
+                      <ul className="text-[10px] text-orange-600 space-y-0.5">
+                        {evaluationMetrics.completeness.missingPoints.slice(0, 3).map((s, i) => (
+                          <li key={i}>• {s}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* 内容冲突 */}
+                  {evaluationMetrics.conflicts?.hasConflicts && evaluationMetrics.conflicts.items.length > 0 && (
+                    <div className="px-3 py-2 rounded-lg bg-red-50 border border-red-200">
+                      <p className="text-[11px] text-red-700 font-medium mb-1">🔴 发现 {evaluationMetrics.conflicts.items.length} 处内容冲突：</p>
+                      <div className="space-y-2">
+                        {evaluationMetrics.conflicts.items.slice(0, 2).map((conflict, i) => (
+                          <div key={i} className="ml-2">
+                            <p className="text-[10px] text-red-600 font-medium">
+                              {conflict.severity === "high" ? "🔴" : conflict.severity === "medium" ? "🟡" : "🟢"} {conflict.topic}
+                            </p>
+                            <ul className="text-[10px] text-red-500 ml-3 space-y-0.5">
+                              {conflict.claims.slice(0, 2).map((claim, j) => (
+                                <li key={j} className="cursor-pointer hover:underline" onClick={() => scrollToParagraph(claim.text)}>• {claim.source}: {claim.text.substring(0, 50)}...</li>
+                              ))}
+                            </ul>
+                            {conflict.recommendation && (
+                              <p className="text-[10px] text-red-400 ml-3 mt-0.5">💡 {conflict.recommendation}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* 推荐操作 */}
               {trustScore !== null && trustScore < 0.8 && (
-                <div className={`mb-3 px-3 py-2 rounded-lg text-xs ${
+                <div className={`mt-3 px-3 py-2 rounded-lg text-xs ${
                   trustScore >= 0.5 ? "bg-yellow-50 text-yellow-800 border border-yellow-200" :
                   "bg-red-50 text-red-800 border border-red-200"
                 }`}>
                   {trustScore >= 0.5
-                    ? "⚠️ 文档整体可用，但建议先改进下方标红的指标再发布"
-                    : "❌ 置信度较低，建议补充知识源或重新生成后再使用"
+                    ? "⚠️ 文档整体可用，但建议补充知识源提高有据可查度"
+                    : "❌ 有据可查度较低，建议补充知识源或重新生成后再使用"
                   }
                 </div>
               )}
 
-              {/* 5 个指标 */}
-              <div className="space-y-2">
-                {([
-                  ["faithfulness", "事实忠实度", "faithfulness_insight"],
-                  ["groundedness", "有据可查度", "groundedness_insight"],
-                  ["coherence", "逻辑连贯性", "coherence_insight"],
-                  ["fluency", "语言流畅性", "fluency_insight"],
-                  ["completeness", "内容完整度", "completeness_insight"],
-                ] as const).map(([key, label, insightKey]) => {
-                  const score = evaluationMetrics[key];
-                  const insight = evaluationMetrics[insightKey];
-                  return (
-                    <div key={key} className="flex items-start gap-3">
-                      <span className="text-xs text-gray-500 w-20 shrink-0 pt-0.5">{label}</span>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <div className="flex-1 bg-gray-200 rounded-full h-1.5">
-                            <div
-                              className={`h-1.5 rounded-full ${
-                                score >= 0.8 ? "bg-green-500" :
-                                score >= 0.5 ? "bg-yellow-500" :
-                                "bg-red-500"
-                              }`}
-                              style={{ width: `${score * 100}%` }}
-                            />
-                          </div>
-                          <span className={`text-xs font-medium w-8 text-right ${
-                            score >= 0.8 ? "text-green-600" :
-                            score >= 0.5 ? "text-yellow-600" :
-                            "text-red-600"
-                          }`}>
-                            {(score * 100).toFixed(0)}%
-                          </span>
+              {/* 章节级详情 */}
+              {sections.length > 0 && (
+                <div className="mt-3">
+                  <p className="text-xs text-gray-500 mb-2">各章节有据可查度：</p>
+                  <div className="space-y-1.5">
+                    {sections.map((s, idx) => (
+                      <div key={idx} className="flex items-center gap-2">
+                        <span className="text-xs text-gray-600 w-24 truncate">{s.title}</span>
+                        <div className="flex-1 bg-gray-200 rounded-full h-1.5">
+                          <div
+                            className={`h-1.5 rounded-full ${
+                              s.groundingScore >= 0.8 ? "bg-green-500" :
+                              s.groundingScore >= 0.5 ? "bg-yellow-500" :
+                              "bg-red-500"
+                            }`}
+                            style={{ width: `${s.groundingScore * 100}%` }}
+                          />
                         </div>
-                        {insight && (
-                          <p className="text-[11px] text-gray-500 mt-0.5">{renderInsight(insight)}</p>
-                        )}
+                        <span className={`text-xs font-medium w-8 text-right ${
+                          s.groundingScore >= 0.8 ? "text-green-600" :
+                          s.groundingScore >= 0.5 ? "text-yellow-600" :
+                          "text-red-600"
+                        }`}>
+                          {(s.groundingScore * 100).toFixed(0)}%
+                        </span>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -450,7 +606,7 @@ export default function DocPreview({
                         key={idx}
                         className={`border rounded-lg overflow-hidden transition-colors ${isDragOver ? "border-blue-400 bg-blue-50" : ""}`}
                         onDragOver={(e) => handleDragOver(e, idx)}
-                        onDragLeave={handleDragLeave}
+                        onDragLeave={(e) => handleDragLeave(e, idx)}
                         onDrop={(e) => handleDrop(e, idx)}
                       >
                         <button
@@ -459,12 +615,15 @@ export default function DocPreview({
                         >
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-medium text-gray-700">{s.title}</span>
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                              s.groundingScore >= 0.8 ? "bg-green-100 text-green-700" :
-                              s.groundingScore >= 0.5 ? "bg-yellow-100 text-yellow-700" :
-                              "bg-red-100 text-red-700"
-                            }`}>
-                              {(s.groundingScore * 100).toFixed(0)}%
+                            <span
+                              className={`text-[10px] px-1.5 py-0.5 rounded ${
+                                s.groundingScore >= 0.8 ? "bg-green-100 text-green-700" :
+                                s.groundingScore >= 0.5 ? "bg-yellow-100 text-yellow-700" :
+                                "bg-red-100 text-red-700"
+                              }`}
+                              title="引用覆盖率：本章节可追溯到具体来源段落的声明比例（逐句验证，最严格指标）"
+                            >
+                              引用覆盖 {(s.groundingScore * 100).toFixed(0)}%
                             </span>
                             {isDirty && (
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-100 text-orange-700">已修改</span>
@@ -487,7 +646,7 @@ export default function DocPreview({
                                     className="text-xs text-gray-600 mb-1.5 pl-2 border-l-2 border-blue-300 cursor-grab active:cursor-grabbing hover:bg-blue-50 rounded-r transition-colors"
                                   >
                                     <div className="flex items-start justify-between gap-2 pr-1">
-                                      <div className="flex-1 min-w-0">
+                                      <div className="flex-1 min-w-0" style={{ userSelect: "text" }}>
                                         {src.sourceUrl ? (
                                           <a href={src.sourceUrl} target="_blank" rel="noopener" className="text-blue-600 hover:underline font-medium">
                                             📄 {src.sourceName || src.chunkId}
@@ -499,7 +658,13 @@ export default function DocPreview({
                                         ) : (
                                           <span className="font-mono text-blue-600">{src.sourceName || `[${src.chunkId}]`}</span>
                                         )}{" "}
-                                        <span className="text-gray-400">(score: {src.score.toFixed(2)})</span>
+                                        <span className="text-gray-400" title={`相关度 ${(src.score * 100).toFixed(0)}%（满分 100%）`}>
+                                          {src.score >= 0.7 ? "🟢 高相关" :
+                                           src.score >= 0.4 ? "🟡 中相关" :
+                                           src.score >= 0.15 ? "🟠 低相关" :
+                                           "⚪ 弱相关"}{" "}
+                                          {(src.score * 100).toFixed(0)}%
+                                        </span>
                                       </div>
                                       <button
                                         onClick={(e) => { e.stopPropagation(); handleDeleteSource(idx, i); }}
@@ -509,7 +674,7 @@ export default function DocPreview({
                                         移除
                                       </button>
                                     </div>
-                                    <p className="text-gray-500 mt-0.5 line-clamp-2 pr-1 pb-0.5">{src.content}</p>
+                                    <p className="text-gray-500 mt-0.5 line-clamp-2 pr-1 pb-0.5" style={{ userSelect: "text" }}>{src.content}</p>
                                   </div>
                                 ))}
                               </div>
@@ -525,10 +690,19 @@ export default function DocPreview({
                                     className="text-xs mb-1.5 pl-2 border-l-2 border-green-300 cursor-grab active:cursor-grabbing hover:bg-green-50 rounded-r transition-colors"
                                   >
                                     <div className="flex items-start justify-between gap-2 pr-1">
-                                      <div className="flex-1 min-w-0">
+                                      <div className="flex-1 min-w-0" style={{ userSelect: "text" }}>
                                         <a href={c.url} target="_blank" rel="noopener" className="text-green-600 hover:underline">
                                           {c.title}
                                         </a>
+                                        {c.score !== undefined && (
+                                          <span className="text-gray-400 ml-1" title={`相关度 ${(c.score * 100).toFixed(0)}%（满分 100%）`}>
+                                            {c.score >= 0.7 ? "🟢 高相关" :
+                                             c.score >= 0.4 ? "🟡 中相关" :
+                                             c.score >= 0.15 ? "🟠 低相关" :
+                                             "⚪ 弱相关"}{" "}
+                                            {(c.score * 100).toFixed(0)}%
+                                          </span>
+                                        )}
                                       </div>
                                       <button
                                         onClick={(e) => { e.stopPropagation(); handleDeleteWebCitation(idx, i); }}
@@ -538,7 +712,7 @@ export default function DocPreview({
                                         移除
                                       </button>
                                     </div>
-                                    <p className="text-gray-500 mt-0.5 line-clamp-2 pr-1 pb-0.5">{c.snippet}</p>
+                                    <p className="text-gray-500 mt-0.5 line-clamp-2 pr-1 pb-0.5" style={{ userSelect: "text" }}>{c.snippet}</p>
                                   </div>
                                 ))}
                               </div>

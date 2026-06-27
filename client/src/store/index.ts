@@ -107,6 +107,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           searchProviders: state.searchProviders,
           knowledgeProviders: state.knowledgeProviders,
           knowledge: { enabled: state.knowledgeEnabled },
+          _source: "saveProviders",
         }),
       });
       set({
@@ -132,6 +133,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           searchProviders,
           knowledgeProviders: state.knowledgeProviders,
           knowledge: { enabled: state.knowledgeEnabled },
+          _source: "saveSearchProviders",
         }),
       });
       set({ searchProviders, loading: false });
@@ -153,6 +155,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           searchProviders: state.searchProviders,
           knowledgeProviders,
           knowledge: { enabled: knowledgeEnabled },
+          _source: "saveKnowledgeConfig",
         }),
       });
       set({ knowledgeProviders, knowledgeEnabled, loading: false });

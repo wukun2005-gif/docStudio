@@ -18,9 +18,11 @@ import type {
   EmbeddingRequest,
   EmbeddingResponse,
 } from "./openai.js";
+import { readSettingsFromDb } from "../lib/settingsReader.js";
 import {
   OpenAICompatibleAdapter,
   isReasoningModel,
+  isReasoningModelStatic,
   learnThinkingCapability,
   resolveMaxTokens,
 } from "./openai.js";
@@ -30,7 +32,7 @@ import { logger } from "../lib/logger.js";
 const BACKOFF_DELAYS = [500, 1500];
 const MAX_RETRIES = 2;
 const MAX_TOTAL_ATTEMPTS = 8;
-const TIMEOUT_MS = 120_000;
+const TIMEOUT_MS = 240_000;
 
 export interface AttemptRecord {
   providerId: string;
@@ -99,6 +101,14 @@ export class ProviderRegistry {
     providerApiKeys?: Record<string, string>,
     providerBaseUrls?: Record<string, string>,
   ): Promise<{ response: ChatResponse; attempts: AttemptRecord[] }> {
+    // 自动从 DB 读取 fallback 配置（如果调用者没有传递）
+    // 照搬 patentExaminator: LLM 调用函数不需要关心 fallback 细节
+    if (!modelFallbacks || !enableModelFallback) {
+      const dbSettings = readSettingsFromDb();
+      modelFallbacks = modelFallbacks ?? dbSettings.modelFallbacks ?? {};
+      enableModelFallback = enableModelFallback ?? dbSettings.enableModelFallback ?? {};
+    }
+
     const attempts: AttemptRecord[] = [];
     let totalAttempts = 0;
 
@@ -127,11 +137,23 @@ export class ProviderRegistry {
 
       // Model fallback 路径
       if (enabled && configuredFallbacks && configuredFallbacks.length > 0) {
-        const models = req.modelId
+        let models = req.modelId
           ? [req.modelId, ...configuredFallbacks.filter((m) => m !== req.modelId)]
           : configuredFallbacks;
 
-        logger.info(`[Registry] ${pid} fallback chain: initialModel=${req.modelId ?? "default"}, models=[${models.join(", ")}]`);
+        // 评估模式：fallback 链中的推理模型容易因长 thinking 超时，
+        // 但用户主动选择的首选模型保留（resolveEvalMaxTokens 已 cap 到 4096 防止超时）
+        if (req.evalMode) {
+          const primary = req.modelId ? models.filter((m) => m === req.modelId) : [];
+          const fallbacks = models.filter((m) => m !== req.modelId && !isReasoningModelStatic(m));
+          const filtered = [...primary, ...fallbacks];
+          if (filtered.length < models.length) {
+            logger.info(`[Registry] evalMode: 从 fallback 链过滤推理模型（保留首选 ${req.modelId}）, ${models.length} → ${filtered.length}`);
+            models = filtered;
+          }
+        }
+
+        logger.info(`[Registry] ${pid} fallback chain: initialModel=${req.modelId ?? "default"}, models=[${models.slice(0, 5).join(", ")}${models.length > 5 ? `, ...+${models.length - 5}` : ""}]`);
 
         for (const modelId of models) {
           totalAttempts++;
@@ -361,7 +383,8 @@ export class ProviderRegistry {
           throw error;
         }
 
-        if (lastErrInfo.code === "auth-failed" || lastErrInfo.code === "quota-exceeded" || lastErrInfo.code === "bad-request") {
+        // 超时、401、429、400: 不重试，直接 fallback
+        if (lastErrInfo.code === "timeout" || lastErrInfo.code === "auth-failed" || lastErrInfo.code === "quota-exceeded" || lastErrInfo.code === "bad-request") {
           (error as Error & { attempts: AttemptRecord[] }).attempts = [...attempts];
           throw error;
         }
@@ -395,11 +418,16 @@ function classifyError(error: unknown): ErrorInfo {
     if (status === 401) return { code: "auth-failed", message: error.message, retryable: false };
     if (status === 400) return { code: "bad-request", message: error.message, retryable: false };
     if (status === 429) return { code: "quota-exceeded", message: error.message, retryable: true };
+    if (status === 403 && /quota|insufficient/i.test(error.message)) {
+      return { code: "quota-exceeded", message: error.message, retryable: false };
+    }
+    if (status === 403) return { code: "auth-failed", message: error.message, retryable: false };
     if (status && status >= 500) return { code: "server-error", message: error.message, retryable: true };
-    if (error.name === "AbortError") return { code: "timeout", message: "Request timed out", retryable: true };
+    // 超时直接 fallback 到下一个 model，不重试（照搬 patentExaminator）
+    if (error.name === "AbortError") return { code: "timeout", message: "Request timed out", retryable: false };
     // 检测超时相关的错误消息（fetch abort 时 error.name 可能不是 AbortError）
     if (error.message.includes("This operation was aborted") || error.message.includes("timed out")) {
-      return { code: "timeout", message: error.message, retryable: true };
+      return { code: "timeout", message: error.message, retryable: false };
     }
     return { code: "network-error", message: error.message, retryable: true };
   }
@@ -408,11 +436,12 @@ function classifyError(error: unknown): ErrorInfo {
     const resp = error as ChatResponse;
     if (resp.error) {
       const code = resp.error.code;
-      if (code === "401" || code === "403") return { code: "auth-failed", message: resp.error.message, retryable: false };
+      if (code === "401" || (code === "403" && !/quota|insufficient/i.test(resp.error.message))) return { code: "auth-failed", message: resp.error.message, retryable: false };
+      if (code === "403") return { code: "quota-exceeded", message: resp.error.message, retryable: false };
       if (code === "429") return { code: "quota-exceeded", message: resp.error.message, retryable: true };
-      // 检测超时：network 错误中包含超时关键词
+      // 检测超时：network 错误中包含超时关键词（直接 fallback，不重试）
       if (code === "network" && (resp.error.message.includes("aborted") || resp.error.message.includes("timed out"))) {
-        return { code: "timeout", message: resp.error.message, retryable: true };
+        return { code: "timeout", message: resp.error.message, retryable: false };
       }
       return { code, message: resp.error.message, retryable: resp.error.retryable };
     }

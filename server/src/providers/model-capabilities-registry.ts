@@ -60,6 +60,8 @@ const CAPABILITY_PRESETS: Record<string, Partial<ModelCapabilities>> = {
   "deepseek-chat":     { isReasoning: false, contextWindow: 65_536, maxOutputTokens: 8_192,  temperature: { supported: true, range: [0, 2] },  supportsStructuredOutput: false, supportsVision: false, systemPromptMode: "message", recommendation: "V3 (2026-07弃用→v4-flash非思考)" },
   // ── Kimi K2 系列（api.moonshot.cn）──
   // 来源：platform.kimi.com → 模型列表 + 模型参数参考 + 创建对话补全
+  // kimi-k2.7-code: 262k 上下文，推理模型，支持 thinking、json_schema、视觉
+  "kimi-k2.7":      { isReasoning: true,  contextWindow: 262_144,   maxOutputTokens: 32_768, temperature: { supported: false, range: [0, 1] },  supportsStructuredOutput: true,  supportsVision: true,  systemPromptMode: "message", recommendation: "K2.7 Code 最新 (思考+视觉, 262K)" },
   // kimi-k2.6: 256k 上下文，temperature 不可修改，支持 thinking（extra_body），支持 json_schema，支持视觉
   "kimi-k2.6":      { isReasoning: true,  contextWindow: 262_144,   maxOutputTokens: 32_768, temperature: { supported: false, range: [0, 1] },  supportsStructuredOutput: true,  supportsVision: true,  systemPromptMode: "message", recommendation: "K2.6 最新 (思考+视觉, 256K)" },
   // kimi-k2.5: 256k 上下文，支持 thinking，temperature 不可修改（固定 1.0），支持视觉

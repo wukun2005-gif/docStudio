@@ -16,6 +16,7 @@ import { provenanceRouter } from "./routes/provenance.js";
 import { connectorsRouter } from "./routes/connectors.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { dataRouter } from "./routes/data.js";
+import { promptTemplatesRouter } from "./routes/promptTemplates.js";
 import { getDb, closeDb } from "./lib/db.js";
 import { logger } from "./lib/logger.js";
 
@@ -86,6 +87,7 @@ app.use("/api/evaluation", evaluationRouter);
 app.use("/api/provenance", provenanceRouter);
 app.use("/api/connectors", connectorsRouter);
 app.use("/api/workflows", workflowsRouter);
+app.use("/api/prompt-templates", promptTemplatesRouter);
 
 // 知识库文件服务 — 提供 samples 目录下的原始文件下载/预览
 const samplesDir = path.resolve(__dirname, "../../samples");

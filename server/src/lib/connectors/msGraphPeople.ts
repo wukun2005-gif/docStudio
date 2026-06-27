@@ -4,7 +4,7 @@
  * 使用 client_credentials 流程（Application 权限）从 Entra ID 拉取用户和上下级关系，
  * 写入本地 people 表。
  */
-import { getDb } from "../db.js";
+import { dbGet } from "../dbQuery.js";
 import { logger } from "../logger.js";
 import { addPerson, addRelationship, getAllPeople, deletePerson } from "../peopleGraph.js";
 
@@ -31,10 +31,7 @@ let clientTokenCache: ClientTokenCache | null = null;
 /** 读取 Azure 应用配置（复用 msGraphOAuth 的配置） */
 function getAppConfig(): { clientId: string; clientSecret: string; tenantId: string } | null {
   try {
-    const db = getDb();
-    const row = db.prepare("SELECT value FROM user_settings WHERE key = 'msgraph_config'").get() as
-      | { value: string }
-      | undefined;
+    const row = dbGet<{ value: string }>("SELECT value FROM user_settings WHERE key = ?", ["msgraph_config"]);
     if (!row) return null;
     const config = JSON.parse(row.value);
     if (!config.clientId || !config.clientSecret || !config.tenantId) return null;

@@ -12,92 +12,36 @@ import { executeWithTools } from "./toolExecutor.js";
 import { checkGroundedness, type GroundingDoc } from "./groundednessCheck.js";
 import { cleanContent, type CitationLink } from "./contentCleaner.js";
 import { logger } from "./logger.js";
-import { getDb } from "./db.js";
+import { dbGet } from "./dbQuery.js";
 import { getAllPeople, getPersonById, getPersonContext, type Person } from "./peopleGraph.js";
+import { detectStyle, detectFormat, detectAudience, getStyle, getFormat, getAudience } from "./promptTemplates.js";
+import { getRulesForContext } from "./writingRules.js";
 import type { OutlineSection } from "./narrativeEngine.js";
 import type { ChatRequest, ToolDefinition, ToolCall } from "../providers/openai.js";
-import type { DocumentMetadata } from "../../../shared/src/types/generation.js";
+import type { DocumentMetadata, StyleTemplate, FormatTemplate, AudienceProfile } from "../../../shared/src/types/generation.js";
 
 // ── 文档生成 ──────────────────────────────────────────
 
-/** 从用户请求中动态识别文档类型，生成格式指引 */
-function detectDocumentStyle(userRequest: string): { style: "email" | "ppt" | "table" | "code" | "report" | "general"; guide: string } {
-  const req = userRequest.toLowerCase();
-
-  // 邮件类
-  if (/邮件|email|mail|写信|致函/.test(req)) {
-    return {
-      style: "email",
-      guide: `这是一封邮件。请按邮件格式输出：
-- 第一行写主题/标题
-- 开头写称呼（如"XXX，你好："）
-- 正文分段落，每段一个要点
-- 结尾写问候语（如"此致"、"祝好"、"Best regards"）
-- 最后署名
-不要使用 markdown 格式（不要 # 标题、**粗体**、- 列表），用纯文本段落。`,
-    };
-  }
-
-  // PPT/演示文稿
-  if (/ppt|演示|slides|幻灯片|presentation/i.test(req)) {
-    return {
-      style: "ppt",
-      guide: `这是一份演示文稿。请按 PPT 格式输出：
-- 每个章节对应一页幻灯片
-- 用要点列表（bullet points）呈现，每页 3-5 个要点
-- 每个要点简洁有力，不超过 20 字
-- 可以在页末加备注说明`,
-    };
-  }
-
-  // 表格/Excel
-  if (/表格|excel|sheet|数据表|报表|清单/i.test(req)) {
-    return {
-      style: "table",
-      guide: `这是一个表格/数据文档。请按表格格式输出：
-- 用 markdown 表格格式（| 列1 | 列2 | ... |）
-- 表头清晰，列名简洁
-- 数据对齐，内容精炼`,
-    };
-  }
-
-  // 代码/技术文档
-  if (/代码|code|api|sdk|技术文档|readme|接口/i.test(req)) {
-    return {
-      style: "code",
-      guide: `这是一份技术文档。请按技术文档格式输出：
-- 包含清晰的标题层级
-- 代码用代码块包裹
-- 参数说明用列表呈现
-- 包含示例`,
-    };
-  }
-
-  // 报告/汇报
-  if (/报告|汇报|report|总结|分析/i.test(req)) {
-    return {
-      style: "report",
-      guide: `这是一份报告。请按报告格式输出：
-- 有清晰的标题和章节结构
-- 每个章节有小标题
-- 内容分段落，逻辑清晰
-- 重要信息用粗体标注`,
-    };
-  }
-
-  // 通用文档（默认）
-  return {
-    style: "general",
-    guide: `请按正式文档格式输出，语言专业流畅，结构清晰。`,
-  };
+/**
+ * 兼容旧接口：从用户请求中动态识别文档类型
+ * 底层已迁移到 promptTemplates.ts 的 Composable Layers
+ */
+function detectDocumentStyle(userRequest: string): { style: string; guide: string } {
+  const style = detectStyle(userRequest);
+  return { style: style.id, guide: style.promptFragment };
 }
 
 /** 从用户请求中提取文档元数据（收件人、主题等） */
 export function extractDocumentMetadata(userRequest: string, outline: OutlineSection[]): DocumentMetadata {
   const detected = detectDocumentStyle(userRequest);
+  const detectedFormat = detectFormat(userRequest);
+  const detectedAudience = detectAudience(userRequest);
   const metadata: DocumentMetadata = {
     style: detected.style,
     guide: detected.guide,
+    styleId: detected.style,
+    outputFormatId: detectedFormat.id,
+    audienceId: detectedAudience.id,
     metadata: {},
   };
 
@@ -164,14 +108,16 @@ export interface GenerateDocResult {
     title: string;
     content: string;
     sources: Array<{ chunkId: string; content: string; score: number; sourceId: string; sourceName?: string; sourceUrl?: string }>;
-    webCitations: Array<{ title: string; url: string; snippet: string }>;
+    webCitations: Array<{ title: string; url: string; snippet: string; score?: number }>;
     groundingScore: number;
     /** 照搬 patentExaminator：citation 编号→来源映射，确保正文 [N] 与参考来源列表一一对应 */
     citationLinks: CitationLink[];
   }>;
   trustScore: number;
-  /** 文档风格（从 userRequest 动态识别） */
-  documentStyle: "email" | "ppt" | "table" | "code" | "report" | "general";
+  /** 文档风格 ID（从 userRequest 动态识别或用户指定） */
+  documentStyle: string;
+  /** LLM 生成的文档标题 */
+  title: string;
 }
 
 // ── Embedding（复用 knowledge.ts 的逻辑） ──────────────
@@ -229,9 +175,8 @@ async function retrieveForSection(
   // 批量查询 source 信息（文件名、URL）
   const sourceIds = [...new Set(results.map((r) => r.sourceId))];
   const sourceMap = new Map<string, { name: string; url?: string }>();
-  const db = getDb();
   for (const sid of sourceIds) {
-    const row = db.prepare("SELECT name, url FROM kb_sources WHERE id = ?").get(sid) as { name: string; url?: string } | undefined;
+    const row = dbGet<{ name: string; url?: string }>("SELECT name, url FROM kb_sources WHERE id = ?", [sid]);
     if (row) sourceMap.set(sid, { name: row.name, url: row.url });
   }
 
@@ -269,7 +214,7 @@ async function generateSection(
   userRequest: string,
   /** 完整大纲（参考 STORM：提供文档全局视图） */
   fullOutline: OutlineSection[],
-  documentStyle?: "email" | "ppt" | "table" | "code" | "report" | "general",
+  documentStyle?: string,
   sectionIndex: number = 0,
   /** 全局引用编号偏移量（照搬 patentExaminator：确保每个章节的引用编号全局唯一） */
   globalCitationOffset: number = 0,
@@ -278,7 +223,7 @@ async function generateSection(
 ): Promise<{
   content: string;
   sources: Array<{ chunkId: string; content: string; score: number; sourceId: string; sourceName?: string; sourceUrl?: string }>;
-  webCitations: Array<{ title: string; url: string; snippet: string }>;
+  webCitations: Array<{ title: string; url: string; snippet: string; score?: number }>;
   groundingScore: number;
   citationLinks: CitationLink[];
 }> {
@@ -290,9 +235,16 @@ async function generateSection(
     return `${sourceLabel}（相似度: ${s.score.toFixed(2)}）\n${s.content}`;
   }).join("\n\n");
 
-  const detected = detectDocumentStyle(userRequest);
-  const effectiveStyle = documentStyle ?? detected.style;
-  const formatGuide = detected.guide;
+  // ── Composable Prompt Layers: 获取各层模板 ──
+  const effectiveStyleId = documentStyle ?? config.metadata?.styleId ?? detectStyle(userRequest).id;
+  const effectiveFormatId = config.metadata?.outputFormatId ?? detectFormat(userRequest).id;
+  const effectiveAudienceId = config.metadata?.audienceId ?? detectAudience(userRequest).id;
+
+  const styleTemplate = getStyle(effectiveStyleId);
+  const formatTemplate = getFormat(effectiveFormatId);
+  const audienceTemplate = getAudience(effectiveAudienceId);
+  const writingRules = getRulesForContext(effectiveStyleId, effectiveFormatId);
+
   const metadata = config.metadata;
 
   // 读取发件人身份（用于邮件署名）
@@ -300,7 +252,7 @@ async function generateSection(
   const senderName = senderProfile?.name ?? "[你的名字]";
 
   const isFirstSection = sectionIndex === 0;
-  const isEmail = effectiveStyle === "email";
+  const isEmail = effectiveStyleId === "email";
   const totalSections = fullOutline.length;
 
   // ── Prompt 架构参考 STORM + OpenAI Cookbook ──
@@ -333,11 +285,56 @@ async function generateSection(
     emailMetadataSection += "\n";
   }
 
+  // ── Composable Prompt Layers: 组装 system prompt ──
+  const rulesText = writingRules.map((r, i) => `${i + 1}. ${r.rule}`).join("\n");
+
+  // 邮件特有的章节指令
+  let emailSectionRule = "";
+  if (isFirstSection && isEmail && metadata?.recipient) {
+    emailSectionRule = `这是邮件的第一个章节。请在开头写明：
+   - 收件人：${metadata.recipient.name}${metadata.recipient.email ? ` <${metadata.recipient.email}>` : ""}
+   - 主题：${metadata.subject || "（从内容中提炼）"}
+   然后写称呼（如"${metadata.recipient.name}，你好："）。
+   【注意】不要写邮件结尾（如"此致"、"祝好"、"Best regards"等）和署名，结尾由后续章节处理。`;
+  } else if (isFirstSection) {
+    emailSectionRule = `这是第一个章节，请写称呼（如"XXX，你好："）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}`;
+  } else if (isEmail && isLastSection) {
+    emailSectionRule = `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："）。但这是最后一个章节，请在内容末尾写上邮件结尾问候语（如"此致"、"祝好"、"Best regards"等）和署名（如"${senderName}"）。`;
+  } else {
+    emailSectionRule = `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`;
+  }
+
+  // 收件人沟通风格
+  let toneRule = "";
+  if (isEmail && metadata?.recipient?.personId) {
+    const person = getPersonById(metadata.recipient.personId);
+    const commStyle = person?.attributes?.communicationStyle;
+    if (commStyle === "formal") toneRule = "\n【语气要求】收件人偏好正式风格，请使用严谨、正式的措辞，避免口语化表达";
+    if (commStyle === "casual") toneRule = "\n【语气要求】收件人偏好轻松风格，请使用亲切、自然的措辞，适当口语化";
+    if (commStyle === "technical") toneRule = "\n【语气要求】收件人偏好技术风格，请使用专业术语和精确表述，逻辑清晰";
+  }
+
   const systemPrompt = `你是一个文档写作助手，负责为一篇完整文档撰写其中一个章节。
+
+═══ 文档风格 ═══
+
+${styleTemplate.promptFragment}
+
+═══ 输出格式 ═══
+
+${formatTemplate.constraints}
+
+═══ 目标读者 ═══
+
+${audienceTemplate.guidance}
+
+═══ 写作规范 ═══
+
+${rulesText}
 
 ═══ 文档全局视图 ═══
 
-文档类型：${formatGuide.split('\n')[0]}
+文档类型：${styleTemplate.name}
 用户需求：${userRequest}
 ${emailMetadataSection}
 完整文档大纲（共 ${totalSections} 个章节）：
@@ -353,32 +350,16 @@ ${rollingSummary || "（这是第一个章节，暂无前文）"}
 
 ${sourceText || "（无参考信息）"}
 
-═══ 写作要求 ═══
+═══ 通用生成规则 ═══
 
 1. 直接输出章节正文内容，不要输出章节标题、不要输出章节编号（如"1."、"5."等）
 2. 不要写「以下是...」「根据参考文档...」等引导语，直接输出内容
 3. 不要写补充说明、注意事项等元信息
-4. ${isFirstSection && isEmail && metadata?.recipient ? `这是邮件的第一个章节。请在开头写明：
-   - 收件人：${metadata.recipient.name}${metadata.recipient.email ? ` <${metadata.recipient.email}>` : ""}
-   - 主题：${metadata.subject || "（从内容中提炼）"}
-   然后写称呼（如"${metadata.recipient.name}，你好："）。
-   【注意】不要写邮件结尾（如"此致"、"祝好"、"Best regards"等）和署名，结尾由后续章节处理。` : isFirstSection ? `这是第一个章节，请写称呼（如"XXX，你好："）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}` : isEmail && isLastSection ? `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："）。但这是最后一个章节，请在内容末尾写上邮件结尾问候语（如"此致"、"祝好"、"Best regards"等）和署名（如"${senderName}"）。` : `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`}
+4. ${emailSectionRule}
 5. 内容要与前文自然衔接，承上启下，不要重复前文已写过的内容
 6. 如果参考信息不足，可以使用 web_search 工具搜索最新信息
 7. 【重要】引用参考信息时，必须用 [N] 标记来源编号。系统会自动提供带编号的参考文档，请直接复用这些编号。
-8. 【禁止】只允许引用系统提供的参考文档中的编号，绝对不要引用不存在的编号。如果某句话没有对应的参考来源，直接写出该句，不要添加任何引用标记。
-9. ${isEmail ? "用纯文本段落输出，不要使用 markdown 格式（不要 # 标题、**粗体**、- 列表）" : "可以用 markdown 格式组织内容"}
-${(() => {
-  // 根据收件人沟通风格追加语气指令
-  if (isEmail && metadata?.recipient?.personId) {
-    const person = getPersonById(metadata.recipient.personId);
-    const style = person?.attributes?.communicationStyle;
-    if (style === "formal") return "10. 【语气要求】收件人偏好正式风格，请使用严谨、正式的措辞，避免口语化表达";
-    if (style === "casual") return "10. 【语气要求】收件人偏好轻松风格，请使用亲切、自然的措辞，适当口语化";
-    if (style === "technical") return "10. 【语气要求】收件人偏好技术风格，请使用专业术语和精确表述，逻辑清晰";
-  }
-  return "";
-})()}`;
+8. 【禁止】只允许引用系统提供的参考文档中的编号，绝对不要引用不存在的编号。如果某句话没有对应的参考来源，直接写出该句，不要添加任何引用标记。${toneRule}`;
 
   const userPrompt = `请为"${section.title}"章节撰写内容。${section.description ? `该章节要写：${section.description}` : ""}`;
 
@@ -437,7 +418,7 @@ ${(() => {
     query: `${section.title} ${section.description ?? ""}`,
     timeoutMs: SECTION_TIMEOUT_MS,
     documentFormat: config.format,
-    documentStyle: effectiveStyle,
+    documentStyle: effectiveStyleId,
     globalCitationOffset,
     ...(rerankerConfig ? { rerankerConfig } : {}),
   });
@@ -476,7 +457,7 @@ ${(() => {
     url: c.url || "",
     sourceId: c.sourceId || "",
   }));
-  finalContent = cleanContent(finalContent, config.format, citationLinks, effectiveStyle);
+  finalContent = cleanContent(finalContent, config.format, citationLinks, effectiveStyleId);
 
   return {
     content: finalContent,
@@ -508,7 +489,7 @@ async function generateSections(
   userRequest: string,
   /** 完整文档大纲（顶层传入，递归时保持不变） */
   fullOutline: OutlineSection[],
-  documentStyle?: "email" | "ppt" | "table" | "code" | "report" | "general",
+  documentStyle?: string,
   /** 全局引用编号偏移量（照搬 patentExaminator） */
   globalCitationOffset: number = 0,
   /** 当前层级的最后一个章节是否是文档最后一个章节 */
@@ -568,6 +549,76 @@ async function generateSections(
   return sections;
 }
 
+/** 清洗 LLM 生成的标题（去除特殊符号、截断） */
+function sanitizeTitle(raw: string): string {
+  return raw
+    .replace(/[^一-鿿\w\s]/g, " ")  // 只保留 CJK + 字母数字 + 空白
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 20) || "文档";
+}
+
+/** 用 LLM 根据用户需求生成简短标题 */
+async function generateTitleWithLLM(userRequest: string, outline: OutlineSection[], config: GenerateDocRequest): Promise<string> {
+  const outlineText = outline.map((s) => s.title).join("、");
+  const systemPrompt = `你是一个文档标题生成器。根据用户的写作需求和文档大纲，生成一个简短的中文标题。
+
+规则：
+1. 标题不超过 10 个字
+2. 直接输出标题，不要输出引号、标点或任何解释
+3. 标题要简洁明了，概括文档核心主题`;
+
+  const userPrompt = `用户需求：${userRequest}
+文档大纲：${outlineText}
+
+请生成标题：`;
+
+  try {
+    const dbSettings = readSettingsFromDb();
+    const defaultProviders = dbSettings.providerPreference?.length ? dbSettings.providerPreference : ["mimo"];
+    const providers = config.providerPreference ?? defaultProviders;
+
+    const providerApiKeys: Record<string, string> = {};
+    for (const pid of providers) {
+      const key = config.apiKey ?? getApiKey(pid);
+      if (key) providerApiKeys[pid] = key;
+    }
+
+    const result = await registry.runWithFallback(
+      providers,
+      {
+        modelId: config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ] as ChatRequest["messages"],
+        apiKey: "",
+        temperature: 0.3,
+        signal: config.signal,
+        timeoutMs: 30_000,  // 标题生成用短超时
+      },
+      undefined, undefined,
+      providerApiKeys,
+      config.providerBaseUrls,
+    );
+
+    // 检查 LLM 是否返回错误或空内容
+    if (result.response.error || !result.response.text?.trim()) {
+      logger.warn(`[DocGenerator] LLM 标题生成失败: ${result.response.error?.message ?? "空响应"}，回退到启发式`);
+      return sanitizeTitle(userRequest.slice(0, 10));
+    }
+
+    const rawTitle = result.response.text.trim();
+    const title = sanitizeTitle(rawTitle);
+    logger.info(`[DocGenerator] LLM 生成标题: "${rawTitle}" → 清洗后: "${title}"`);
+    return title;
+  } catch (err) {
+    logger.warn(`[DocGenerator] LLM 标题生成失败，回退到启发式: ${err}`);
+    // 回退：用用户请求的前 10 字
+    return sanitizeTitle(userRequest.slice(0, 10));
+  }
+}
+
 /** 完整文档生成 */
 export async function generateDocument(config: GenerateDocRequest): Promise<GenerateDocResult> {
   logger.info(`[DocGenerator] 开始生成: ${config.title}`);
@@ -582,7 +633,11 @@ export async function generateDocument(config: GenerateDocRequest): Promise<Gene
 
   const { style: documentStyle } = config.metadata;
 
-  const sections = await generateSections(config.outline, "", config, userRequest, config.outline, documentStyle);
+  // 并行执行：章节生成 + 标题生成（标题只依赖大纲，不依赖章节内容）
+  const [sections, title] = await Promise.all([
+    generateSections(config.outline, "", config, userRequest, config.outline, documentStyle),
+    generateTitleWithLLM(userRequest, config.outline, config),
+  ]);
 
   const content = sections.map((s) => `${s.title}\n\n${s.content}`).join("\n\n");
 
@@ -592,9 +647,9 @@ export async function generateDocument(config: GenerateDocRequest): Promise<Gene
     ? groundingScores.reduce((a, b) => a + b, 0) / groundingScores.length
     : 0.5;
 
-  logger.info(`[DocGenerator] 生成完成: ${sections.length} 章节, trustScore=${trustScore.toFixed(2)} (groundedness), style=${documentStyle}`);
+  logger.info(`[DocGenerator] 生成完成: ${sections.length} 章节, trustScore=${trustScore.toFixed(2)} (groundedness), style=${documentStyle}, title="${title}"`);
 
-  return { content, sections, trustScore, documentStyle };
+  return { content, sections, trustScore, documentStyle, title };
 }
 
 // ── 格式转换 ──────────────────────────────────────────
@@ -680,12 +735,13 @@ export function toHtml(result: GenerateDocResult, baseUrl?: string): string {
       }).join("")}</div></footer>`
     : "";
 
-  const title = isEmail ? (result.sections[0]?.title ?? "邮件") : (result.sections[0]?.title ?? "文档");
+  // 使用 LLM 生成的文档标题（已在 generateDocument 中生成）
+  const title = result.title || (result.sections[0]?.title ?? "文档");
 
   // 注意：不要输出 <html>/<head>/<body>，因为内容通过 dangerouslySetInnerHTML 注入到 app 的 div 中
   // 如果输出 <body>，CSS 的 body { max-width } 会泄露到整个页面
   const html = `<div class="doc-content">
-${isEmail ? "" : `<h1>${escapeHtml(result.sections[0]?.title ?? "文档")}</h1>`}
+${isEmail ? "" : `<h1>${escapeHtml(title)}</h1>`}
 ${sections.join(isEmail ? "\n\n" : "\n<hr>\n")}
 ${footnotes}
 </div>`;

@@ -1,12 +1,13 @@
 /**
  * 通用 KV CRUD API 路由
  * 照搬 patentExaminator 方案：/api/data/:store 通用 CRUD
+ *
+ * 所有 DB 访问通过 lib/dbQuery.ts，自动审计。
  */
 import { Router } from "express";
 import express from "express";
-import { getDb } from "../lib/db.js";
+import { dbRun, dbGet, dbAll, dbTransaction } from "../lib/dbQuery.js";
 import { logger } from "../lib/logger.js";
-import { logAudit } from "../lib/auditLog.js";
 
 export const dataRouter = Router();
 
@@ -20,11 +21,10 @@ dataRouter.get("/:store", (req, res) => {
     const store = req.params.store;
     if (!store) { res.status(400).json({ ok: false, error: "store is required" }); return; }
 
-    const db = getDb();
-    const rows = db.prepare("SELECT record_id, data FROM sync_data WHERE store_name = ?").all(store) as Array<{
-      record_id: string;
-      data: string;
-    }>;
+    const rows = dbAll<{ record_id: string; data: string }>(
+      "SELECT record_id, data FROM sync_data WHERE store_name = ?",
+      [store],
+    );
 
     const records: Array<Record<string, unknown>> = [];
     const needsTitleFix: Array<{ record: Record<string, unknown>; recordId: string }> = [];
@@ -33,7 +33,6 @@ dataRouter.get("/:store", (req, res) => {
         const parsed = JSON.parse(row.data);
         const record = { id: row.record_id, ...parsed };
         records.push(record);
-        // 收集需要修正标题的 case
         if (store === "cases" && (!record.title || record.title === "新文档") && record.createdAt) {
           needsTitleFix.push({ record, recordId: row.record_id });
         }
@@ -44,8 +43,9 @@ dataRouter.get("/:store", (req, res) => {
 
     // 动态修正 case 标题：用最近的 generation run 标题
     if (needsTitleFix.length > 0) {
-      const runs = db.prepare("SELECT id, title, created_at FROM generation_runs WHERE title IS NOT NULL AND title != '' AND title != '新文档' ORDER BY created_at DESC").all() as Array<{ id: string; title: string; created_at: string }>;
-      const caseUpdateStmt = db.prepare("UPDATE sync_data SET data = ?, updated_at = datetime('now','localtime') WHERE store_name = 'cases' AND record_id = ?");
+      const runs = dbAll<{ id: string; title: string; created_at: string }>(
+        "SELECT id, title, created_at FROM generation_runs WHERE title IS NOT NULL AND title != '' AND title != '新文档' ORDER BY created_at DESC",
+      );
       for (const { record, recordId } of needsTitleFix) {
         const caseTime = new Date(record.createdAt as string).getTime() / 1000;
         let bestTitle = "";
@@ -62,8 +62,12 @@ dataRouter.get("/:store", (req, res) => {
           record.title = bestTitle;
           const fullData = { ...record };
           delete fullData.id;
-          caseUpdateStmt.run(JSON.stringify(fullData), recordId);
-          logger.info(`[Data] 动态修正 case 标题: "新文档" → "${bestTitle}" (case: ${record.id})`);
+          dbRun(
+            "UPDATE sync_data SET data = ?, updated_at = datetime('now','localtime') WHERE store_name = 'cases' AND record_id = ?",
+            [JSON.stringify(fullData), recordId],
+            { table: "sync_data", recordId, source: "data_api", newData: fullData },
+          );
+          logger.debug(`[Data] 动态修正 case 标题: "新文档" → "${bestTitle}" (case: ${record.id})`);
         }
       }
     }
@@ -82,11 +86,10 @@ dataRouter.post("/:store/query", express.json(), (req, res) => {
     const { field, value } = req.body as { field: string; value: unknown };
     if (!field) { res.status(400).json({ ok: false, error: "field is required" }); return; }
 
-    const db = getDb();
-    const rows = db.prepare("SELECT record_id, data FROM sync_data WHERE store_name = ?").all(store) as Array<{
-      record_id: string;
-      data: string;
-    }>;
+    const rows = dbAll<{ record_id: string; data: string }>(
+      "SELECT record_id, data FROM sync_data WHERE store_name = ?",
+      [store],
+    );
 
     const records: Array<Record<string, unknown>> = [];
     for (const row of rows) {
@@ -111,10 +114,10 @@ dataRouter.get("/:store/:id", (req, res) => {
     const store = req.params.store;
     const id = req.params.id;
 
-    const db = getDb();
-    const row = db.prepare("SELECT data FROM sync_data WHERE store_name = ? AND record_id = ?").get(store, id) as {
-      data: string;
-    } | undefined;
+    const row = dbGet<{ data: string }>(
+      "SELECT data FROM sync_data WHERE store_name = ? AND record_id = ?",
+      [store, id],
+    );
 
     if (!row) {
       res.status(404).json({ ok: false, error: "Record not found" });
@@ -143,21 +146,11 @@ dataRouter.post("/:store", express.json(), (req, res) => {
     const { id, ...data } = req.body as { id: string; [key: string]: unknown };
     if (!id) { res.status(400).json({ ok: false, error: "id is required" }); return; }
 
-    const db = getDb();
-    // 查询旧数据用于审计
-    const oldRow = db.prepare("SELECT data FROM sync_data WHERE store_name = ? AND record_id = ?").get(store, id) as { data: string } | undefined;
-
-    db.prepare("INSERT OR REPLACE INTO sync_data (store_name, record_id, data, updated_at) VALUES (?, ?, ?, datetime('now','localtime'))")
-      .run(store, id, JSON.stringify(data));
-
-    logAudit({
-      table: `sync_data/${store}`,
-      operation: oldRow ? "UPDATE" : "INSERT",
-      recordId: id,
-      oldData: oldRow ? JSON.parse(oldRow.data) : undefined,
-      newData: data,
-      source: "data_api",
-    });
+    dbRun(
+      "INSERT OR REPLACE INTO sync_data (store_name, record_id, data, updated_at) VALUES (?, ?, ?, datetime('now','localtime'))",
+      [store, id, JSON.stringify(data)],
+      { table: "sync_data", recordId: id, source: "data_api", newData: data },
+    );
 
     res.json({ ok: true, id });
   } catch (err) {
@@ -173,26 +166,16 @@ dataRouter.put("/:store/:id", express.json(), (req, res) => {
     const id = req.params.id;
     const data = req.body;
 
-    const db = getDb();
-    // 查询旧数据用于审计
-    const oldRow = db.prepare("SELECT data FROM sync_data WHERE store_name = ? AND record_id = ?").get(store, id) as { data: string } | undefined;
-
-    const result = db.prepare("UPDATE sync_data SET data = ?, updated_at = datetime('now','localtime') WHERE store_name = ? AND record_id = ?")
-      .run(JSON.stringify(data), store, id);
+    const result = dbRun(
+      "UPDATE sync_data SET data = ?, updated_at = datetime('now','localtime') WHERE store_name = ? AND record_id = ?",
+      [JSON.stringify(data), store, id],
+      { table: "sync_data", recordId: id, source: "data_api", newData: data },
+    );
 
     if (result.changes === 0) {
       res.status(404).json({ ok: false, error: "Record not found" });
       return;
     }
-
-    logAudit({
-      table: `sync_data/${store}`,
-      operation: "UPDATE",
-      recordId: id,
-      oldData: oldRow ? JSON.parse(oldRow.data) : undefined,
-      newData: data,
-      source: "data_api",
-    });
 
     res.json({ ok: true, id });
   } catch (err) {
@@ -207,25 +190,16 @@ dataRouter.delete("/:store/:id", (req, res) => {
     const store = req.params.store;
     const id = req.params.id;
 
-    const db = getDb();
-    // 查询旧数据用于审计
-    const oldRow = db.prepare("SELECT data FROM sync_data WHERE store_name = ? AND record_id = ?").get(store, id) as { data: string } | undefined;
-
-    const result = db.prepare("DELETE FROM sync_data WHERE store_name = ? AND record_id = ?")
-      .run(store, id);
+    const result = dbRun(
+      "DELETE FROM sync_data WHERE store_name = ? AND record_id = ?",
+      [store, id],
+      { table: "sync_data", recordId: id, source: "data_api", operation: "DELETE" },
+    );
 
     if (result.changes === 0) {
       res.status(404).json({ ok: false, error: "Record not found" });
       return;
     }
-
-    logAudit({
-      table: `sync_data/${store}`,
-      operation: "DELETE",
-      recordId: id,
-      oldData: oldRow ? JSON.parse(oldRow.data) : undefined,
-      source: "data_api",
-    });
 
     res.json({ ok: true, id });
   } catch (err) {

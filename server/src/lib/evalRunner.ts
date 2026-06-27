@@ -9,12 +9,13 @@
  */
 import crypto from "crypto";
 import { localIso } from "../../../shared/src/datetime.js";
-import { getDb } from "./db.js";
+import { dbRun, dbGet, dbAll } from "./dbQuery.js";
 import { logger } from "./logger.js";
 import { getGoldenSet, type GoldenQuestion } from "./goldenSetGenerator.js";
 import { hybridSearch, type SearchResult } from "./hybridSearch.js";
 import { registry } from "../providers/registry.js";
 import { multiJudgeContinuous, parseScoreFromText } from "./multiJudge.js";
+import { parallelSettled } from "./concurrency.js";
 
 // ── Types ──────────────────────────────────────────────
 
@@ -285,11 +286,10 @@ function buildReport(
 // ── Database Persistence ───────────────────────────────
 
 function saveReport(report: EvalReport): void {
-  const db = getDb();
-  db.prepare(`
+  dbRun(`
     INSERT INTO eval_reports (id, config, results, summary, created_at)
     VALUES (?, ?, ?, ?, datetime('now','localtime'))
-  `).run(
+  `, [
     report.runId,
     JSON.stringify(report.configs),
     JSON.stringify(report.questionBreakdown),
@@ -297,7 +297,7 @@ function saveReport(report: EvalReport): void {
       questionCount: report.questionCount,
       durationMs: report.durationMs,
     }),
-  );
+  ], { table: "eval_reports", recordId: report.runId, source: "evaluation", newData: report });
   logger.info(`[EvalRunner] Saved report ${report.runId}`);
 }
 
@@ -331,7 +331,7 @@ export async function runEvaluation(
     };
   }
 
-  logger.info(`[EvalRunner] Starting evaluation: ${configs.length} configs x ${questions.length} questions`);
+  logger.info(`[EvalRunner] Starting evaluation: ${configs.length} configs x ${questions.length} questions (parallel)`);
 
   const allResults: EvalResult[] = [];
   const now = new Date();
@@ -345,43 +345,52 @@ export async function runEvaluation(
       continue;
     }
 
-    for (let i = 0; i < questions.length; i++) {
-      const question = questions[i]!;
+    // Process questions IN PARALLEL with concurrency limit (3 concurrent)
+    const questionTasks = questions.map((question, i) => async (): Promise<EvalResult> => {
       options?.onProgress?.(i + 1, questions.length, `评估 ${config.label}`);
 
-      try {
-        // Run RAG pipeline
-        const ragResult = await runRAGQuery(question.query, config, apiKey);
+      // Run RAG pipeline
+      const ragResult = await runRAGQuery(question.query, config, apiKey);
 
-        // Compute metrics
-        const faithfulness = await computeFaithfulness(ragResult.answer, ragResult.answer, judgeApiKeys);
-        const coherence = await computeCoherence(ragResult.answer, judgeApiKeys);
-        const fluency = await computeFluency(ragResult.answer, judgeApiKeys);
-        const completeness = await computeCompleteness(ragResult.answer, question.query, judgeApiKeys);
-        const answerCorrectness = await computeAnswerCorrectness(ragResult.answer, question.expectedAnswer, judgeApiKeys);
-        const factCoverage = await computeFactCoverage(ragResult.answer, question.mustIncludeFacts, judgeApiKeys);
+      // Compute metrics IN PARALLEL - all 6 metrics are independent
+      const [faithfulness, coherence, fluency, completeness, answerCorrectness, factCoverage] = await Promise.all([
+        computeFaithfulness(ragResult.answer, ragResult.answer, judgeApiKeys),
+        computeCoherence(ragResult.answer, judgeApiKeys),
+        computeFluency(ragResult.answer, judgeApiKeys),
+        computeCompleteness(ragResult.answer, question.query, judgeApiKeys),
+        computeAnswerCorrectness(ragResult.answer, question.expectedAnswer, judgeApiKeys),
+        computeFactCoverage(ragResult.answer, question.mustIncludeFacts, judgeApiKeys),
+      ]);
 
-        const result: EvalResult = {
-          goldenId: question.id,
-          query: question.query,
-          configLabel: config.label,
-          recallAtK: 0, // 需要实际检索结果计算
-          ndcgAtK: 0,
-          faithfulness,
-          groundedness: faithfulness, // 简化：groundedness ≈ faithfulness
-          coherence,
-          fluency,
-          completeness,
-          answerCorrectness,
-          factCoverage,
-          durationMs: ragResult.durationMs,
-          actualAnswer: ragResult.answer.slice(0, 2000),
-        };
+      return {
+        goldenId: question.id,
+        query: question.query,
+        configLabel: config.label,
+        recallAtK: 0,
+        ndcgAtK: 0,
+        faithfulness,
+        groundedness: faithfulness,
+        coherence,
+        fluency,
+        completeness,
+        answerCorrectness,
+        factCoverage,
+        durationMs: ragResult.durationMs,
+        actualAnswer: ragResult.answer.slice(0, 2000),
+      };
+    });
 
-        allResults.push(result);
-        logger.info(`[EvalRunner] Q=${question.id} faith=${faithfulness.toFixed(2)} coh=${coherence.toFixed(2)} ${ragResult.durationMs}ms`);
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
+    const settledResults = await parallelSettled(questionTasks, 3);
+
+    for (let i = 0; i < settledResults.length; i++) {
+      const settled = settledResults[i]!;
+      if (settled.status === "fulfilled") {
+        allResults.push(settled.value);
+        const r = settled.value;
+        logger.info(`[EvalRunner] Q=${r.goldenId} faith=${r.faithfulness.toFixed(2)} coh=${r.coherence.toFixed(2)} ${r.durationMs}ms`);
+      } else {
+        const question = questions[i]!;
+        const errorMsg = settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
         allResults.push({
           goldenId: question.id,
           query: question.query,
@@ -406,15 +415,14 @@ export async function runEvaluation(
 }
 
 export function getReports(): EvalReport[] {
-  const db = getDb();
-  const rows = db.prepare(
-    "SELECT id, config, results, summary FROM eval_reports ORDER BY created_at DESC"
-  ).all() as Array<{
+  const rows = dbAll<{
     id: string;
     config: string;
     results: string;
     summary: string;
-  }>;
+  }>(
+    "SELECT id, config, results, summary FROM eval_reports ORDER BY created_at DESC",
+  );
 
   return rows.map(r => {
     const configs = safeParseJson<EvalConfigSummary[]>(r.config, []);
@@ -433,15 +441,15 @@ export function getReports(): EvalReport[] {
 }
 
 export function getReportById(runId: string): EvalReport | null {
-  const db = getDb();
-  const row = db.prepare(
-    "SELECT id, config, results, summary FROM eval_reports WHERE id = ?"
-  ).get(runId) as {
+  const row = dbGet<{
     id: string;
     config: string;
     results: string;
     summary: string;
-  } | undefined;
+  }>(
+    "SELECT id, config, results, summary FROM eval_reports WHERE id = ?",
+    [runId],
+  );
 
   if (!row) return null;
 
@@ -460,8 +468,8 @@ export function getReportById(runId: string): EvalReport | null {
 }
 
 export function deleteReport(runId: string): boolean {
-  const db = getDb();
-  const result = db.prepare("DELETE FROM eval_reports WHERE id = ?").run(runId);
+  const result = dbRun("DELETE FROM eval_reports WHERE id = ?", [runId],
+    { table: "eval_reports", recordId: runId, source: "evaluation", operation: "DELETE" });
   return result.changes > 0;
 }
 

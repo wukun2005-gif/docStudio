@@ -1,14 +1,23 @@
 /**
  * 文档生成页面 — 中间主区域：大纲编辑 + 文档预览
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import OutlineEditor from "./OutlineEditor";
 import DocPreview, { type SectionData } from "./DocPreview";
 import { useCaseStore } from "../store/caseStore.js";
 import { updateCase as repoUpdateCase } from "../lib/caseRepo.js";
 import { localIso } from "../../../shared/src/datetime.js";
 import type { OutlineSection } from "../../../shared/src/types/generation.js";
-import type { TrustMetrics } from "../../../shared/src/types/evaluation.js";
+
+// ── Composable Prompt Layers: 模板选项类型 ──
+interface StyleOption { id: string; name: string; description: string; isBuiltin?: boolean }
+interface FormatOption { id: string; name: string }
+interface AudienceOption { id: string; name: string; guidance: string; isBuiltin?: boolean }
+
+/** 转义 HTML 特殊字符，防止 XSS */
+function escapeHtml(str: string): string {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
 
 export default function GenerationPage() {
   const currentCase = useCaseStore((s) => s.currentCase);
@@ -29,9 +38,48 @@ export default function GenerationPage() {
   const [runId, setRunId] = useState<string | null>(null);
   const [dirtySections, setDirtySections] = useState<Set<number>>(new Set());
   const [regeneratingSections, setRegeneratingSections] = useState<Set<number>>(new Set());
-  const [evaluationMetrics, setEvaluationMetrics] = useState<TrustMetrics | null>(null);
-  const [evaluating, setEvaluating] = useState(false);
   const [documentStyle, setDocumentStyle] = useState<string | undefined>(undefined);
+  const [evaluationMetrics, setEvaluationMetrics] = useState<any>(null);
+  const [evaluating, setEvaluating] = useState(false);
+
+  // ── Composable Prompt Layers: 维度选择状态 ──
+  const [styleOptions, setStyleOptions] = useState<StyleOption[]>([]);
+  const [formatOptions, setFormatOptions] = useState<FormatOption[]>([]);
+  const [audienceOptions, setAudienceOptions] = useState<AudienceOption[]>([]);
+  const [selectedStyle, setSelectedStyle] = useState<string>("");
+  const [selectedFormat, setSelectedFormat] = useState<string>("");
+  const [selectedAudience, setSelectedAudience] = useState<string>("");
+
+  // ── Composable Prompt Layers: 加载模板选项 ──
+  useEffect(() => {
+    Promise.all([
+      fetch("/api/prompt-templates/styles").then((r) => r.json()),
+      fetch("/api/prompt-templates/formats").then((r) => r.json()),
+      fetch("/api/prompt-templates/audiences").then((r) => r.json()),
+    ]).then(([styles, formats, audiences]) => {
+      if (styles.ok) setStyleOptions(styles.data);
+      if (formats.ok) setFormatOptions(formats.data);
+      if (audiences.ok) setAudienceOptions(audiences.data);
+    }).catch(() => { /* 静默失败 */ });
+  }, []);
+
+  // ── Composable Prompt Layers: 从用户请求自动推断维度 ──
+  const autoDetectDimensions = useCallback(async (userRequest: string) => {
+    if (!userRequest.trim()) return;
+    try {
+      const res = await fetch("/api/prompt-templates/detect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userRequest }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        if (!selectedStyle) setSelectedStyle(data.data.style.id);
+        if (!selectedFormat) setSelectedFormat(data.data.format.id);
+        if (!selectedAudience) setSelectedAudience(data.data.audience.id);
+      }
+    } catch { /* 静默失败 */ }
+  }, [selectedStyle, selectedFormat, selectedAudience]);
 
   // 从 case 加载数据
   useEffect(() => {
@@ -59,6 +107,15 @@ export default function GenerationPage() {
             }
           })
           .catch(() => { /* 静默失败 */ });
+        // 恢复已缓存的评估结果
+        fetch(`/api/generation/${currentCase.lastRunId}/evaluation`)
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.ok && data.evaluation?.metrics) {
+              setEvaluationMetrics(data.evaluation.metrics);
+            }
+          })
+          .catch(() => { /* 静默失败 */ });
       } else {
         setSections([]);
       }
@@ -70,72 +127,9 @@ export default function GenerationPage() {
       setRunId(null);
       setDirtySections(new Set());
       setDocumentStyle(undefined);
+      setEvaluationMetrics(null);
     }
-    setEvaluationMetrics(null);
   }, [currentCase?.id]);
-
-  // runId 变化时加载置信度评估（切换 case 时从 DB 读缓存，无缓存则触发新评估）
-  useEffect(() => {
-    if (!runId) { setEvaluationMetrics(null); return; }
-    let cancelled = false;
-
-    fetch(`/api/evaluation/${runId}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (cancelled) return;
-        if (data.ok && data.evaluations.length > 0) {
-          const cached = JSON.parse(data.evaluations[0].metrics);
-          // 检测全 0 缓存（旧的失败评估），当作无缓存处理
-          const isAllZero = cached.faithfulness === 0 && cached.groundedness === 0
-            && cached.coherence === 0 && cached.fluency === 0 && cached.completeness === 0;
-          if (isAllZero && document) {
-            triggerEvaluation(runId, document);
-          } else {
-            setEvaluationMetrics(cached);
-          }
-        } else if (document) {
-          // 无缓存 + 有文档 → 触发评估
-          triggerEvaluation(runId, document);
-        }
-      })
-      .catch(() => {
-        if (!cancelled && document) triggerEvaluation(runId, document);
-      });
-
-    return () => { cancelled = true; };
-  }, [runId]);
-
-  // 文档内容变化时重新评估（用户编辑后保存）
-  useEffect(() => {
-    if (!runId || !document) return;
-    // 首次加载不触发（由上面的 runId effect 处理）
-    if (!evaluationMetrics) return;
-    const timer = setTimeout(() => {
-      triggerEvaluation(runId, document);
-    }, 2000); // 防抖 2 秒
-    return () => clearTimeout(timer);
-  }, [document]);
-
-  async function triggerEvaluation(rid: string, content: string) {
-    setEvaluating(true);
-    const allSources = sections.flatMap((s) => s.sources);
-    try {
-      const res = await fetch("/api/evaluation/evaluate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ runId: rid, content, sources: allSources }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        setEvaluationMetrics(data.metrics);
-        setTrustScore(data.trustScore);
-      }
-    } catch (err) {
-      console.error("Auto-evaluation failed:", err);
-    } finally {
-      setEvaluating(false);
-    }
-  }
 
   function handleOutlineRequest(suggested: Array<{ title: string; description?: string }>, skipEdit?: boolean, userRequest?: string) {
     console.log("[GenerationPage] handleOutlineRequest called", { suggestedLength: suggested.length, skipEdit, userRequest, currentCaseId: currentCase?.id });
@@ -163,6 +157,10 @@ export default function GenerationPage() {
     }));
     console.log("[GenerationPage] Setting local outline", { outlineLength: outlineData.length });
     setLocalOutline(outlineData);
+
+    // 自动推断文档风格、输出格式、目标读者
+    const detectReq = userRequest || currentCase?.userRequest || suggested.map((s) => s.title).join("、");
+    if (detectReq) autoDetectDimensions(detectReq);
 
     // 直接更新 case 的 outline，不依赖异步的 currentCase 状态
     if (targetCase) {
@@ -227,6 +225,10 @@ export default function GenerationPage() {
           outline: localOutline,
           format: "html",
           userRequest: currentCase?.userRequest ?? localOutline[0]?.title ?? "",
+          // Composable Prompt Layers: 传递用户选择的维度
+          ...(selectedStyle ? { styleId: selectedStyle } : {}),
+          ...(selectedFormat ? { outputFormatId: selectedFormat } : {}),
+          ...(selectedAudience ? { audienceId: selectedAudience } : {}),
         }),
       });
       const data = await res.json();
@@ -256,18 +258,45 @@ export default function GenerationPage() {
         updateGeneratedContent(data.content, data.trustScore);
         updateWorkflowState("completed");
       } else {
-        const errHtml = `<p style="color:red">生成失败: ${data.error}</p>`;
-        setDocument(errHtml);
+        const safeError = escapeHtml(data.error ?? "未知错误");
+        setDocument(`<p style="color:red">生成失败: ${safeError}</p>`);
         updateWorkflowState("error", data.error);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      setDocument(`<p style="color:red">生成失败: ${msg}</p>`);
+      setDocument(`<p style="color:red">生成失败: ${escapeHtml(msg)}</p>`);
       updateWorkflowState("error", msg);
     } finally {
       setGenerating(false);
     }
   }
+
+  // ── 评估内容相关度和完整度 ──
+  const handleEvaluate = async () => {
+    if (!runId) return;
+    setEvaluating(true);
+
+    try {
+      const res = await fetch(`/api/generation/${runId}/evaluate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userRequest: currentCase?.userRequest ?? localOutline[0]?.title ?? "",
+        }),
+      });
+      const data = await res.json();
+
+      if (data.ok) {
+        setEvaluationMetrics(data.metrics);
+      } else {
+        console.error("[GenerationPage] Evaluation failed:", data.error);
+      }
+    } catch (err) {
+      console.error("[GenerationPage] Evaluation error:", err);
+    } finally {
+      setEvaluating(false);
+    }
+  };
 
   // ── 章节来源修改回调 ──
 
@@ -362,6 +391,57 @@ export default function GenerationPage() {
     <div className="h-full flex flex-col overflow-hidden">
       {/* 大纲编辑区（可折叠） */}
       <div className="shrink-0 border-b bg-white">
+        {/* Composable Prompt Layers: 维度选择器 */}
+        {(styleOptions.length > 0 || formatOptions.length > 0 || audienceOptions.length > 0) && (
+          <div className="px-4 py-2 flex items-center gap-3 border-b bg-gray-50 text-xs">
+            <span className="text-gray-500 font-medium">📐 文档维度</span>
+            {styleOptions.length > 0 && (
+              <label className="flex items-center gap-1">
+                <span className="text-gray-500">风格:</span>
+                <select
+                  className="border rounded px-1.5 py-0.5 text-xs bg-white"
+                  value={selectedStyle}
+                  onChange={(e) => setSelectedStyle(e.target.value)}
+                >
+                  <option value="">自动推断</option>
+                  {styleOptions.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {formatOptions.length > 0 && (
+              <label className="flex items-center gap-1">
+                <span className="text-gray-500">格式:</span>
+                <select
+                  className="border rounded px-1.5 py-0.5 text-xs bg-white"
+                  value={selectedFormat}
+                  onChange={(e) => setSelectedFormat(e.target.value)}
+                >
+                  <option value="">自动推断</option>
+                  {formatOptions.map((f) => (
+                    <option key={f.id} value={f.id}>{f.name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {audienceOptions.length > 0 && (
+              <label className="flex items-center gap-1">
+                <span className="text-gray-500">读者:</span>
+                <select
+                  className="border rounded px-1.5 py-0.5 text-xs bg-white"
+                  value={selectedAudience}
+                  onChange={(e) => setSelectedAudience(e.target.value)}
+                >
+                  <option value="">自动推断</option>
+                  {audienceOptions.map((a) => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+        )}
         <div
           className="px-4 py-2 flex items-center justify-between cursor-pointer hover:bg-gray-50"
           onClick={() => setOutlineCollapsed(!outlineCollapsed)}
@@ -387,18 +467,19 @@ export default function GenerationPage() {
       <DocPreview
         content={document}
         trustScore={trustScore}
-        evaluationMetrics={evaluationMetrics}
-        evaluating={evaluating}
         sections={sections}
         generating={generating}
         runId={runId}
         dirtySections={dirtySections}
         regeneratingSections={regeneratingSections}
         documentStyle={documentStyle}
+        evaluationMetrics={evaluationMetrics}
+        evaluating={evaluating}
         onSectionUpdate={handleSectionUpdate}
         onSourceMove={handleSourceMove}
         onRegenerateSection={handleRegenerateSection}
         onSave={(newContent) => setDocument(newContent)}
+        onEvaluate={handleEvaluate}
       />
     </div>
   );

@@ -1,13 +1,14 @@
 /**
  * 评估 API 路由
  * Feature #20-23: 评估体系
+ *
+ * 所有 DB 访问通过 lib/dbQuery.ts，自动审计。
  */
 import { Router } from "express";
 import crypto from "crypto";
 import { evaluateOnline, computeTrustScore } from "../lib/evalMetrics.js";
-import { getDb } from "../lib/db.js";
+import { dbRun, dbGet, dbAll } from "../lib/dbQuery.js";
 import { logger } from "../lib/logger.js";
-import { logAudit } from "../lib/auditLog.js";
 import { readSettingsFromDb } from "../lib/settingsReader.js";
 
 export const evaluationRouter = Router();
@@ -15,7 +16,14 @@ export const evaluationRouter = Router();
 /** POST /api/evaluation/evaluate — 在线评估 */
 evaluationRouter.post("/evaluate", async (req, res) => {
   try {
-    const { runId, content, sources } = req.body;
+    const { runId, content: rawContent, sources } = req.body;
+
+    // 如果未传 content，从 generation_runs 中查找
+    let content = rawContent;
+    if (!content && runId) {
+      const row = dbGet<{ content: string | null }>("SELECT content FROM generation_runs WHERE id = ?", [runId]);
+      if (row?.content) content = row.content;
+    }
 
     if (!content) {
       res.status(400).json({ ok: false, error: "content is required" });
@@ -50,29 +58,19 @@ evaluationRouter.post("/evaluate", async (req, res) => {
 
     // 保存评估结果
     if (runId) {
-      const db = getDb();
       const evalId = crypto.randomUUID();
-      db.prepare(`INSERT INTO trust_evaluations (id, run_id, metrics, created_at) VALUES (?, ?, ?, datetime('now','localtime'))`)
-        .run(evalId, runId, JSON.stringify(metrics));
-
-      logAudit({
-        table: "trust_evaluations",
-        operation: "INSERT",
-        recordId: evalId,
-        newData: { runId, metrics },
-        source: "evaluation",
-      });
+      dbRun(
+        `INSERT INTO trust_evaluations (id, run_id, metrics, created_at) VALUES (?, ?, ?, datetime('now','localtime'))`,
+        [evalId, runId, JSON.stringify(metrics)],
+        { table: "trust_evaluations", recordId: evalId, source: "evaluation", newData: { runId, metrics } },
+      );
 
       // 更新 generation_runs 的 trust_score
-      db.prepare("UPDATE generation_runs SET trust_score = ? WHERE id = ?").run(trustScore, runId);
-
-      logAudit({
-        table: "generation_runs",
-        operation: "UPDATE",
-        recordId: runId,
-        newData: { trustScore },
-        source: "evaluation",
-      });
+      dbRun(
+        "UPDATE generation_runs SET trust_score = ? WHERE id = ?",
+        [trustScore, runId],
+        { table: "generation_runs", recordId: runId, source: "evaluation", newData: { trustScore } },
+      );
     }
 
     res.json({ ok: true, metrics, trustScore });
@@ -86,11 +84,10 @@ evaluationRouter.post("/evaluate", async (req, res) => {
 /** GET /api/evaluation/:runId — 获取评估结果 */
 evaluationRouter.get("/:runId", (req, res) => {
   try {
-    const db = getDb();
-    const evaluations = db.prepare(
-      "SELECT * FROM trust_evaluations WHERE run_id = ? ORDER BY created_at DESC"
-    ).all(req.params.runId);
-
+    const evaluations = dbAll(
+      "SELECT * FROM trust_evaluations WHERE run_id = ? ORDER BY created_at DESC",
+      [req.params.runId],
+    );
     res.json({ ok: true, evaluations });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -101,11 +98,9 @@ evaluationRouter.get("/:runId", (req, res) => {
 /** GET /api/evaluation/history/trend — 历史趋势（Feature #22） */
 evaluationRouter.get("/history/trend", (_req, res) => {
   try {
-    const db = getDb();
-    const runs = db.prepare(
-      "SELECT id, title, trust_score, created_at FROM generation_runs WHERE trust_score IS NOT NULL ORDER BY created_at DESC LIMIT 50"
-    ).all();
-
+    const runs = dbAll(
+      "SELECT id, title, trust_score, created_at FROM generation_runs WHERE trust_score IS NOT NULL ORDER BY created_at DESC LIMIT 50",
+    );
     res.json({ ok: true, trend: runs });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -116,17 +111,13 @@ evaluationRouter.get("/history/trend", (_req, res) => {
 /** GET /api/evaluation/insights/quality — 质量洞察（Feature #23） */
 evaluationRouter.get("/insights/quality", (_req, res) => {
   try {
-    const db = getDb();
+    const byFormat = dbAll(
+      "SELECT format, COUNT(*) as count, AVG(trust_score) as avg_score FROM generation_runs WHERE trust_score IS NOT NULL GROUP BY format",
+    );
 
-    // 按文档类型分析质量趋势
-    const byFormat = db.prepare(
-      "SELECT format, COUNT(*) as count, AVG(trust_score) as avg_score FROM generation_runs WHERE trust_score IS NOT NULL GROUP BY format"
-    ).all();
-
-    // 最近评估详情
-    const recent = db.prepare(
-      "SELECT metrics FROM trust_evaluations ORDER BY created_at DESC LIMIT 10"
-    ).all() as Array<{ metrics: string }>;
+    const recent = dbAll<{ metrics: string }>(
+      "SELECT metrics FROM trust_evaluations ORDER BY created_at DESC LIMIT 10",
+    );
 
     const avgMetrics = recent.length > 0
       ? recent.reduce(

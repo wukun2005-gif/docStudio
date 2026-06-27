@@ -245,6 +245,22 @@ function migrate(db: Database.Database): void {
     // 表可能还不存在，CREATE TABLE 已经处理了
   }
 
+  // 增量迁移：provenance_nodes 添加 paragraph_title 和 grounding_score 列
+  try {
+    const provCols = db.prepare("PRAGMA table_info(provenance_nodes)").all() as Array<{ name: string }>;
+    const provColNames = new Set(provCols.map((c) => c.name));
+    if (!provColNames.has("paragraph_title")) {
+      db.exec("ALTER TABLE provenance_nodes ADD COLUMN paragraph_title TEXT");
+      logger.info("[DB] Migration: added provenance_nodes.paragraph_title");
+    }
+    if (!provColNames.has("grounding_score")) {
+      db.exec("ALTER TABLE provenance_nodes ADD COLUMN grounding_score REAL");
+      logger.info("[DB] Migration: added provenance_nodes.grounding_score");
+    }
+  } catch (e) {
+    // 表可能还不存在，CREATE TABLE 已经处理了
+  }
+
   // 设置版本号
   if (versionRow < 3) {
     db.pragma("user_version = 3");

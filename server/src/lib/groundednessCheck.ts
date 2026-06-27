@@ -10,6 +10,7 @@ import { logger } from "./logger.js";
 import { registry } from "../providers/registry.js";
 import { getApiKey } from "../security/keyStore.js";
 import { readSettingsFromDb } from "./settingsReader.js";
+import { resolveEvalMaxTokens } from "./llmUtils.js";
 
 // ── 类型定义 ──────────────────────────────────────────
 
@@ -21,13 +22,14 @@ export interface GroundingDoc {
 
 export interface ClaimVerdict {
   text: string;
-  verdict: "grounded" | "ungrounded" | "not_verifiable";
+  verdict: "grounded" | "ungrounded" | "not_verifiable" | "common_knowledge";
   evidence?: string;
   reason?: string;
 }
 
 export interface JudgeResult {
   claims: ClaimVerdict[];
+  /** groundedRatio = (grounded + common_knowledge) / (grounded + common_knowledge + ungrounded) */
   groundedRatio: number;
   overallVerdict: "pass" | "fail" | "partial";
 }
@@ -106,15 +108,16 @@ export function buildJudgePrompt(
     "",
     "规则：",
     "- grounded: 声明有明确的文档支撑（可引用具体段落）",
-    "- ungrounded: 声明没有文档支撑，可能是幻觉或推测",
-    "- not_verifiable: 声明无法从文档中判断（如常识性陈述、过渡语句）",
+    "- common_knowledge: 声明是基本常识或普遍认知，不需要文档支撑（如：地球是圆的、一天24小时、LLM是统计模型、软件工程产出是代码和文档等）",
+    "- ungrounded: 声明没有文档支撑，且不是常识，可能是幻觉或推测",
+    "- not_verifiable: 声明无法从文档中判断（如过渡语句、主观评价）",
     "",
     "输出格式（JSON）：",
     "{",
     '  "claims": [',
     "    {",
     '      "text": "声明原文",',
-    '      "verdict": "grounded | ungrounded | not_verifiable",',
+    '      "verdict": "grounded | common_knowledge | ungrounded | not_verifiable",',
     '      "evidence": "支撑该声明的文档片段（如有）",',
     '      "reason": "判断理由"',
     "    }",
@@ -124,7 +127,7 @@ export function buildJudgePrompt(
     "}",
     "",
     "注意：",
-    "- groundedRatio = grounded 数量 / (grounded + ungrounded) 数量",
+    "- groundedRatio = (grounded + common_knowledge) 数量 / (grounded + common_knowledge + ungrounded) 数量",
     "- overallVerdict: groundedRatio >= 0.8 为 pass, 0.5~0.8 为 partial, < 0.5 为 fail",
     "- not_verifiable 不计入 groundedRatio 计算",
     "- 严格按 JSON 格式输出，不要输出 markdown 代码块或任何解释性文字",
@@ -198,18 +201,26 @@ async function callJudge(
       if (key) providerApiKeys[pid] = key;
     }
 
+    const modelId = config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro";
+
+    // 评估 judge 使用固定 cap，避免推理模型 4x 放大导致超时
+    const maxTokens = resolveEvalMaxTokens(modelId);
+
+    logger.info(`[Groundedness] 模型: ${modelId}, maxTokens: ${maxTokens}`);
+
     const { response } = await registry.runWithFallback(
       providers,
       {
-        modelId: config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro",
+        modelId,
         messages: [
           { role: "system", content: system },
           { role: "user", content: user },
         ],
         apiKey: "",
-        maxTokens: 2000,
+        maxTokens,
         temperature: 0,
-        timeoutMs: config.timeoutMs ?? 180_000, // 照搬 patentExaminator: groundedness check 需要较长超时
+        timeoutMs: config.timeoutMs ?? 180_000,
+        evalMode: true,
         responseFormat: {
           type: "json_schema",
           json_schema: {
@@ -224,7 +235,7 @@ async function callJudge(
                     type: "object",
                     properties: {
                       text: { type: "string" },
-                      verdict: { type: "string", enum: ["grounded", "ungrounded", "not_verifiable"] },
+                      verdict: { type: "string", enum: ["grounded", "common_knowledge", "ungrounded", "not_verifiable"] },
                       evidence: { type: "string" },
                       reason: { type: "string" },
                     },
@@ -278,6 +289,7 @@ async function callJudge(
           maxTokens: 2000,
           temperature: 0,
           timeoutMs: config.timeoutMs ?? 180_000,
+          evalMode: true,
           responseFormat: {
             type: "json_schema",
             json_schema: {
@@ -292,7 +304,7 @@ async function callJudge(
                       type: "object",
                       properties: {
                         text: { type: "string" },
-                        verdict: { type: "string", enum: ["grounded", "ungrounded", "not_verifiable"] },
+                        verdict: { type: "string", enum: ["grounded", "common_knowledge", "ungrounded", "not_verifiable"] },
                         evidence: { type: "string" },
                         reason: { type: "string" },
                       },
@@ -365,6 +377,10 @@ export function filterUngrounded(
 
     switch (verdict.verdict) {
       case "grounded":
+        keptSentences.push(sentence);
+        break;
+      case "common_knowledge":
+        // 常识性声明始终保留
         keptSentences.push(sentence);
         break;
       case "not_verifiable":

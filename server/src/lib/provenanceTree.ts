@@ -4,7 +4,7 @@
  * Feature #18: 生成树 CRUD
  * Feature #19: 拖拽重生成
  */
-import { getDb } from "./db.js";
+import { dbRun, dbGet, dbAll, dbTransaction } from "./dbQuery.js";
 import { logger } from "./logger.js";
 
 export interface ProvenanceNode {
@@ -24,18 +24,17 @@ export function addProvenanceNode(node: {
   id: string; runId: string; paragraphIdx: number;
   chunkId?: string; score?: number; isManual?: boolean; parentId?: string;
 }): void {
-  const db = getDb();
-  db.prepare(`INSERT OR REPLACE INTO provenance_nodes
+  dbRun(`INSERT OR REPLACE INTO provenance_nodes
     (id, run_id, paragraph_idx, chunk_id, score, is_manual, parent_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))`)
-    .run(node.id, node.runId, node.paragraphIdx,
+    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))`,
+    [node.id, node.runId, node.paragraphIdx,
       node.chunkId ?? null, node.score ?? 0, node.isManual ? 1 : 0,
-      node.parentId ?? null);
+      node.parentId ?? null],
+    { table: "provenance_nodes", recordId: node.id, source: "provenance" });
 }
 
 export function getProvenanceByRunId(runId: string): ProvenanceNode[] {
-  const db = getDb();
-  const rows = db.prepare("SELECT * FROM provenance_nodes WHERE run_id = ? ORDER BY paragraph_idx").all(runId) as any[];
+  const rows = dbAll<any>("SELECT * FROM provenance_nodes WHERE run_id = ? ORDER BY paragraph_idx", [runId]);
   return rows.map((r) => ({
     id: r.id,
     runId: r.run_id,
@@ -49,28 +48,28 @@ export function getProvenanceByRunId(runId: string): ProvenanceNode[] {
 }
 
 export function deleteProvenanceNode(id: string): void {
-  const db = getDb();
-  db.prepare("DELETE FROM provenance_nodes WHERE id = ?").run(id);
+  dbRun("DELETE FROM provenance_nodes WHERE id = ?", [id],
+    { table: "provenance_nodes", recordId: id, source: "provenance", operation: "DELETE" });
 }
 
 export function updateProvenanceScore(id: string, score: number): void {
-  const db = getDb();
-  db.prepare("UPDATE provenance_nodes SET score = ? WHERE id = ?").run(score, id);
+  dbRun("UPDATE provenance_nodes SET score = ? WHERE id = ?", [score, id],
+    { table: "provenance_nodes", recordId: id, source: "provenance" });
 }
 
 /** 替换来源（Feature #18） */
 export function replaceSource(nodeId: string, newChunkId: string): void {
-  const db = getDb();
-  db.prepare("UPDATE provenance_nodes SET chunk_id = ?, is_manual = 1 WHERE id = ?").run(newChunkId, nodeId);
+  dbRun("UPDATE provenance_nodes SET chunk_id = ?, is_manual = 1 WHERE id = ?", [newChunkId, nodeId],
+    { table: "provenance_nodes", recordId: nodeId, source: "provenance" });
   logger.info(`[Provenance] 替换来源: ${nodeId} -> ${newChunkId}`);
 }
 
 /** 获取段落的来源树 */
 export function getParagraphTree(runId: string, paragraphIdx: number): ProvenanceNode[] {
-  const db = getDb();
-  const rows = db.prepare(
-    "SELECT * FROM provenance_nodes WHERE run_id = ? AND paragraph_idx = ? ORDER BY score DESC"
-  ).all(runId, paragraphIdx) as any[];
+  const rows = dbAll<any>(
+    "SELECT * FROM provenance_nodes WHERE run_id = ? AND paragraph_idx = ? ORDER BY score DESC",
+    [runId, paragraphIdx],
+  );
   return rows.map((r) => ({
     id: r.id,
     runId: r.run_id,
@@ -86,27 +85,20 @@ export function getParagraphTree(runId: string, paragraphIdx: number): Provenanc
 /** 批量构建生成树 */
 export function buildProvenanceTree(
   runId: string,
-  paragraphs: Array<{ idx: number; sources: Array<{ chunkId: string; score: number }> }>,
+  paragraphs: Array<{ idx: number; title?: string; groundingScore?: number; sources: Array<{ chunkId: string; score: number }> }>,
 ): void {
-  const db = getDb();
-  const stmt = db.prepare(`INSERT INTO provenance_nodes
-    (id, run_id, paragraph_idx, chunk_id, score, is_manual, created_at)
-    VALUES (?, ?, ?, ?, ?, 0, datetime('now','localtime'))`);
-
-  const tx = db.transaction(() => {
+  dbTransaction(() => {
     for (const para of paragraphs) {
       for (const source of para.sources) {
-        stmt.run(
-          crypto.randomUUID(),
-          runId,
-          para.idx,
-          source.chunkId,
-          source.score,
-        );
+        const nodeId = crypto.randomUUID();
+        dbRun(`INSERT INTO provenance_nodes
+          (id, run_id, paragraph_idx, paragraph_title, grounding_score, chunk_id, score, is_manual, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 0, datetime('now','localtime'))`,
+          [nodeId, runId, para.idx, para.title ?? null, para.groundingScore ?? null, source.chunkId, source.score],
+          { table: "provenance_nodes", recordId: nodeId, source: "provenance", skipReadOld: true });
       }
     }
   });
-  tx();
 
   logger.info(`[Provenance] 构建生成树: ${paragraphs.length} 段落`);
 }

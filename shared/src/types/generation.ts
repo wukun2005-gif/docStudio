@@ -13,9 +13,36 @@ export interface OutlineSection {
   description?: string;
 }
 
+/** Style 模板 — 文档体裁特征 */
+export interface StyleTemplate {
+  id: string;           // "report" | "email" | "technical" | "presentation" | "memo" | "general" | "custom-xxx"
+  name: string;         // 显示名："报告"
+  description: string;  // "正式的分析报告，适合管理层阅读"
+  promptFragment: string; // 注入 system prompt 的风格指引
+  isBuiltin: boolean;
+}
+
+/** Format 模板 — 输出格式约束 */
+export interface FormatTemplate {
+  id: string;           // "word" | "ppt" | "excel" | "markdown" | "html"
+  name: string;         // "Word 文档"
+  constraints: string;  // 注入 system prompt 的格式约束
+}
+
+/** Audience Profile — 读者画像 */
+export interface AudienceProfile {
+  id: string;           // "executive" | "engineer" | "legal" | "customer" | "general"
+  name: string;         // "企业高管"
+  guidance: string;     // 注入 system prompt 的读者适配指引
+  isBuiltin?: boolean;
+}
+
 export interface GenerationConfig {
   format: DocumentFormat;
   templateId?: string;
+  styleId?: string;         // Style Layer: 文档风格 ID
+  outputFormatId?: string;  // Format Layer: 输出格式 ID
+  audienceId?: string;      // Audience Layer: 读者画像 ID
   narrativeStyle?: string;
   targetLength?: number;
   sourcePreferences?: string[];
@@ -36,8 +63,11 @@ export interface GenerationRun {
 
 /** 文档元数据 — 从用户请求中提取的结构化信息 */
 export interface DocumentMetadata {
-  style: "email" | "ppt" | "table" | "code" | "report" | "general";
-  guide: string;
+  style: string;        // Style ID: "email" | "report" | "technical" | ...
+  guide: string;        // 兼容旧代码，等同于 styleTemplate.promptFragment
+  styleId?: string;     // 显式指定的 Style ID
+  outputFormatId?: string; // 显式指定的 Format ID
+  audienceId?: string;  // 显式指定的 Audience ID
   // 邮件特有
   recipient?: { name: string; email?: string; title?: string; department?: string; personId?: string };
   subject?: string;

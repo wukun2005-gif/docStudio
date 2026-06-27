@@ -4,7 +4,7 @@
  * getApiKey 自动从 DB fallback 读取用户配置的 key。
  */
 
-import { getDb } from "../lib/db.js";
+import { dbGet } from "../lib/dbQuery.js";
 
 const keyStore = new Map<string, string>();
 
@@ -21,10 +21,10 @@ export function getApiKey(providerId: string): string | undefined {
 /** 从 user_settings 表读取用户配置的 provider API key */
 function readApiKeyFromDb(providerId: string): string | undefined {
   try {
-    const db = getDb();
-    const row = db.prepare(
-      "SELECT value FROM user_settings WHERE key = ?"
-    ).get(`provider_${providerId}`) as { value: string } | undefined;
+    const row = dbGet<{ value: string }>(
+      "SELECT value FROM user_settings WHERE key = ?",
+      [`provider_${providerId}`],
+    );
     if (!row) return undefined;
     const config = JSON.parse(row.value);
     return config.apiKey || undefined;

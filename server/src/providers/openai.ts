@@ -35,6 +35,13 @@ export function isReasoningModel(modelId: string | undefined): boolean {
   return REASONING_MODEL_PATTERNS.test(modelId);
 }
 
+/** 静态判断（不含运行时缓存）— evalMode 过滤用，保证跨调用一致性 */
+export function isReasoningModelStatic(modelId: string): boolean {
+  const caps = getModelCapabilities(modelId);
+  if (caps.isReasoning) return true;
+  return REASONING_MODEL_PATTERNS.test(modelId);
+}
+
 export function resolveMaxTokens(modelId: string | undefined, requestedMaxTokens?: number): number {
   const base = requestedMaxTokens ?? 4096;
   if (isReasoningModel(modelId)) {
@@ -99,6 +106,8 @@ export interface ChatRequest {
   tools?: ToolDefinition[];
   /** Tool choice strategy */
   tool_choice?: "auto" | "none" | "required";
+  /** 评估模式：fallback chain 中跳过推理模型（避免长 thinking 导致超时） */
+  evalMode?: boolean;
 }
 
 export interface ChatResponse {
@@ -166,7 +175,7 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
   async chat(req: ChatRequest): Promise<ChatResponse> {
     const base = req.baseUrl || this.baseUrl || this.defaultBaseUrl;
     const url = `${base}/chat/completions`;
-    const timeoutMs = req.timeoutMs ?? 120_000;
+    const timeoutMs = req.timeoutMs ?? 240_000;
 
     // ── 模型能力自适应 ──────────────────────────────────
     const caps = getModelCapabilities(req.modelId);
@@ -245,7 +254,7 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
       }
 
       const data = (await res.json()) as {
-        choices: Array<{ message: { content: string; tool_calls?: ToolCall[] } }>;
+        choices: Array<{ message: { content: string; tool_calls?: ToolCall[]; reasoning_content?: string; thinking?: string; reasoning?: string } }>;
         usage?: {
           prompt_tokens: number;
           completion_tokens: number;
@@ -256,15 +265,26 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
 
       const msg = data.choices?.[0]?.message;
 
+      // 推理模型兼容：百炼/Kimi 等网关有时将推理内容放在 reasoning_content/thinking，
+      // 而 content 为空字符串。回退到这些字段以避免得到 text.length=0 的空响应。
+      let contentText = msg?.content ?? "";
+      if (!contentText && msg) {
+        const fallback = msg.reasoning_content ?? msg.thinking ?? msg.reasoning ?? "";
+        if (fallback) {
+          console.warn(`[OpenAI] ${this.id}/${req.modelId} content 为空，回退到 reasoning_content (长度=${fallback.length})`);
+          contentText = fallback;
+        }
+      }
+
       // 提取 thinking tokens（不同模型返回格式不同）
       const thinkingTokens = data.usage?.completion_tokens_details?.reasoning_tokens ?? 0;
       if (thinkingTokens > 0) {
         learnThinkingCapability(req.modelId, thinkingTokens);
       }
 
-      console.log(`[OpenAI] LLM 响应成功: ${this.id}, text长度=${msg?.content?.length ?? 0}, thinkingTokens=${thinkingTokens}`);
+      console.log(`[OpenAI] LLM 响应成功: ${this.id}, text长度=${contentText.length}, thinkingTokens=${thinkingTokens}`);
       return {
-        text: msg?.content ?? "",
+        text: contentText,
         tokenUsage: data.usage
           ? { input: data.usage.prompt_tokens, output: data.usage.completion_tokens, total: data.usage.total_tokens }
           : undefined,
@@ -287,7 +307,7 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
   async *chatStream(req: ChatRequest): AsyncGenerator<StreamChunk> {
     const base = req.baseUrl || this.baseUrl || this.defaultBaseUrl;
     const url = `${base}/chat/completions`;
-    const timeoutMs = req.timeoutMs ?? 120_000;
+    const timeoutMs = req.timeoutMs ?? 240_000;
 
     // 照搬 patentExaminator: chunk 级超时（120s 无新数据 → 取消流 → 降级到非 streaming）
     const STREAM_CHUNK_TIMEOUT_MS = 120_000;

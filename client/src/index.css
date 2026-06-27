@@ -9,6 +9,12 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* 允许所有 UI 文字被选择（拖拽手柄等例外在下方覆盖） */
+*, *::before, *::after {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 /* 文档预览样式 */
 .doc-content {
   line-height: 1.8;

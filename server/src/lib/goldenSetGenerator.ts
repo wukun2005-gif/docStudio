@@ -7,11 +7,12 @@
  * 存入 golden_set 表，用于离线评估。
  */
 import crypto from "crypto";
-import { getDb } from "./db.js";
-import { logger } from "./logger.js";
+import { dbRun, dbGet, dbAll, dbTransaction } from "./dbQuery.js";
 import { logAudit } from "./auditLog.js";
+import { logger } from "./logger.js";
 import { registry } from "../providers/registry.js";
 import { getAllSources, getChunksBySourceId } from "./knowledgeDb.js";
+import { parallelSettled } from "./concurrency.js";
 
 // ── Types ──────────────────────────────────────────────
 
@@ -208,19 +209,18 @@ async function callLLM(
 // ── Database ───────────────────────────────────────────
 
 function insertGoldenQuestion(q: GoldenQuestion): void {
-  const db = getDb();
-  db.prepare(`
+  dbRun(`
     INSERT OR IGNORE INTO golden_set
       (id, question, expected_answer, expected_sources, category, difficulty)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(
+  `, [
     q.id,
     q.query,
     q.expectedAnswer,
     JSON.stringify(q.expectedSources),
     q.category,
     q.difficulty,
-  );
+  ], { table: "golden_set", recordId: q.id, source: "evaluation", newData: q });
 }
 
 // ── Public API ─────────────────────────────────────────
@@ -235,20 +235,19 @@ export async function generateGoldenSet(
   const cells = allocation[0] ?? [];
   if (cells.length === 0) return [];
 
-  logger.info(`[GoldenSet] Generating ${cells.length} questions`);
+  logger.info(`[GoldenSet] Generating ${cells.length} questions (parallel, concurrency=3)`);
 
-  const results: GoldenQuestion[] = [];
-
-  for (const cell of cells) {
+  // Generate all questions IN PARALLEL with concurrency limit
+  const cellTasks = cells.map((cell) => async (): Promise<GoldenQuestion | null> => {
     const chunks = sampleChunks(3);
     if (chunks.length === 0) {
       logger.warn("[GoldenSet] No chunks available, skipping");
-      continue;
+      return null;
     }
 
     const prompt = buildPrompt(cell, chunks);
     const generated = await callLLM(providerId, modelId, apiKey, prompt);
-    if (!generated) continue;
+    if (!generated) return null;
 
     const question: GoldenQuestion = {
       id: `gs-${crypto.randomUUID().slice(0, 8)}`,
@@ -263,25 +262,31 @@ export async function generateGoldenSet(
     };
 
     insertGoldenQuestion(question);
-    results.push(question);
-  }
+    return question;
+  });
+
+  const cellResults = await parallelSettled(cellTasks, 3);
+
+  const results = cellResults
+    .filter((r): r is PromiseFulfilledResult<GoldenQuestion | null> => r.status === "fulfilled")
+    .map(r => r.value)
+    .filter((q): q is GoldenQuestion => q !== null);
 
   logger.info(`[GoldenSet] Generated ${results.length}/${cells.length} questions`);
   return results;
 }
 
 export function getGoldenSet(): GoldenQuestion[] {
-  const db = getDb();
-  const rows = db.prepare(
-    "SELECT id, question, expected_answer, expected_sources, category, difficulty FROM golden_set ORDER BY created_at"
-  ).all() as Array<{
+  const rows = dbAll<{
     id: string;
     question: string;
     expected_answer: string;
     expected_sources: string;
     category: string;
     difficulty: string;
-  }>;
+  }>(
+    "SELECT id, question, expected_answer, expected_sources, category, difficulty FROM golden_set ORDER BY created_at",
+  );
 
   return rows.map(r => ({
     id: r.id,
@@ -297,14 +302,13 @@ export function getGoldenSet(): GoldenQuestion[] {
 }
 
 export function getGoldenSetStats(): { total: number; byCategory: Record<string, number>; byDifficulty: Record<string, number> } {
-  const db = getDb();
-  const total = (db.prepare("SELECT COUNT(*) as c FROM golden_set").get() as { c: number }).c;
+  const total = (dbGet<{ c: number }>("SELECT COUNT(*) as c FROM golden_set")!).c;
 
-  const categoryRows = db.prepare("SELECT category, COUNT(*) as c FROM golden_set GROUP BY category").all() as Array<{ category: string; c: number }>;
+  const categoryRows = dbAll<{ category: string; c: number }>("SELECT category, COUNT(*) as c FROM golden_set GROUP BY category");
   const byCategory: Record<string, number> = {};
   for (const r of categoryRows) byCategory[r.category] = r.c;
 
-  const difficultyRows = db.prepare("SELECT difficulty, COUNT(*) as c FROM golden_set GROUP BY difficulty").all() as Array<{ difficulty: string; c: number }>;
+  const difficultyRows = dbAll<{ difficulty: string; c: number }>("SELECT difficulty, COUNT(*) as c FROM golden_set GROUP BY difficulty");
   const byDifficulty: Record<string, number> = {};
   for (const r of difficultyRows) byDifficulty[r.difficulty] = r.c;
 
@@ -312,21 +316,19 @@ export function getGoldenSetStats(): { total: number; byCategory: Record<string,
 }
 
 export function clearGoldenSet(): void {
-  const db = getDb();
-  // 查询旧数据用于审计
-  const oldRows = db.prepare("SELECT id FROM golden_set").all() as Array<{ id: string }>;
+  const oldRows = dbAll<{ id: string }>("SELECT id FROM golden_set");
 
-  db.prepare("DELETE FROM golden_set").run();
-
-  // 记录审计：每个被删除的记录
-  for (const row of oldRows) {
-    logAudit({
-      table: "golden_set",
-      operation: "DELETE",
-      recordId: row.id,
-      source: "golden_set",
-    });
-  }
+  dbTransaction(() => {
+    dbRun("DELETE FROM golden_set", [], false);
+    for (const row of oldRows) {
+      logAudit({
+        table: "golden_set",
+        operation: "DELETE",
+        recordId: row.id,
+        source: "golden_set",
+      });
+    }
+  });
 
   logger.info("[GoldenSet] Cleared golden set");
 }

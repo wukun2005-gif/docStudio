@@ -6,9 +6,8 @@
  */
 import crypto from "crypto";
 import { localIso } from "../../../shared/src/datetime.js";
-import { getDb } from "./db.js";
+import { dbRun, dbGet, dbAll } from "./dbQuery.js";
 import { logger } from "./logger.js";
-import { logAudit } from "./auditLog.js";
 
 export interface MetricsRecord {
   id: string;
@@ -27,14 +26,13 @@ export interface MetricsRecord {
 class MetricsCollector {
   record(data: Omit<MetricsRecord, "id" | "createdAt">): void {
     try {
-      const db = getDb();
       const id = crypto.randomUUID();
       const now = localIso();
 
-      db.prepare(`
+      dbRun(`
         INSERT INTO generation_runs (id, title, config, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, datetime('now','localtime'), datetime('now','localtime'))
-      `).run(
+      `, [
         id,
         `[${data.type}] ${data.providerId}/${data.modelId}`,
         JSON.stringify({
@@ -49,15 +47,7 @@ class MetricsCollector {
           ...data.metadata,
         }),
         data.success ? "done" : "error",
-      );
-
-      logAudit({
-        table: "generation_runs",
-        operation: "INSERT",
-        recordId: id,
-        newData: data,
-        source: "metrics",
-      });
+      ], { table: "generation_runs", recordId: id, source: "metrics" });
     } catch (err) {
       // Fire-and-forget: never throw, just log
       logger.warn(`[MetricsCollector] Failed to record: ${err}`);
@@ -65,16 +55,13 @@ class MetricsCollector {
   }
 
   getRecent(limit: number = 50): MetricsRecord[] {
-    const db = getDb();
-    const rows = db.prepare(
-      "SELECT id, title, config, status, created_at FROM generation_runs ORDER BY created_at DESC LIMIT ?"
-    ).all(limit) as Array<{
+    const rows = dbAll<{
       id: string;
       title: string;
       config: string;
       status: string;
       created_at: string;
-    }>;
+    }>("SELECT id, title, config, status, created_at FROM generation_runs ORDER BY created_at DESC LIMIT ?", [limit]);
 
     return rows.map(r => {
       const config = safeParseJson<Record<string, unknown>>(r.config, {});
@@ -100,16 +87,15 @@ class MetricsCollector {
     avgDurationMs: number;
     byProvider: Record<string, number>;
   } {
-    const db = getDb();
-    const total = (db.prepare("SELECT COUNT(*) as c FROM generation_runs").get() as { c: number }).c;
-    const success = (db.prepare("SELECT COUNT(*) as c FROM generation_runs WHERE status = 'done'").get() as { c: number }).c;
-    const avgDuration = (db.prepare(
+    const total = (dbGet<{ c: number }>("SELECT COUNT(*) as c FROM generation_runs")!).c;
+    const success = (dbGet<{ c: number }>("SELECT COUNT(*) as c FROM generation_runs WHERE status = 'done'")!).c;
+    const avgDuration = (dbGet<{ avg_dur: number | null }>(
       "SELECT AVG(CAST(json_extract(config, '$.durationMs') AS REAL)) as avg_dur FROM generation_runs WHERE config IS NOT NULL"
-    ).get() as { avg_dur: number | null }).avg_dur ?? 0;
+    )!)?.avg_dur ?? 0;
 
-    const providerRows = db.prepare(
+    const providerRows = dbAll<{ provider: string; c: number }>(
       "SELECT json_extract(config, '$.providerId') as provider, COUNT(*) as c FROM generation_runs WHERE config IS NOT NULL GROUP BY provider"
-    ).all() as Array<{ provider: string; c: number }>;
+    );
     const byProvider: Record<string, number> = {};
     for (const r of providerRows) {
       if (r.provider) byProvider[r.provider] = r.c;

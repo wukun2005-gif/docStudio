@@ -13,5 +13,6 @@ coverage/
 docs/backlog.md
 docs/sample-data-upgrade-plan.md
 .trae/
+.qoder/
 samples_old/
 server/repos/

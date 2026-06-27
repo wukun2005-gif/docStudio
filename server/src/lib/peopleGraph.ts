@@ -3,9 +3,10 @@
  * Feature #4: 高权重信号影响文档生成
  *
  * 人员与 Sample 数据（EML 邮件）对齐
+ *
+ * 所有 DB 访问通过 lib/dbQuery.ts，自动审计。
  */
-import { getDb } from "./db.js";
-import { logAudit } from "./auditLog.js";
+import { dbRun, dbGet, dbAll, dbTransaction } from "./dbQuery.js";
 import { logger } from "./logger.js";
 
 export interface Person {
@@ -37,30 +38,27 @@ export function addPerson(person: {
   id: string; name: string; title?: string; department?: string;
   email?: string; attributes?: PersonAttributes;
 }): void {
-  const db = getDb();
-  // 查询旧数据用于审计
-  const oldRow = db.prepare("SELECT * FROM people WHERE id = ?").get(person.id) as any;
-
-  db.prepare(`INSERT OR REPLACE INTO people
-    (id, name, title, department, email, attributes, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))`)
-    .run(person.id, person.name, person.title ?? null,
-      person.department ?? null, person.email ?? null,
-      person.attributes ? JSON.stringify(person.attributes) : null);
-
-  logAudit({
-    table: "people",
-    operation: oldRow ? "UPDATE" : "INSERT",
-    recordId: person.id,
-    oldData: oldRow,
-    newData: person,
-    source: "people",
-  });
+  dbRun(
+    `INSERT OR REPLACE INTO people
+      (id, name, title, department, email, attributes, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))`,
+    [
+      person.id,
+      person.name,
+      person.title ?? null,
+      person.department ?? null,
+      person.email ?? null,
+      person.attributes ? JSON.stringify(person.attributes) : null,
+    ],
+    { table: "people", recordId: person.id, source: "people", newData: person },
+  );
 }
 
 export function getPersonById(id: string): Person | undefined {
-  const db = getDb();
-  const row = db.prepare("SELECT * FROM people WHERE id = ?").get(id) as any;
+  const row = dbGet<Person & { attributes: string | null }>(
+    "SELECT * FROM people WHERE id = ?",
+    [id],
+  );
   if (!row) return undefined;
   return {
     ...row,
@@ -69,8 +67,9 @@ export function getPersonById(id: string): Person | undefined {
 }
 
 export function getAllPeople(): Person[] {
-  const db = getDb();
-  const rows = db.prepare("SELECT * FROM people ORDER BY department, name").all() as any[];
+  const rows = dbAll<Person & { attributes: string | null }>(
+    "SELECT * FROM people ORDER BY department, name",
+  );
   return rows.map((r) => ({
     ...r,
     attributes: r.attributes ? JSON.parse(r.attributes) : undefined,
@@ -78,8 +77,10 @@ export function getAllPeople(): Person[] {
 }
 
 export function getPeopleByDepartment(department: string): Person[] {
-  const db = getDb();
-  const rows = db.prepare("SELECT * FROM people WHERE department = ? ORDER BY name").all(department) as any[];
+  const rows = dbAll<Person & { attributes: string | null }>(
+    "SELECT * FROM people WHERE department = ? ORDER BY name",
+    [department],
+  );
   return rows.map((r) => ({
     ...r,
     attributes: r.attributes ? JSON.parse(r.attributes) : undefined,
@@ -87,29 +88,26 @@ export function getPeopleByDepartment(department: string): Person[] {
 }
 
 export function deletePerson(id: string): void {
-  const db = getDb();
-  // 查询旧数据用于审计
-  const oldRow = db.prepare("SELECT * FROM people WHERE id = ?").get(id) as any;
-
   // 清理其他人员中指向该人员的反向关系
   const allPeople = getAllPeople();
-  for (const p of allPeople) {
-    if (p.id === id || !p.attributes?.relationships) continue;
-    const filtered = p.attributes.relationships.filter((r) => r.targetPersonId !== id);
-    if (filtered.length < p.attributes.relationships.length) {
-      const attrs = { ...p.attributes, relationships: filtered };
-      db.prepare("UPDATE people SET attributes = ? WHERE id = ?").run(JSON.stringify(attrs), p.id);
+  dbTransaction(() => {
+    for (const p of allPeople) {
+      if (p.id === id || !p.attributes?.relationships) continue;
+      const filtered = p.attributes.relationships.filter((r) => r.targetPersonId !== id);
+      if (filtered.length < p.attributes.relationships.length) {
+        const attrs = { ...p.attributes, relationships: filtered };
+        dbRun(
+          "UPDATE people SET attributes = ? WHERE id = ?",
+          [JSON.stringify(attrs), p.id],
+          { table: "people", recordId: p.id, source: "people", newData: attrs },
+        );
+      }
     }
-  }
-
-  db.prepare("DELETE FROM people WHERE id = ?").run(id);
-
-  logAudit({
-    table: "people",
-    operation: "DELETE",
-    recordId: id,
-    oldData: oldRow,
-    source: "people",
+    dbRun(
+      "DELETE FROM people WHERE id = ?",
+      [id],
+      { table: "people", recordId: id, source: "people", operation: "DELETE" },
+    );
   });
 }
 
@@ -131,7 +129,6 @@ function _addRelationshipOneWay(rel: {
   type: string;
   context?: string;
 }): void {
-  const db = getDb();
   const source = getPersonById(rel.sourceId);
   if (!source) return;
 
@@ -146,7 +143,11 @@ function _addRelationshipOneWay(rel: {
   });
 
   const attrs = { ...source.attributes, relationships };
-  db.prepare("UPDATE people SET attributes = ? WHERE id = ?").run(JSON.stringify(attrs), rel.sourceId);
+  dbRun(
+    "UPDATE people SET attributes = ? WHERE id = ?",
+    [JSON.stringify(attrs), rel.sourceId],
+    { table: "people", recordId: rel.sourceId, source: "people", newData: attrs },
+  );
 }
 
 /** 添加关系（自动创建反向关系，保证图的双向语义） */

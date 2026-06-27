@@ -12,7 +12,7 @@ import { logger } from "./logger.js";
 import { mcpClient } from "../mcp/mcpClient.js";
 import type { ToolDefinition, ToolCall } from "../providers/openai.js";
 import { localRerank, type RerankInput } from "./reranker.js";
-import { getDb } from "./db.js";
+import { dbAll } from "./dbQuery.js";
 
 const MAX_TOOL_ROUNDS = 3;
 const TOP_K = 5;
@@ -41,8 +41,8 @@ export interface ToolExecutorInput {
   timeoutMs?: number;
   /** 文档格式 — 影响输出文件类型 */
   documentFormat?: "docx" | "pptx" | "xlsx" | "html";
-  /** 文档风格 — 从 userRequest 动态识别，影响 citation 处理 */
-  documentStyle?: "email" | "ppt" | "table" | "code" | "report" | "general";
+  /** 文档风格 ID — 从 userRequest 动态识别或用户指定，影响 citation 处理 */
+  documentStyle?: string;
   /** 全局引用编号偏移量（照搬 patentExaminator：确保每个章节的引用编号全局唯一） */
   globalCitationOffset?: number;
 }
@@ -60,7 +60,7 @@ interface FusedCitation {
 
 export interface ToolExecutorOutput {
   answer: string;
-  webSearchCitations: Array<{ title: string; url: string; snippet: string }>;
+  webSearchCitations: Array<{ title: string; url: string; snippet: string; score?: number }>;
   mergedCitations: Array<{ title: string; url: string; snippet: string; source: string; score?: number; sourceId?: string }>;
   toolRounds: number;
 }
@@ -128,9 +128,8 @@ async function fuseAndRank(
   const sourceUrlMap = new Map<string, string>();
   if (ragSourceIds.length > 0) {
     try {
-      const db = getDb();
       const placeholders = ragSourceIds.map(() => "?").join(",");
-      const rows = db.prepare(`SELECT id, url FROM kb_sources WHERE id IN (${placeholders}) AND url IS NOT NULL`).all(...ragSourceIds) as Array<{ id: string; url: string }>;
+      const rows = dbAll<{ id: string; url: string }>(`SELECT id, url FROM kb_sources WHERE id IN (${placeholders}) AND url IS NOT NULL`, ragSourceIds);
       for (const row of rows) {
         sourceUrlMap.set(row.id, row.url);
       }
@@ -422,9 +421,15 @@ export async function executeWithTools(input: ToolExecutorInput): Promise<ToolEx
 
   logger.info(`[ToolExecutor] Done: toolRounds=${toolRounds}, webResults=${webSearchResults.length}, answerLen=${finalAnswer.length}`);
 
+  // 将 fuseAndRank 产生的 score 回写到 webSearchCitations（按 URL 匹配）
+  const scoredWebCitations = webSearchResults.map((w) => {
+    const matched = citations.find((c) => c.url === w.url);
+    return { ...w, score: matched?.score };
+  });
+
   return {
     answer: finalAnswer,
-    webSearchCitations: webSearchResults,
+    webSearchCitations: scoredWebCitations,
     mergedCitations: citations.map((c) => ({ title: c.title, url: c.url, snippet: c.snippet, source: c.engine, score: c.score, sourceId: c.sourceId })),
     toolRounds,
   };

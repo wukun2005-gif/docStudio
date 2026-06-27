@@ -14,8 +14,8 @@ interface TrustReportProps {
 }
 
 const METRIC_LABELS: Record<keyof TrustMetrics, { label: string; description: string }> = {
-  faithfulness: { label: "事实忠实度", description: "内容是否基于参考来源" },
-  groundedness: { label: "有据可查度", description: "每个声明是否有来源支撑" },
+  faithfulness: { label: "内容忠实度", description: "内容与来源一致的比例（允许改写和综合）" },
+  groundedness: { label: "内容可信度", description: "整体可信度评估（含连贯性、流畅性等维度）" },
   coherence: { label: "连贯性", description: "结构是否清晰，逻辑是否连贯" },
   fluency: { label: "流畅性", description: "语言是否流畅准确" },
   completeness: { label: "完整性", description: "是否覆盖了必要信息" },
@@ -40,9 +40,8 @@ export default function TrustReport({ runId, onOptimize }: TrustReportProps) {
         const latest = data.evaluations[0];
         const m = JSON.parse(latest.metrics);
         setMetrics(m);
-        setTrustScore(
-          m.faithfulness * 0.3 + m.groundedness * 0.3 + m.coherence * 0.15 + m.fluency * 0.1 + m.completeness * 0.15
-        );
+        // 使用服务端计算的 trustScore，不在客户端重复计算
+        setTrustScore(latest.trustScore ?? null);
       }
     } catch (err) {
       console.error("Failed to load evaluation:", err);
@@ -57,7 +56,7 @@ export default function TrustReport({ runId, onOptimize }: TrustReportProps) {
       const res = await fetch("/api/evaluation/evaluate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ runId, content: "" }),
+        body: JSON.stringify({ runId }),
       });
       const data = await res.json();
       if (data.ok) {
@@ -98,7 +97,7 @@ export default function TrustReport({ runId, onOptimize }: TrustReportProps) {
             <span className="text-gray-400">--</span>
           )}
         </div>
-        <div className="text-sm text-gray-500">综合置信度</div>
+        <div className="text-sm text-gray-500">综合质量分</div>
         {!metrics && (
           <button
             onClick={handleEvaluate}
