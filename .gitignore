@@ -12,6 +12,7 @@ coverage/
 *.tsbuildinfo
 docs/backlog.md
 docs/sample-data-upgrade-plan.md
+docs/llm-parallel-optimization.md
 .trae/
 .qoder/
 samples_old/

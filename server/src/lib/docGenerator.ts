@@ -12,10 +12,11 @@ import { executeWithTools } from "./toolExecutor.js";
 import { checkGroundedness, type GroundingDoc } from "./groundednessCheck.js";
 import { cleanContent, type CitationLink } from "./contentCleaner.js";
 import { logger } from "./logger.js";
-import { dbGet } from "./dbQuery.js";
+import { dbGet, dbAll } from "./dbQuery.js";
 import { getAllPeople, getPersonById, getPersonContext, type Person } from "./peopleGraph.js";
 import { detectStyle, detectFormat, detectAudience, getStyle, getFormat, getAudience } from "./promptTemplates.js";
 import { getRulesForContext } from "./writingRules.js";
+import { detectConflicts, autoResolveConflicts, type ConflictResolutionResult } from "./conflictDetection.js";
 import type { OutlineSection } from "./narrativeEngine.js";
 import type { ChatRequest, ToolDefinition, ToolCall } from "../providers/openai.js";
 import type { DocumentMetadata, StyleTemplate, FormatTemplate, AudienceProfile } from "../../../shared/src/types/generation.js";
@@ -100,6 +101,8 @@ export interface GenerateDocRequest {
   userRequest?: string;
   /** 文档元数据（收件人、主题等） */
   metadata?: DocumentMetadata;
+  /** 生成前冲突源过滤（默认 true） */
+  preFilter?: boolean;
 }
 
 export interface GenerateDocResult {
@@ -118,6 +121,8 @@ export interface GenerateDocResult {
   documentStyle: string;
   /** LLM 生成的文档标题 */
   title: string;
+  /** 冲突源前置过滤结果 */
+  conflictResolution?: ConflictResolutionResult;
 }
 
 // ── Embedding（复用 knowledge.ts 的逻辑） ──────────────
@@ -155,6 +160,7 @@ function getEmbeddingConfig(): EmbeddingConfig | null {
 async function retrieveForSection(
   sectionTitle: string,
   description?: string,
+  excludeChunkIds?: Set<string>,
 ): Promise<Array<{ chunkId: string; content: string; score: number; sourceId: string; sourceName?: string; sourceUrl?: string }>> {
   const query = description ? `${sectionTitle} ${description}` : sectionTitle;
 
@@ -180,17 +186,164 @@ async function retrieveForSection(
     if (row) sourceMap.set(sid, { name: row.name, url: row.url });
   }
 
-  return results.map((r) => {
-    const source = sourceMap.get(r.sourceId);
-    return {
-      chunkId: r.chunkId,
-      content: r.content,
-      score: r.score,
-      sourceId: r.sourceId,
-      sourceName: source?.name,
-      sourceUrl: source?.url,
-    };
-  });
+  return results
+    .filter((r) => !excludeChunkIds?.has(r.chunkId))
+    .map((r) => {
+      const source = sourceMap.get(r.sourceId);
+      return {
+        chunkId: r.chunkId,
+        content: r.content,
+        score: r.score,
+        sourceId: r.sourceId,
+        sourceName: source?.name,
+        sourceUrl: source?.url,
+      };
+    });
+}
+
+// ── 批量检索（冲突前置过滤用） ─────────────────────────────
+
+function flattenOutline(outline: OutlineSection[]): OutlineSection[] {
+  const result: OutlineSection[] = [];
+  for (const s of outline) {
+    result.push(s);
+    if (s.children.length > 0) result.push(...flattenOutline(s.children));
+  }
+  return result;
+}
+
+async function batchRetrieveForOutline(
+  outline: OutlineSection[],
+): Promise<Map<string, Array<{ chunkId: string; content: string; score: number; sourceId: string; sourceName?: string; sourceUrl?: string; indexedAt?: string }>>> {
+  const flatSections = flattenOutline(outline).slice(0, 20);
+  const sectionRetrievals = new Map<string, Array<{ chunkId: string; content: string; score: number; sourceId: string; sourceName?: string; sourceUrl?: string; indexedAt?: string }>>();
+
+  const embConfig = getEmbeddingConfig();
+  const queries = flatSections.map((s) => s.description ? `${s.title} ${s.description}` : s.title);
+
+  let embeddings: number[][] = [];
+  if (embConfig && queries.length > 0) {
+    try {
+      embeddings = await embedBatch(queries, embConfig);
+    } catch (err) {
+      logger.warn(`[DocGenerator] Batch embedding failed, falling back to BM25: ${err}`);
+    }
+  }
+
+  const allSourceIds = new Set<string>();
+  const rawResults: Array<{ sectionTitle: string; results: ReturnType<typeof hybridSearch> }> = [];
+
+  for (let i = 0; i < flatSections.length; i++) {
+    const section = flatSections[i]!;
+    const results = hybridSearch(queries[i]!, {
+      limit: 5,
+      useQueryExpansion: false,
+      queryEmbedding: embeddings[i],
+    });
+    for (const r of results) {
+      allSourceIds.add(r.sourceId);
+    }
+    rawResults.push({ sectionTitle: section.title, results });
+  }
+
+  const sourceMetaMap = new Map<string, { name: string; url?: string; indexedAt?: string }>();
+  for (const sid of allSourceIds) {
+    // kb_sources 没有 indexed_at 列，改用 updated_at 作为最近更新时间戳的近似；
+    // 如果该 source 是远程源（GitHub/OneDrive/SharePoint），再尝试从 kb_remote_index 取 indexed_at。
+    const row = dbGet<{ name: string; url?: string; updated_at?: string }>(
+      "SELECT name, url, updated_at FROM kb_sources WHERE id = ?",
+      [sid],
+    );
+    if (!row) continue;
+    let indexedAt: string | undefined = row.updated_at;
+    try {
+      const remote = dbGet<{ indexed_at?: string }>(
+        "SELECT indexed_at FROM kb_remote_index WHERE id = ? OR remote_id = ?",
+        [sid, sid],
+      );
+      if (remote?.indexed_at) indexedAt = remote.indexed_at;
+    } catch {
+      // kb_remote_index 表可能不存在，忽略
+    }
+    sourceMetaMap.set(sid, { name: row.name, url: row.url, indexedAt });
+  }
+
+  for (const { sectionTitle, results } of rawResults) {
+    const enriched = results.map((r) => {
+      const source = sourceMetaMap.get(r.sourceId);
+      return { chunkId: r.chunkId, content: r.content, score: r.score, sourceId: r.sourceId, sourceName: source?.name, sourceUrl: source?.url, indexedAt: source?.indexedAt };
+    });
+    sectionRetrievals.set(sectionTitle, enriched);
+  }
+
+  return sectionRetrievals;
+}
+
+async function preFilterConflictingSources(
+  outline: OutlineSection[],
+  config: GenerateDocRequest,
+): Promise<ConflictResolutionResult | null> {
+  const dbSettings = readSettingsFromDb();
+  const defaultProviders = dbSettings.providerPreference?.length ? dbSettings.providerPreference : ["mimo"];
+  const providers = config.providerPreference ?? defaultProviders;
+  const apiKey = config.apiKey ?? getApiKey(providers[0] ?? "mimo") ?? "";
+  const modelId = config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro";
+
+  logger.info(`[DocGenerator] 冲突前置过滤: 开始批量检索 ${outline.length} 个顶层章节`);
+
+  const sectionRetrievals = await batchRetrieveForOutline(outline);
+
+  const allSources: Array<{
+    name: string; content: string; authority?: number; timestamp?: string;
+    chunkId: string; sourceName: string;
+  }> = [];
+
+  for (const [sectionTitle, results] of sectionRetrievals) {
+    for (const r of results) {
+      let authority: number | undefined;
+      const name = r.sourceName ?? r.chunkId;
+      if (/VP|总监|总经理|CEO/i.test(name)) authority = 0.9;
+      else if (/经理|主管|负责人/i.test(name)) authority = 0.7;
+      else if (/实习生|助理/i.test(name)) authority = 0.4;
+
+      allSources.push({
+        name: `${sectionTitle} - ${name}`,
+        content: r.content,
+        authority,
+        timestamp: r.indexedAt,
+        chunkId: r.chunkId,
+        sourceName: name,
+      });
+    }
+  }
+
+  if (allSources.length < 2) {
+    logger.info("[DocGenerator] 冲突前置过滤: 来源不足 2 个，跳过");
+    return null;
+  }
+
+  const sectionsForDetection = [{ title: "pre-filter", content: "", sources: allSources.map((s) => ({ chunkId: s.chunkId, content: s.content, score: 1, sourceName: s.name })) }];
+
+  logger.info(`[DocGenerator] 冲突前置过滤: ${allSources.length} 个来源送检`);
+  const detectionResult = await detectConflicts(sectionsForDetection, apiKey, providers[0] ?? "mimo", modelId);
+
+  if (!detectionResult.hasConflicts) {
+    logger.info("[DocGenerator] 冲突前置过滤: 未检测到冲突");
+    return null;
+  }
+
+  logger.info(`[DocGenerator] 冲突前置过滤: 检测到 ${detectionResult.conflicts.length} 个冲突，尝试自动解决`);
+
+  const sourceToChunkIds = new Map<string, string[]>();
+  for (const s of allSources) {
+    const existing = sourceToChunkIds.get(s.name);
+    if (existing) existing.push(s.chunkId);
+    else sourceToChunkIds.set(s.name, [s.chunkId]);
+  }
+
+  const resolution = autoResolveConflicts(detectionResult.conflicts, sourceToChunkIds, { forceResolveAll: true });
+  logger.info(`[DocGenerator] 冲突前置过滤: 已解决 ${resolution.resolved.length} 个, 未解决 ${resolution.unresolved.length} 个, 排除 ${resolution.excludedChunkIds.length} 个 chunk`);
+  return resolution;
 }
 
 // ── 章节生成（带 tool calling + groundedness check） ────────
@@ -220,6 +373,8 @@ async function generateSection(
   globalCitationOffset: number = 0,
   /** 是否是最后一个章节（用于邮件结尾） */
   isLastSection: boolean = false,
+  /** 冲突前置过滤排除的 chunk ID 集合 */
+  excludeChunkIds?: Set<string>,
 ): Promise<{
   content: string;
   sources: Array<{ chunkId: string; content: string; score: number; sourceId: string; sourceName?: string; sourceUrl?: string }>;
@@ -227,7 +382,7 @@ async function generateSection(
   groundingScore: number;
   citationLinks: CitationLink[];
 }> {
-  const sources = await retrieveForSection(section.title, section.description);
+  const sources = await retrieveForSection(section.title, section.description, excludeChunkIds);
   // 照搬 patentExaminator：显示来源标签和相似度分数，帮助 LLM 判断引用权重
   // 注意：不在此处添加 [N] 编号，由 toolExecutor re-inject 统一提供编号
   const sourceText = sources.map((s, i) => {
@@ -494,6 +649,8 @@ async function generateSections(
   globalCitationOffset: number = 0,
   /** 当前层级的最后一个章节是否是文档最后一个章节 */
   lastSectionIsDocEnd: boolean = true,
+  /** 冲突前置过滤排除的 chunk ID 集合 */
+  excludeChunkIds?: Set<string>,
 ): Promise<GenerateDocResult["sections"]> {
   const sections: GenerateDocResult["sections"] = [];
   let currentCitationOffset = globalCitationOffset;
@@ -508,7 +665,7 @@ async function generateSections(
     const isLastSection = isLastInCurrentLevel && lastSectionIsDocEnd && section.children.length === 0;
     // 照搬 patentExaminator：传递全局引用偏移量
     const { content, sources, webCitations, groundingScore, citationLinks } = await generateSection(
-      section, rollingSummary, config, userRequest, fullOutline, documentStyle, globalIndex, currentCitationOffset, isLastSection
+      section, rollingSummary, config, userRequest, fullOutline, documentStyle, globalIndex, currentCitationOffset, isLastSection, excludeChunkIds
     );
     sections.push({ title: section.title, content, sources, webCitations, groundingScore, citationLinks });
 
@@ -533,6 +690,7 @@ async function generateSections(
         documentStyle,
         currentCitationOffset,
         childLastIsDocEnd,
+        excludeChunkIds,
       );
       sections.push(...childSections);
       // 更新偏移量（子章节已经增加了，使用 citationLinks 数量）
@@ -619,6 +777,176 @@ async function generateTitleWithLLM(userRequest: string, outline: OutlineSection
   }
 }
 
+// ── Post-generation 冲突兜底（Bug 4 加强）────────────────────────────
+// 对已生成的 sections 再做一次冲突检测 + 自动解决，移除所有引用 losing source 的
+// citation 标记、句子和来源，并重新编号剩余 citation，确保最终文档绝不包含冲突内容。
+async function filterConflictingContent(
+  rawSections: GenerateDocResult["sections"],
+  config: GenerateDocRequest,
+): Promise<GenerateDocResult["sections"]> {
+  if (rawSections.length === 0) return rawSections;
+
+  // Step 1: 收集所有被使用的 chunk → citation index 映射
+  const chunkToIndices = new Map<string, Set<number>>();
+  for (const sec of rawSections) {
+    for (const link of sec.citationLinks) {
+      const src = sec.sources.find((s) => s.sourceId === link.sourceId || s.chunkId === (link as unknown as { chunkId?: string }).chunkId);
+      const chunkId = src?.chunkId ?? (link as unknown as { chunkId?: string }).chunkId;
+      if (!chunkId) continue;
+      let set = chunkToIndices.get(chunkId);
+      if (!set) { set = new Set(); chunkToIndices.set(chunkId, set); }
+      set.add(link.index);
+    }
+  }
+
+  // Step 2: 构建 detection 输入（章节标题 + 来源内容）
+  const sectionsForDetection = rawSections.map((sec) => ({
+    title: sec.title,
+    content: sec.content,
+    sources: sec.sources.map((s) => ({
+      chunkId: s.chunkId,
+      content: s.content,
+      score: s.score,
+      sourceName: s.sourceName,
+    })),
+  }));
+
+  const totalSources = sectionsForDetection.reduce((sum, s) => sum + s.sources.length, 0);
+  if (totalSources < 2) {
+    logger.info(`[DocGenerator] Post-filter: 仅 ${totalSources} 个来源，跳过冲突检测`);
+    return rawSections;
+  }
+
+  // Step 3: 从 DB 补充 timestamp（用于 temporal resolution）
+  const allSourceIds = [...new Set(rawSections.flatMap((s) => s.sources.map((src) => src.sourceId).filter(Boolean)))];
+  const timestampMap = new Map<string, string>();
+  if (allSourceIds.length > 0) {
+    try {
+      const placeholders = allSourceIds.map(() => "?").join(",");
+      const rows = dbAll<{ id: string; updated_at?: string }>(
+        `SELECT id, updated_at FROM kb_sources WHERE id IN (${placeholders})`,
+        allSourceIds,
+      );
+      for (const row of rows) {
+        if (row.updated_at) timestampMap.set(row.id, row.updated_at);
+      }
+    } catch (e) {
+      logger.warn(`[DocGenerator] Post-filter: 查询 kb_sources 失败: ${e}`);
+    }
+  }
+
+  // 在 detection sections 中注入 timestamp（通过 chunkId 查 sourceId 再查时间戳）
+  // detectConflicts 的类型签名不含 timestamp，但 callConflictDetector 运行时会读取
+  // source.timestamp 并写入 LLM prompt 的 "时间:" 字段，所以 cast 安全。
+  const chunkToSourceId = new Map<string, string>();
+  for (const sec of rawSections) {
+    for (const src of sec.sources) {
+      if (src.chunkId && src.sourceId) chunkToSourceId.set(src.chunkId, src.sourceId);
+    }
+  }
+  const enrichedSections = sectionsForDetection.map((sec) => ({
+    ...sec,
+    sources: sec.sources.map((s) => {
+      const sid = chunkToSourceId.get(s.chunkId);
+      const ts = sid ? timestampMap.get(sid) : undefined;
+      return { ...s, timestamp: ts };
+    }),
+  })) as Parameters<typeof detectConflicts>[0];
+
+  // Step 4: 运行冲突检测
+  const dbSettings = readSettingsFromDb();
+  const defaultProviders = dbSettings.providerPreference?.length ? dbSettings.providerPreference : ["mimo"];
+  const providers = config.providerPreference ?? defaultProviders;
+  const apiKey = config.apiKey ?? getApiKey(providers[0] ?? "mimo") ?? "";
+  const modelId = config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro";
+
+  logger.info(`[DocGenerator] Post-filter: 开始冲突检测 ${enrichedSections.length} 章节, ${totalSources} 个来源`);
+  let detection;
+  try {
+    detection = await detectConflicts(enrichedSections, apiKey, providers[0] ?? "mimo", modelId);
+  } catch (e) {
+    logger.warn(`[DocGenerator] Post-filter: detectConflicts 失败，跳过: ${e}`);
+    return rawSections;
+  }
+
+  if (!detection.hasConflicts) {
+    logger.info(`[DocGenerator] Post-filter: 未检测到冲突`);
+    return rawSections;
+  }
+
+  // Step 5: 自动解决
+  const sourceToChunkIds = new Map<string, string[]>();
+  for (const sec of enrichedSections) {
+    for (const s of sec.sources) {
+      const name = `${sec.title} - ${s.sourceName ?? s.chunkId}`;
+      const existing = sourceToChunkIds.get(name);
+      if (existing) existing.push(s.chunkId);
+      else sourceToChunkIds.set(name, [s.chunkId]);
+    }
+  }
+  const resolution = autoResolveConflicts(detection.conflicts, sourceToChunkIds, { forceResolveAll: true });
+  const excludedChunkIdSet = new Set(resolution.excludedChunkIds);
+
+  if (excludedChunkIdSet.size === 0) {
+    logger.warn(`[DocGenerator] Post-filter: 检测到 ${detection.conflicts.length} 个冲突但未能排除任何 chunk，跳过过滤`);
+    return rawSections;
+  }
+
+  // Step 6: 收集要移除的 citation indices
+  const losingIndices = new Set<number>();
+  for (const chunkId of excludedChunkIdSet) {
+    const indices = chunkToIndices.get(chunkId);
+    if (indices) for (const idx of indices) losingIndices.add(idx);
+  }
+
+  logger.info(`[DocGenerator] Post-filter: ${detection.conflicts.length} 个冲突, 解决 ${resolution.resolved.length}, 未解决 ${resolution.unresolved.length}, 排除 ${excludedChunkIdSet.size} chunk, 移除 ${losingIndices.size} 个 citation`);
+
+  if (losingIndices.size === 0) return rawSections;
+
+  // Step 7: 对每个 section 移除 losing citations 并重新编号
+  return rawSections.map((sec) => {
+    const secLosing = [...losingIndices].filter((idx) => sec.citationLinks.some((l) => l.index === idx)).sort((a, b) => a - b);
+    if (secLosing.length === 0) return sec;
+
+    const keptLinks = sec.citationLinks.filter((l) => !losingIndices.has(l.index)).sort((a, b) => a.index - b.index);
+    const remap = new Map<number, number>();
+    keptLinks.forEach((link, i) => remap.set(link.index, i + 1));
+
+    let cleaned = sec.content;
+    // 按编号从大到小替换，避免 [10] 被 [1] 部分匹配
+    const indicesInSec = [...new Set(sec.citationLinks.map((l) => l.index))].sort((a, b) => b - a);
+    for (const idx of indicesInSec) {
+      const re = new RegExp(`\\[${idx}\\]`, "g");
+      if (losingIndices.has(idx)) {
+        cleaned = cleaned.replace(new RegExp(`<sup><a[^>]*>\\[${idx}\\]</a></sup>`, "g"), "");
+        cleaned = cleaned.replace(new RegExp(`<sup><span[^>]*>\\[${idx}\\]</span></sup>`, "g"), "");
+        cleaned = cleaned.replace(new RegExp(`<sup class="cite-ref">\\[${idx}\\]</sup>`, "g"), "");
+        cleaned = cleaned.replace(re, "");
+      } else {
+        const newIdx = remap.get(idx);
+        if (newIdx != null && newIdx !== idx) {
+          const placeholder = `[__CITE_${newIdx}__]`;
+          cleaned = cleaned.replace(new RegExp(`<sup><a([^>]*)>\\[${idx}\\]</a></sup>`, "g"), `<sup><a$1>[${placeholder.slice(1, -1)}]</a></sup>`.replace(placeholder, `[${newIdx}]`));
+          cleaned = cleaned.replace(new RegExp(`<sup><span([^>]*)>\\[${idx}\\]</span></sup>`, "g"), `<sup><span$1>[${newIdx}]</span></sup>`);
+          cleaned = cleaned.replace(new RegExp(`<sup class="cite-ref">\\[${idx}\\]</sup>`, "g"), `<sup class="cite-ref">[${newIdx}]</sup>`);
+          cleaned = cleaned.replace(re, `[${newIdx}]`);
+        }
+      }
+    }
+
+    // 清理因移除 citation 变空的句子（仅由标点、空格组成的行）
+    cleaned = cleaned.split("\n").map((line) => {
+      const stripped = line.replace(/[\s\p{P}]/gu, "");
+      return stripped.length === 0 ? "" : line;
+    }).filter((line, _i, arr) => line !== "" || (arr.length === 1)).join("\n");
+
+    // 更新 citationLinks 的 index
+    const newLinks: CitationLink[] = keptLinks.map((link, i) => ({ ...link, index: i + 1 }));
+
+    return { ...sec, content: cleaned, citationLinks: newLinks };
+  });
+}
+
 /** 完整文档生成 */
 export async function generateDocument(config: GenerateDocRequest): Promise<GenerateDocResult> {
   logger.info(`[DocGenerator] 开始生成: ${config.title}`);
@@ -633,11 +961,30 @@ export async function generateDocument(config: GenerateDocRequest): Promise<Gene
 
   const { style: documentStyle } = config.metadata;
 
+  // ── 冲突源前置过滤（bug1）：生成前检测冲突 → 自动 resolve → 排除不可 resolve 的冲突源 ──
+  let excludeChunkIds: Set<string> | undefined;
+  let conflictResolution: ConflictResolutionResult | null = null;
+  if (config.preFilter !== false) {
+    try {
+      conflictResolution = await preFilterConflictingSources(config.outline, config);
+      if (conflictResolution && conflictResolution.excludedChunkIds.length > 0) {
+        excludeChunkIds = new Set(conflictResolution.excludedChunkIds);
+      }
+    } catch (err) {
+      logger.warn(`[DocGenerator] 冲突前置过滤失败（不影响生成）: ${err}`);
+    }
+  }
+
   // 并行执行：章节生成 + 标题生成（标题只依赖大纲，不依赖章节内容）
-  const [sections, title] = await Promise.all([
-    generateSections(config.outline, "", config, userRequest, config.outline, documentStyle),
+  const [rawSections, title] = await Promise.all([
+    generateSections(config.outline, "", config, userRequest, config.outline, documentStyle, 0, true, excludeChunkIds),
     generateTitleWithLLM(userRequest, config.outline, config),
   ]);
+
+  // ── Post-generation 冲突兜底（Bug 4 加强）────────────────────────────
+  // 即使 pre-filter 失败或 source-name 匹配漏掉，最终生成的文档也绝不能包含冲突内容。
+  // 对已生成的 sections 做冲突检测，移除所有引用 losing source 的句子和 citation，并重新编号。
+  const sections = await filterConflictingContent(rawSections, config);
 
   const content = sections.map((s) => `${s.title}\n\n${s.content}`).join("\n\n");
 
@@ -649,7 +996,7 @@ export async function generateDocument(config: GenerateDocRequest): Promise<Gene
 
   logger.info(`[DocGenerator] 生成完成: ${sections.length} 章节, trustScore=${trustScore.toFixed(2)} (groundedness), style=${documentStyle}, title="${title}"`);
 
-  return { content, sections, trustScore, documentStyle, title };
+  return { content, sections, trustScore, documentStyle, title, ...(conflictResolution ? { conflictResolution } : {}) };
 }
 
 // ── 格式转换 ──────────────────────────────────────────

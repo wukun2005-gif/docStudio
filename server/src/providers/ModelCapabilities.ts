@@ -30,6 +30,9 @@ export interface ModelCapabilities {
   /** 是否支持 function calling（tools/tool_choice） */
   supportsFunctionCalling: boolean;
 
+  /** 是否支持 tool_choice=required / object（很多 thinking 模型只支持 auto） */
+  supportsToolChoiceRequired?: boolean;
+
   /** 系统提示传递方式 */
   systemPromptMode: "message" | "parameter" | "none";
 

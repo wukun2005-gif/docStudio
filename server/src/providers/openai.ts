@@ -6,7 +6,7 @@ import { getModelCapabilities } from "./model-capabilities-registry.js";
 
 // ── 推理模型检测 ──────────────────────────────────────────
 
-const REASONING_MODEL_PATTERNS = /mimo|r1\b|o[134]\b|reasoner|thinking|gemini-\d|glm-\d|k2\.[56]|deepseek-v[34]|kimi-k2|gpt-5|doubao-seed-\d/i;
+const REASONING_MODEL_PATTERNS = /mimo|r1\b|o[134]\b|reasoner|thinking|gemini-\d|glm-\d|k2\.[56]|deepseek-v[34]|kimi-k2|gpt-5|doubao-seed-\d|qwen3|qwq/i;
 const REASONING_MAX_TOKENS_MULTIPLIER = 4;
 
 // L1 运行时缓存：modelId → isReasoning（从 API 响应中学到的）
@@ -45,7 +45,10 @@ export function isReasoningModelStatic(modelId: string): boolean {
 export function resolveMaxTokens(modelId: string | undefined, requestedMaxTokens?: number): number {
   const base = requestedMaxTokens ?? 4096;
   if (isReasoningModel(modelId)) {
-    return base * REASONING_MAX_TOKENS_MULTIPLIER;
+    // 照搬 patentExaminator：推理模型 4x maxTokens，但按模型声明的 maxOutputTokens 封顶
+    const caps = modelId ? getModelCapabilities(modelId) : undefined;
+    const cap = caps?.maxOutputTokens ?? 65_536;
+    return Math.min(base * REASONING_MAX_TOKENS_MULTIPLIER, cap);
   }
   return base;
 }
@@ -218,7 +221,15 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
     if (req.tools && req.tools.length > 0) {
       if (caps.supportsFunctionCalling) {
         body.tools = req.tools;
-        if (req.tool_choice) body.tool_choice = req.tool_choice;
+        if (req.tool_choice) {
+          // 照搬 patentExaminator：thinking 模型通常只支持 auto，不支持 required/object
+          let choice = req.tool_choice;
+          if (choice === "required" && caps.supportsToolChoiceRequired === false) {
+            console.warn(`[OpenAI] ${this.id}/${req.modelId} 不支持 tool_choice=required，降级为 auto`);
+            choice = "auto";
+          }
+          body.tool_choice = choice;
+        }
       }
       // 若模型不支持 function calling，不发送 tools（降级为纯文本）
     }

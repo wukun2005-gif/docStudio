@@ -23,7 +23,6 @@ import {
   OpenAICompatibleAdapter,
   isReasoningModel,
   isReasoningModelStatic,
-  learnThinkingCapability,
   resolveMaxTokens,
 } from "./openai.js";
 import { PRESET_MODEL_PROVIDERS } from "../../../shared/src/types/provider.js";
@@ -167,15 +166,20 @@ export class ProviderRegistry {
 
             // L3 截断检测
             const resp = result.response;
+            // 排除 tool-call 响应：text 为空但有 toolCalls 是正常行为，不是截断
+            const hasToolCalls = !!(resp.toolCalls && resp.toolCalls.length > 0);
             const isTruncated = resp.text.length < 50 &&
               !resp.error &&
+              !hasToolCalls &&
               !isReasoningModel(modelId) &&
               resp.tokenUsage != null &&
               resp.tokenUsage.output < 100;
 
             if (isTruncated) {
               logger.warn(`[ModelAdapt] Possible truncation for ${modelId}, retrying with 4x maxTokens`);
-              learnThinkingCapability(modelId, 1);
+              // 注意：不再调用 learnThinkingCapability(modelId, 1) — 那是 hack，
+              // 会把非推理模型错误地缓存为推理模型，导致后续请求的 maxTokens 越界。
+              // 真正的 thinking tokens 由 openai adapter 从 API 响应中学习。
               const retryReq = buildReq(req, { modelId, maxTokens: resolveMaxTokens(modelId, req.maxTokens) });
               try {
                 const retryResult = await this.executeWithRetry(adapter, retryReq);
@@ -214,15 +218,16 @@ export class ProviderRegistry {
 
         // L3 截断检测
         const resp = result.response;
+        const hasToolCalls = !!(resp.toolCalls && resp.toolCalls.length > 0);
         const isTruncated = resp.text.length < 50 &&
           !resp.error &&
+          !hasToolCalls &&
           !isReasoningModel(req.modelId) &&
           resp.tokenUsage != null &&
           resp.tokenUsage.output < 100;
 
         if (isTruncated) {
           logger.warn(`[ModelAdapt] Possible truncation for ${req.modelId}, retrying with 4x maxTokens`);
-          learnThinkingCapability(req.modelId, 1);
           const retryReq = buildReq(req, { maxTokens: resolveMaxTokens(req.modelId, req.maxTokens) });
           try {
             const retryResult = await this.executeWithRetry(adapter, retryReq);

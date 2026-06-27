@@ -330,3 +330,173 @@ export function generateConflictReport(conflicts: ConflictItem[]): string {
 
   return report;
 }
+
+// ============ Auto-Resolution ============
+
+export interface ConflictResolutionItem {
+  topic: string;
+  conflictType: ConflictItem["conflictType"];
+  severity: ConflictItem["severity"];
+  resolution: "authority" | "temporal" | "unresolvable";
+  winningSource: string;
+  losingSources: string[];
+  reason: string;
+}
+
+export interface ConflictResolutionResult {
+  resolved: ConflictResolutionItem[];
+  unresolved: ConflictResolutionItem[];
+  excludedChunkIds: string[];
+}
+
+function safeParseTimestamp(ts: string | undefined, fallback: number): number {
+  if (!ts) return fallback;
+  const parsed = Date.parse(ts);
+  return isNaN(parsed) ? fallback : parsed;
+}
+
+export function autoResolveConflicts(
+  conflicts: ConflictItem[],
+  sourceToChunkIds: Map<string, string[]>,
+  options?: { forceResolveAll?: boolean },
+): ConflictResolutionResult {
+  const resolved: ConflictResolutionItem[] = [];
+  const unresolved: ConflictResolutionItem[] = [];
+  const excludedChunkIds: string[] = [];
+  const excludedSet = new Set<string>();
+  const forceResolveAll = options?.forceResolveAll ?? false;
+
+  // 模糊 source name 查找：LLM 经常 paraphrase 来源名（如"销售部周报" → "销售部-周报"），
+  // 精确匹配失败会导致 chunk 不排除，eval 时重新发现同一冲突。
+  const normalizeSourceName = (s: string): string =>
+    s.toLowerCase().replace(/[\s_\-./\\|:：,，;；()（）\[\]【】《》]+/g, "").replace(/\.(pdf|docx|txt|md|eml|pptx|json|csv|xlsx)$/i, "");
+
+  const normKeyMap = new Map<string, string>();
+  for (const key of sourceToChunkIds.keys()) {
+    normKeyMap.set(normalizeSourceName(key), key);
+  }
+
+  const lookupChunkIds = (llmSource: string, topicForLog: string): string[] => {
+    // 1. 精确匹配
+    const exact = sourceToChunkIds.get(llmSource);
+    if (exact) return exact;
+    // 2. 归一化精确匹配
+    const norm = normalizeSourceName(llmSource);
+    const normKey = normKeyMap.get(norm);
+    if (normKey) return sourceToChunkIds.get(normKey) ?? [];
+    // 3. 最长归一化子串匹配
+    let bestKey: string | null = null;
+    let bestLen = 0;
+    for (const [normK, origK] of normKeyMap) {
+      if (norm.includes(normK) && normK.length > bestLen) {
+        bestLen = normK.length;
+        bestKey = origK;
+      } else if (normK.includes(norm) && norm.length > bestLen) {
+        bestLen = norm.length;
+        bestKey = origK;
+      }
+    }
+    if (bestKey) return sourceToChunkIds.get(bestKey) ?? [];
+    // 4. 找不到 — 日志警告，避免静默失败
+    logger.warn(`[ConflictResolution] source-name lookup 失败（eval 会重新发现此冲突）: topic="${topicForLog}", llmSource="${llmSource}", knownKeys=${[...sourceToChunkIds.keys()].slice(0, 5).join(", ")}...`);
+    return [];
+  };
+
+  // 把某个 conflict 的所有 sides 的 chunks 全部排除（forceResolveAll 兜底）
+  const excludeAllSides = (conflict: ConflictItem): ConflictResolutionItem => {
+    for (const claim of conflict.claims) {
+      const ids = lookupChunkIds(claim.source, conflict.topic);
+      for (const id of ids) { if (!excludedSet.has(id)) { excludedSet.add(id); excludedChunkIds.push(id); } }
+    }
+    return {
+      topic: conflict.topic,
+      conflictType: conflict.conflictType,
+      severity: conflict.severity,
+      resolution: "unresolvable",
+      winningSource: "",
+      losingSources: conflict.claims.map((c) => c.source),
+      reason: "无法自动判定胜负，移除所有冲突侧以确保文档不含矛盾陈述",
+    };
+  };
+
+  for (const conflict of conflicts) {
+    if (conflict.claims.length < 2) continue;
+
+    let resolution: ConflictResolutionItem | null = null;
+
+    const withAuth = conflict.claims.filter((c) => c.sourceAuthority != null);
+
+    if (withAuth.length >= 2) {
+      const sorted = [...conflict.claims].sort(
+        (a, b) => (b.sourceAuthority ?? 0) - (a.sourceAuthority ?? 0),
+      );
+      const winner = sorted[0]!;
+      const losers = sorted.slice(1);
+      const winnerTime = safeParseTimestamp(winner.timestamp, 0);
+      const newerLosers = losers.filter(
+        (l) => safeParseTimestamp(l.timestamp, 0) > winnerTime,
+      );
+
+      if (newerLosers.length === 0 || winnerTime === 0) {
+        resolution = {
+          topic: conflict.topic,
+          conflictType: conflict.conflictType,
+          severity: conflict.severity,
+          resolution: "authority",
+          winningSource: winner.source,
+          losingSources: losers.map((l) => l.source),
+          reason: `以权威度更高的来源「${winner.source}」(权威度 ${(winner.sourceAuthority ?? 0).toFixed(1)}) 为准`,
+        };
+        for (const loser of losers) {
+          const ids = lookupChunkIds(loser.source, conflict.topic);
+          for (const id of ids) { if (!excludedSet.has(id)) { excludedSet.add(id); excludedChunkIds.push(id); } }
+        }
+      }
+    }
+
+    if (!resolution && conflict.conflictType === "temporal") {
+      const withTs = conflict.claims.filter((c) => c.timestamp && !isNaN(Date.parse(c.timestamp)));
+      if (withTs.length >= 2) {
+        const sorted = [...withTs].sort(
+          (a, b) => Date.parse(b.timestamp!) - Date.parse(a.timestamp!),
+        );
+        const winner = sorted[0]!;
+        const losers = sorted.slice(1);
+        resolution = {
+          topic: conflict.topic,
+          conflictType: conflict.conflictType,
+          severity: conflict.severity,
+          resolution: "temporal",
+          winningSource: winner.source,
+          losingSources: losers.map((l) => l.source),
+          reason: `以时间更新的来源「${winner.source}」(${winner.timestamp}) 为准`,
+        };
+        for (const loser of losers) {
+          const ids = lookupChunkIds(loser.source, conflict.topic);
+          for (const id of ids) { if (!excludedSet.has(id)) { excludedSet.add(id); excludedChunkIds.push(id); } }
+        }
+      }
+    }
+
+    if (resolution) {
+      resolved.push(resolution);
+    } else if (forceResolveAll) {
+      // 强制解决：无法判定胜负时，移除所有 sides 的 chunks，确保文档无矛盾
+      const forced = excludeAllSides(conflict);
+      resolved.push(forced);
+      logger.warn(`[ConflictResolution] 强制解决冲突（移除所有 sides）: topic="${conflict.topic}", type=${conflict.conflictType}, sides=${conflict.claims.map(c => c.source).join(", ")}`);
+    } else {
+      unresolved.push({
+        topic: conflict.topic,
+        conflictType: conflict.conflictType,
+        severity: conflict.severity,
+        resolution: "unresolvable",
+        winningSource: "",
+        losingSources: conflict.claims.map((c) => c.source),
+        reason: "无法自动解决，需要用户手动决定",
+      });
+    }
+  }
+
+  return { resolved, unresolved, excludedChunkIds };
+}

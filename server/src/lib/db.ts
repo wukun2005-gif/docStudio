@@ -109,6 +109,7 @@ function migrate(db: Database.Database): void {
       config        TEXT,                   -- JSON: 生成配置
       status        TEXT DEFAULT 'pending', -- 'pending' | 'generating' | 'done' | 'error'
       trust_score   REAL,
+      conflict_resolution TEXT,             -- JSON: 生成阶段的冲突解决结果（resolved/unresolved/excludedChunkIds）
       created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
       updated_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     );
@@ -261,15 +262,27 @@ function migrate(db: Database.Database): void {
     // 表可能还不存在，CREATE TABLE 已经处理了
   }
 
+  // 增量迁移：generation_runs 添加 conflict_resolution 列（Bug 4 fix：持久化冲突解决结果）
+  try {
+    const runCols2 = db.prepare("PRAGMA table_info(generation_runs)").all() as Array<{ name: string }>;
+    const runColNames2 = new Set(runCols2.map((c) => c.name));
+    if (!runColNames2.has("conflict_resolution")) {
+      db.exec("ALTER TABLE generation_runs ADD COLUMN conflict_resolution TEXT");
+      logger.info("[DB] Migration: added generation_runs.conflict_resolution");
+    }
+  } catch (e) {
+    // 表可能还不存在，CREATE TABLE 已经处理了
+  }
+
   // 设置版本号
-  if (versionRow < 3) {
-    db.pragma("user_version = 3");
+  if (versionRow < 4) {
+    db.pragma("user_version = 4");
   }
 
   // ── 种子数据：当前用户（黄薇）──
   seedCurrentUser(db);
 
-  logger.info(`[DB] Migration 完成, version=3`);
+  logger.info(`[DB] Migration 完成, version=4`);
 }
 
 /** 首次启动时自动创建当前用户到 People Graph + sender_profile */

@@ -64,8 +64,8 @@ generationRouter.post("/generate", async (req, res) => {
     // 使用 LLM 生成的标题（已在 generateDocument 中完成）
     const docTitle = result.title;
 
-    dbRun(`UPDATE generation_runs SET title = ?, content = ?, status = 'done', trust_score = ?, document_style = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
-      [docTitle, htmlContent, result.trustScore, result.documentStyle, runId],
+    dbRun(`UPDATE generation_runs SET title = ?, content = ?, status = 'done', trust_score = ?, document_style = ?, conflict_resolution = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+      [docTitle, htmlContent, result.trustScore, result.documentStyle, result.conflictResolution ? JSON.stringify(result.conflictResolution) : null, runId],
       { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "done", trustScore: result.trustScore, documentStyle: result.documentStyle } });
 
     // 构建生成树（段落级来源追溯）
@@ -92,6 +92,7 @@ generationRouter.post("/generate", async (req, res) => {
       sections: result.sections,
       trustScore: result.trustScore,
       documentStyle: result.documentStyle,
+      ...(result.conflictResolution ? { conflictResolution: result.conflictResolution } : {}),
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -702,6 +703,116 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
 
     logger.info(`[Generation] 评估完成: relevance=${relevanceResult.score.toFixed(2)}, completeness=${completenessResult.score.toFixed(2)}, conflicts=${conflictResult.conflicts.length}`);
 
+    // ── Bug 4 fix：与生成阶段的冲突解决结果交叉对比 ──
+    // 加载持久化的 conflictResolution，标记已解决的冲突（resolved），过滤掉已不存在的 losing sources
+    type ResolvedItem = { topic: string; winningSource: string; losingSources: string[]; reason: string; resolution: string };
+    let priorResolution: { resolved: ResolvedItem[]; unresolved: ResolvedItem[]; excludedChunkIds: string[] } | null = null;
+    if (run.conflict_resolution) {
+      try {
+        priorResolution = JSON.parse(run.conflict_resolution);
+        logger.info(`[Generation] 已加载 conflict_resolution: resolved=${priorResolution?.resolved?.length ?? 0}, unresolved=${priorResolution?.unresolved?.length ?? 0}, excluded=${priorResolution?.excludedChunkIds?.length ?? 0}`);
+      } catch (e) {
+        logger.warn(`[Generation] conflict_resolution JSON 解析失败: ${e}`);
+      }
+    }
+
+    // 收集当前 provenance 中实际存在的 source names（按 section+source 归一化）
+    const provenanceSources = new Set<string>();
+    const provenanceChunkIds = new Set<string>();
+    for (const sec of sectionsWithSources) {
+      for (const s of sec.sources) {
+        if (s.sourceName) provenanceSources.add(`${sec.title} - ${s.sourceName}`);
+        if (s.sourceName) provenanceSources.add(s.sourceName);
+        if (s.chunkId) provenanceChunkIds.add(s.chunkId);
+      }
+    }
+
+    // 模糊 source 匹配 helper（与 conflictDetection.ts 一致）
+    const normalizeSourceName = (s: string): string =>
+      s.toLowerCase().replace(/[\s_\-./\\|:：,，;；()（）\[\]【】《》]+/g, "").replace(/\.(pdf|docx|txt|md|eml|pptx|json|csv|xlsx)$/i, "");
+
+    // 模糊 topic 匹配 helper（LLM 两次检测可能 paraphrase 同一主题）
+    const normalizeTopic = (s: string): string =>
+      s.toLowerCase().replace(/[\s_\-./\\|:：,，;；()（）\[\]【】《》]+/g, "");
+
+    const topicsClose = (a: string, b: string): boolean => {
+      const na = normalizeTopic(a);
+      const nb = normalizeTopic(b);
+      if (na === nb) return true;
+      if (na.includes(nb) || nb.includes(na)) return true;
+      // 字符级 Jaccard 相似度（2-gram）
+      const grams = (s: string) => {
+        const set = new Set<string>();
+        for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
+        return set;
+      };
+      const ga = grams(na);
+      const gb = grams(nb);
+      if (ga.size === 0 || gb.size === 0) return false;
+      let inter = 0;
+      for (const g of ga) if (gb.has(g)) inter++;
+      const jaccard = inter / (ga.size + gb.size - inter);
+      return jaccard >= 0.5;
+    };
+
+    // 检查某个 source name 是否仍在 provenance 中（任意 section 里）
+    const isSourceInProvenance = (llmSource: string): boolean => {
+      const norm = normalizeSourceName(llmSource);
+      for (const ps of provenanceSources) {
+        const nps = normalizeSourceName(ps);
+        if (nps === norm || nps.includes(norm) || norm.includes(nps)) return true;
+      }
+      return false;
+    };
+
+    type EvalConflictItem = (typeof conflictResult.conflicts)[number] & { status?: "resolved" | "unresolved" | "new"; resolutionReason?: string };
+    const filteredConflicts: EvalConflictItem[] = [];
+    const stillActive: EvalConflictItem[] = [];
+
+    for (const c of conflictResult.conflicts) {
+      // 尝试匹配 generation 阶段的 resolved 项（按 topic 模糊匹配）
+      const matchedResolved = priorResolution?.resolved.find((r) => topicsClose(r.topic, c.topic));
+      if (matchedResolved) {
+        // 检查 losing sources 是否已被排除（不再出现在 provenance 中）
+        const losersStillPresent = matchedResolved.losingSources.filter((ls) => isSourceInProvenance(ls));
+        if (losersStillPresent.length === 0) {
+          // 全部 losing sources 已排除 → 标记为已解决，不返回给用户
+          continue;
+        }
+        // 部分解决 → 标记为 resolved 但保留展示（让用户知道处理中）
+        const item: EvalConflictItem = {
+          ...c,
+          status: "resolved",
+          resolutionReason: `${matchedResolved.resolution} — ${matchedResolved.reason}`,
+        };
+        filteredConflicts.push(item);
+        stillActive.push(item);
+        continue;
+      }
+      // 未匹配到 resolved → 检查是否匹配 unresolved 项
+      const matchedUnresolved = priorResolution?.unresolved.find((u) => topicsClose(u.topic, c.topic));
+      if (matchedUnresolved) {
+        const item: EvalConflictItem = { ...c, status: "unresolved", resolutionReason: "生成阶段未能自动解决" };
+        filteredConflicts.push(item);
+        stillActive.push(item);
+        continue;
+      }
+      // 新发现的冲突
+      const item: EvalConflictItem = { ...c, status: "new" };
+      filteredConflicts.push(item);
+      stillActive.push(item);
+    }
+
+    if (priorResolution) {
+      logger.info(`[Generation] 冲突过滤: 原 ${conflictResult.conflicts.length} 个 → 展示 ${filteredConflicts.length} 个（resolved=${filteredConflicts.filter(c => c.status === "resolved").length}, unresolved=${filteredConflicts.filter(c => c.status === "unresolved").length}, new=${filteredConflicts.filter(c => c.status === "new").length}）`);
+    }
+
+    const finalConflicts = {
+      conflicts: filteredConflicts,
+      conflictRate: filteredConflicts.length > 0 ? conflictResult.conflictRate : 0,
+      hasConflicts: filteredConflicts.length > 0,
+    };
+
     // 获取已有的 groundedness 分数（从 provenance_nodes 中取平均）
     const groundingNodes = dbAll<{ grounding_score: number }>(`
       SELECT grounding_score FROM provenance_nodes WHERE run_id = ? AND grounding_score IS NOT NULL
@@ -724,13 +835,13 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
           groundedness: groundednessScore,
           relevance: relevanceResult.score,
           completeness: completenessResult.score,
-          conflictRate: conflictResult.conflictRate,
-          hasConflicts: conflictResult.hasConflicts,
+          conflictRate: finalConflicts.conflictRate,
+          hasConflicts: finalConflicts.hasConflicts,
           // 保存详情供前端展示
           irrelevantSentences: relevanceResult.irrelevantSentences ?? [],
           coveredPoints: completenessResult.coveredPoints ?? [],
           missingPoints: completenessResult.missingPoints ?? [],
-          conflictItems: conflictResult.conflicts ?? [],
+          conflictItems: finalConflicts.conflicts ?? [],
         }),
       ], { table: "trust_evaluations", recordId: evalId, source: "generation" });
       logger.info(`[Generation] 评估结果已保存: runId=${req.params.id}`);
@@ -761,9 +872,9 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
           missingPoints: completenessResult.missingPoints,
         },
         conflicts: {
-          hasConflicts: conflictResult.hasConflicts,
-          conflictRate: conflictResult.conflictRate,
-          items: conflictResult.conflicts,
+          hasConflicts: finalConflicts.hasConflicts,
+          conflictRate: finalConflicts.conflictRate,
+          items: finalConflicts.conflicts,
           label: "内容冲突",
           description: "不同来源之间的矛盾信息",
         },
