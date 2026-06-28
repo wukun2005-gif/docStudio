@@ -10,6 +10,9 @@ interface ProvenanceNode {
   runId: string;
   paragraphIdx: number;
   chunkId?: string;
+  webUrl?: string;
+  webTitle?: string;
+  webSnippet?: string;
   score: number;
   isManual: boolean;
   parentId?: string;
@@ -99,9 +102,18 @@ export default function ProvenanceTree({ runId, sectionTitles }: ProvenanceTreeP
                     "bg-red-500"
                   }`} />
                   <span className="flex-1 truncate text-gray-600">
-                    {node.chunkId?.slice(0, 8) ?? "手动"}...
+                    {node.webUrl ? (
+                      <a href={node.webUrl} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline truncate block">
+                        🌐 {node.webTitle || node.webUrl}
+                      </a>
+                    ) : (
+                      <span>{node.chunkId?.slice(0, 8) ?? "手动"}...</span>
+                    )}
                   </span>
                   <span className="text-gray-400 text-xs">{(node.score * 100).toFixed(0)}%</span>
+                  {node.webUrl && (
+                    <span className="px-1 py-0.5 bg-purple-100 text-purple-600 text-xs rounded">Web</span>
+                  )}
                   {node.isManual && (
                     <span className="px-1 py-0.5 bg-blue-100 text-blue-600 text-xs rounded">手动</span>
                   )}

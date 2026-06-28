@@ -4,7 +4,21 @@
  * Feature #14: PowerPoint 生成
  * Feature #15: Excel 生成
  */
+import {
+  Document,
+  Packer,
+  Paragraph,
+  TextRun,
+  AlignmentType,
+  convertInchesToTwip,
+} from "docx";
 import { logger } from "./logger.js";
+
+// pptxgenjs & xlsx - dynamic require to avoid ESM interop type issues
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const PptxGenJS: new () => any = require("pptxgenjs");
+const XLSX: typeof import("xlsx") = require("xlsx");
 
 export interface ExportSection {
   title: string;
@@ -15,131 +29,403 @@ export interface ExportSection {
 // ── Word 生成 (#13) ──────────────────────────────────
 
 /**
- * 生成简单的 Word XML 格式（.docx 的内核是 XML）
- * 简化版：生成 HTML 格式，Word 可以直接打开
+ * 生成标准 OOXML .docx 格式文档
+ * 使用保守兼容的配置，确保 Word、Pages、WPS、Google Docs 等均可正常打开
  */
-export function generateWord(title: string, sections: ExportSection[], citations?: CitationItem[]): Buffer {
-  const citationsHtml = citations && citations.length > 0
-    ? `<hr><h2>参考来源</h2><ol>${citations.map(c => {
-        const urlPart = formatCitationUrlHtml(c);
-        return `<li>[${c.index}] ${escapeHtml(c.title)}${urlPart}</li>`;
-      }).join('')}</ol>`
-    : '';
+export async function generateWord(title: string, sections: ExportSection[], citations?: CitationItem[]): Promise<Buffer> {
+  const children: Paragraph[] = [];
 
-  const html = `<!DOCTYPE html>
-<html xmlns:o="urn:schemas-microsoft-com:office:office"
-      xmlns:w="urn:schemas-microsoft-com:office:word"
-      xmlns="http://www.w3.org/TR/REC-html40">
-<head>
-<meta charset="UTF-8">
-<title>${title}</title>
-<style>
-  body { font-family: "Microsoft YaHei", sans-serif; line-height: 1.6; }
-  h1 { color: #1a1a2e; border-bottom: 2px solid #16213e; padding-bottom: 8px; }
-  h2 { color: #16213e; margin-top: 24px; }
-  h3 { color: #0f3460; }
-  p { margin: 8px 0; }
-  .meta { color: #666; font-size: 12px; margin-bottom: 24px; }
-</style>
-</head>
-<body>
-<h1>${title}</h1>
-<p class="meta">生成时间：${new Date().toLocaleString("zh-CN")}</p>
-${sections.map((s) => {
-  const tag = s.level === 1 ? "h2" : s.level === 2 ? "h3" : "h3";
-  const paragraphs = s.content.split("\n").filter((p) => p.trim()).map((p) => `<p>${p}</p>`).join("\n");
-  return `<${tag}>${s.title}</${tag}>\n${paragraphs}`;
-}).join("\n<hr>\n")}
-${citationsHtml}
-</body>
-</html>`;
+  children.push(
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 240 },
+      children: [
+        new TextRun({
+          text: title,
+          bold: true,
+          size: 44,
+          font: {
+            ascii: "Times New Roman",
+            eastAsia: "SimSun",
+            hAnsi: "Times New Roman",
+            cs: "Times New Roman",
+          },
+        }),
+      ],
+    }),
+  );
 
-  return Buffer.from(html, "utf-8");
+  children.push(
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 480 },
+      children: [
+        new TextRun({
+          text: `生成时间：${new Date().toLocaleString("zh-CN")}`,
+          size: 21,
+          color: "808080",
+          font: {
+            ascii: "Times New Roman",
+            eastAsia: "SimSun",
+            hAnsi: "Times New Roman",
+            cs: "Times New Roman",
+          },
+        }),
+      ],
+    }),
+  );
+
+  for (const section of sections) {
+    const headingSize = section.level === 2 ? 28 : 32;
+
+    children.push(
+      new Paragraph({
+        spacing: { before: 360, after: 200 },
+        children: [
+          new TextRun({
+            text: section.title,
+            bold: true,
+            size: headingSize,
+            font: {
+              ascii: "Times New Roman",
+              eastAsia: "SimSun",
+              hAnsi: "Times New Roman",
+              cs: "Times New Roman",
+            },
+          }),
+        ],
+      }),
+    );
+
+    const paragraphs = section.content.split("\n").filter((p) => p.trim());
+    for (const paraText of paragraphs) {
+      const runs = buildInlineRuns(paraText, citations);
+      children.push(
+        new Paragraph({
+          spacing: { after: 120, line: 360, lineRule: "auto" },
+          indent: { firstLine: 420 },
+          children: runs,
+        }),
+      );
+    }
+  }
+
+  if (citations && citations.length > 0) {
+    children.push(
+      new Paragraph({
+        spacing: { before: 480, after: 200 },
+        children: [
+          new TextRun({
+            text: "————————————————————",
+            size: 20,
+            color: "BFBFBF",
+            font: {
+              ascii: "Times New Roman",
+              eastAsia: "SimSun",
+              hAnsi: "Times New Roman",
+              cs: "Times New Roman",
+            },
+          }),
+        ],
+      }),
+    );
+
+    children.push(
+      new Paragraph({
+        spacing: { after: 200 },
+        children: [
+          new TextRun({
+            text: "参考来源",
+            bold: true,
+            size: 28,
+            font: {
+              ascii: "Times New Roman",
+              eastAsia: "SimSun",
+              hAnsi: "Times New Roman",
+              cs: "Times New Roman",
+            },
+          }),
+        ],
+      }),
+    );
+
+    for (const c of citations) {
+      const citeRuns: TextRun[] = [
+        new TextRun({
+          text: `[${c.index}] `,
+          bold: true,
+          size: 22,
+          color: "2563EB",
+          font: {
+            ascii: "Times New Roman",
+            eastAsia: "SimSun",
+            hAnsi: "Times New Roman",
+            cs: "Times New Roman",
+          },
+        }),
+      ];
+
+      if (c.url) {
+        citeRuns.push(
+          new TextRun({
+            text: c.title,
+            underline: {},
+            color: "0563C1",
+            size: 22,
+            font: {
+              ascii: "Times New Roman",
+              eastAsia: "SimSun",
+              hAnsi: "Times New Roman",
+              cs: "Times New Roman",
+            },
+          }),
+        );
+        citeRuns.push(
+          new TextRun({
+            text: ` ${c.url}`,
+            size: 18,
+            color: "808080",
+            italics: true,
+            font: {
+              ascii: "Times New Roman",
+              eastAsia: "SimSun",
+              hAnsi: "Times New Roman",
+              cs: "Times New Roman",
+            },
+          }),
+        );
+      } else {
+        citeRuns.push(
+          new TextRun({
+            text: c.title,
+            size: 22,
+            font: {
+              ascii: "Times New Roman",
+              eastAsia: "SimSun",
+              hAnsi: "Times New Roman",
+              cs: "Times New Roman",
+            },
+          }),
+        );
+      }
+
+      children.push(
+        new Paragraph({
+          spacing: { after: 100, line: 320, lineRule: "auto" },
+          children: citeRuns,
+        }),
+      );
+    }
+  }
+
+  const doc = new Document({
+    creator: "DocStudio",
+    title: title,
+    sections: [
+      {
+        properties: {
+          page: {
+            size: {
+              width: convertInchesToTwip(8.27),
+              height: convertInchesToTwip(11.69),
+            },
+            margin: {
+              top: convertInchesToTwip(1),
+              right: convertInchesToTwip(1),
+              bottom: convertInchesToTwip(1),
+              left: convertInchesToTwip(1.25),
+            },
+          },
+        },
+        children: children,
+      },
+    ],
+  });
+
+  const buffer = await Packer.toBuffer(doc);
+  return buffer;
+}
+
+/**
+ * 构建内联文本 runs，将 [N] 引用标记转换为带颜色的标注
+ * 不使用超链接（某些旧版 Pages 对 hyperlink 元素兼容性差）
+ */
+function buildInlineRuns(text: string, citations?: CitationItem[]): TextRun[] {
+  const fontConfig = {
+    ascii: "Times New Roman",
+    eastAsia: "SimSun",
+    hAnsi: "Times New Roman",
+    cs: "Times New Roman",
+  };
+
+  if (!citations || citations.length === 0) {
+    return [new TextRun({ text, size: 24, font: fontConfig })];
+  }
+
+  const citationMap = new Map<number, CitationItem>();
+  for (const c of citations) {
+    citationMap.set(c.index, c);
+  }
+
+  const runs: TextRun[] = [];
+  const citePattern = /\[(\d+)\]/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = citePattern.exec(text)) !== null) {
+    const citeNum = parseInt(match[1]!, 10);
+    const before = text.slice(lastIndex, match.index);
+    if (before) {
+      runs.push(new TextRun({ text: before, size: 24, font: fontConfig }));
+    }
+
+    runs.push(
+      new TextRun({
+        text: `[${citeNum}]`,
+        superScript: false,
+        size: 20,
+        color: "2563EB",
+        font: fontConfig,
+      }),
+    );
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  const after = text.slice(lastIndex);
+  if (after) {
+    runs.push(new TextRun({ text: after, size: 24, font: fontConfig }));
+  }
+
+  if (runs.length === 0) {
+    runs.push(new TextRun({ text, size: 24, font: fontConfig }));
+  }
+
+  return runs;
 }
 
 // ── PowerPoint 生成 (#14) ─────────────────────────────
 
 /**
- * 生成简单的 PowerPoint XML 格式
- * 简化版：生成 HTML 幻灯片格式
+ * 生成 PPTX 格式（使用 pptxgenjs 库）
  */
-export function generatePowerPoint(title: string, sections: ExportSection[], citations?: CitationItem[]): Buffer {
-  const slides = sections.map((s, idx) => `
-<div class="slide" style="page-break-after: always; padding: 40px; min-height: 500px;">
-  <h1 style="color: #1a1a2e; font-size: 28px; margin-bottom: 20px;">${s.title}</h1>
-  <div style="font-size: 18px; line-height: 1.8;">
-    ${s.content.split("\n").filter((p) => p.trim()).map((p) => `<p>${p}</p>`).join("\n")}
-  </div>
-  <div style="position: absolute; bottom: 20px; right: 40px; color: #999;">${idx + 1}</div>
-</div>`).join("\n");
+export async function generatePowerPoint(title: string, sections: ExportSection[], citations?: CitationItem[]): Promise<Buffer> {
+  const pptx = new PptxGenJS();
 
-  const citationsSlide = citations && citations.length > 0
-    ? `<div class="slide" style="page-break-after: always; padding: 40px; min-height: 500px;">
-  <h1 style="color: #1a1a2e; font-size: 28px; margin-bottom: 20px;">参考来源</h1>
-  <div style="font-size: 16px; line-height: 1.8;">
-    ${citations.map(c => {
-      const urlPart = formatCitationUrlHtml(c);
-      return `<p>[${c.index}] ${escapeHtml(c.title)}${urlPart}</p>`;
-    }).join('')}
-  </div>
-</div>`
-    : '';
+  pptx.layout = "LAYOUT_WIDE";
+  pptx.author = "DocStudio";
+  pptx.title = title;
 
-  const html = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>${title}</title>
-<style>
-  body { font-family: "Microsoft YaHei", sans-serif; margin: 0; }
-  .slide { position: relative; }
-</style>
-</head>
-<body>
-<div style="text-align: center; padding: 40px;">
-  <h1 style="font-size: 36px; color: #1a1a2e;">${title}</h1>
-  <p style="color: #666;">${new Date().toLocaleDateString("zh-CN")}</p>
-</div>
-<hr>
-${slides}
-${citationsSlide}
-</body>
-</html>`;
+  const titleSlide = pptx.addSlide();
+  titleSlide.background = { color: "1a1a2e" };
+  titleSlide.addText(title, {
+    x: 0.5, y: 2.0, w: "90%", h: 1.5,
+    fontSize: 44, color: "FFFFFF", bold: true, align: "center",
+    fontFace: "Microsoft YaHei",
+  });
+  titleSlide.addText(new Date().toLocaleDateString("zh-CN"), {
+    x: 0.5, y: 3.8, w: "90%", h: 0.5,
+    fontSize: 18, color: "CCCCCC", align: "center",
+    fontFace: "Microsoft YaHei",
+  });
 
-  return Buffer.from(html, "utf-8");
+  for (const [idx, section] of sections.entries()) {
+    const slide = pptx.addSlide();
+
+    slide.addText(section.title, {
+      x: 0.5, y: 0.3, w: "90%", h: 0.8,
+      fontSize: 28, color: "1a1a2e", bold: true,
+      fontFace: "Microsoft YaHei",
+    });
+
+    slide.addShape(pptx.ShapeType.rect, {
+      x: 0.5, y: 1.1, w: 9.0, h: 0.05,
+      fill: { color: "16213e" },
+    });
+
+    slide.addText(section.content, {
+      x: 0.5, y: 1.4, w: "90%", h: 4.5,
+      fontSize: 16, color: "333333",
+      fontFace: "Microsoft YaHei",
+      valign: "top",
+      lineSpacingMultiple: 1.5,
+    });
+
+    slide.addText(`${idx + 1}`, {
+      x: 9.0, y: 5.1, w: 0.5, h: 0.4,
+      fontSize: 12, color: "999999", align: "right",
+    });
+  }
+
+  if (citations && citations.length > 0) {
+    const citeSlide = pptx.addSlide();
+    citeSlide.addText("参考来源", {
+      x: 0.5, y: 0.3, w: "90%", h: 0.8,
+      fontSize: 28, color: "1a1a2e", bold: true,
+      fontFace: "Microsoft YaHei",
+    });
+    citeSlide.addShape(pptx.ShapeType.rect, {
+      x: 0.5, y: 1.1, w: 9.0, h: 0.05,
+      fill: { color: "16213e" },
+    });
+
+    const citeText = citations.map(c => {
+      const urlPart = c.url ? ` ${c.url}` : "";
+      return `[${c.index}] ${c.title}${urlPart}`;
+    }).join("\n");
+
+    citeSlide.addText(citeText, {
+      x: 0.5, y: 1.4, w: "90%", h: 4.5,
+      fontSize: 14, color: "333333",
+      fontFace: "Microsoft YaHei",
+      valign: "top",
+      lineSpacingMultiple: 1.5,
+    });
+  }
+
+  const buffer = await pptx.write({ outputType: "arraybuffer" }) as ArrayBuffer;
+  return Buffer.from(buffer);
 }
 
 // ── Excel 生成 (#15) ──────────────────────────────────
 
 /**
- * 生成简单的 CSV 格式（Excel 可以打开）
+ * 生成 XLSX 格式（使用 xlsx 库）
  */
-export function generateExcel(title: string, sections: ExportSection[], citations?: CitationItem[]): Buffer {
-  const rows = [
+export async function generateExcel(title: string, sections: ExportSection[], citations?: CitationItem[]): Promise<Buffer> {
+  const aoa: (string | number)[][] = [
     ["章节", "内容", "字数"],
-    ...sections.map((s) => [
-      s.title,
-      s.content.replace(/\n/g, " ").replace(/"/g, '""'),
-      String(s.content.length),
-    ]),
   ];
 
-  // 添加参考来源列表
-  if (citations && citations.length > 0) {
-    rows.push(["", "", ""]);  // 空行分隔
-    rows.push(["参考来源", "", ""]);
-    citations.forEach(c => {
-      const urlPart = formatCitationUrlText(c);
-      rows.push([`[${c.index}]`, `${c.title}${urlPart}`, ""]);
-    });
+  for (const s of sections) {
+    aoa.push([
+      s.title,
+      s.content.replace(/\n/g, " "),
+      s.content.length,
+    ]);
   }
 
-  const csv = rows
-    .map((row) => row.map((cell) => `"${cell}"`).join(","))
-    .join("\n");
+  if (citations && citations.length > 0) {
+    aoa.push(["", "", ""]);
+    aoa.push(["参考来源", "", ""]);
+    for (const c of citations) {
+      const urlPart = c.url ? ` (${c.url})` : "";
+      aoa.push([`[${c.index}]`, `${c.title}${urlPart}`, ""]);
+    }
+  }
 
-  // 添加 BOM 以支持中文
-  return Buffer.from("﻿" + csv, "utf-8");
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+  ws["!cols"] = [
+    { wch: 20 },
+    { wch: 80 },
+    { wch: 10 },
+  ];
+
+  XLSX.utils.book_append_sheet(wb, ws, title.slice(0, 31));
+  const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+  return buffer;
 }
 
 // ── Email 生成 (.eml) ─────────────────────────────────
@@ -148,20 +434,18 @@ export interface CitationItem {
   index: number;
   title: string;
   url?: string;
-  fileName?: string;  // 原始文件名，用于内部文件
+  fileName?: string;
 }
 
 /**
  * 生成标准 RFC 822 格式的 eml 文件
- * 可以直接用 Outlook、Thunderbird 等邮件客户端打开
+ * 可以直接用 Outlook、Thunderbird、Mail 等邮件客户端打开
  * 使用 HTML 格式以支持可点击链接
  */
 export function generateEml(title: string, sections: ExportSection[], citations?: CitationItem[]): Buffer {
-  // 生成 HTML 格式的正文
   const bodyHtml = sections.map((s) => {
     const paragraphs = s.content.split("\n").filter((p) => p.trim());
     return paragraphs.map((p) => {
-      // 将正文中的 [N] 替换为锚点链接
       let html = escapeHtml(p);
       if (citations && citations.length > 0) {
         html = html.replace(/\[(\d+)\]/g, (match, num) => {
@@ -172,7 +456,6 @@ export function generateEml(title: string, sections: ExportSection[], citations?
     }).join("\n");
   }).join("\n");
 
-  // 生成参考来源列表 HTML
   let citationsHtml = "";
   if (citations && citations.length > 0) {
     citationsHtml = `
@@ -182,7 +465,6 @@ export function generateEml(title: string, sections: ExportSection[], citations?
   <ol style="list-style: none; padding: 0; margin: 0;">
 ${citations.map((c) => {
   if (c.url) {
-    // 有URL的都显示为可点击链接（内部文件和外部URL）
     return `    <li id="cite-${c.index}" style="margin: 8px 0; color: #4b5563;">
       <span style="color: #2563eb; font-weight: 500;">[${c.index}]</span> <a href="${escapeHtmlAttr(c.url)}" style="color: #2563eb; text-decoration: underline;">${escapeHtml(c.title)}</a>
     </li>`;
@@ -225,32 +507,32 @@ ${citationsHtml}
 
 export type ExportFormat = "docx" | "pptx" | "xlsx" | "eml";
 
-export function exportDocument(
+export async function exportDocument(
   format: ExportFormat,
   title: string,
   sections: ExportSection[],
   citations?: CitationItem[],
-): { buffer: Buffer; contentType: string; extension: string } {
+): Promise<{ buffer: Buffer; contentType: string; extension: string }> {
   logger.info(`[DocExporter] 导出 ${format}: ${title}, 参考来源: ${citations?.length ?? 0} 个`);
 
   switch (format) {
     case "docx":
       return {
-        buffer: generateWord(title, sections, citations),
-        contentType: "application/msword",
-        extension: ".doc",
+        buffer: await generateWord(title, sections, citations),
+        contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        extension: ".docx",
       };
     case "pptx":
       return {
-        buffer: generatePowerPoint(title, sections, citations),
-        contentType: "application/vnd.ms-powerpoint",
-        extension: ".ppt",
+        buffer: await generatePowerPoint(title, sections, citations),
+        contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        extension: ".pptx",
       };
     case "xlsx":
       return {
-        buffer: generateExcel(title, sections, citations),
-        contentType: "application/vnd.ms-excel",
-        extension: ".csv",
+        buffer: await generateExcel(title, sections, citations),
+        contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        extension: ".xlsx",
       };
     case "eml":
       return {
@@ -278,25 +560,4 @@ function escapeHtmlAttr(text: string): string {
     .replace(/'/g, "&#39;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
-}
-
-// ── 引用格式化工具 ─────────────────────────────────────
-
-/** 判断是否是内部API路径 */
-function isInternalApiPath(url: string): boolean {
-  return url.startsWith("/api/") || url.startsWith("api/");
-}
-
-/** 格式化引用URL用于显示（HTML格式，带链接） */
-export function formatCitationUrlHtml(c: CitationItem): string {
-  if (!c.url) return "";
-  // 所有URL（包括内部文件）都显示为可点击链接
-  return ` <a href="${escapeHtmlAttr(c.url)}">${escapeHtml(c.url)}</a>`;
-}
-
-/** 格式化引用URL用于显示（纯文本格式） */
-export function formatCitationUrlText(c: CitationItem): string {
-  if (!c.url) return "";
-  // 所有URL（包括内部文件）都显示
-  return ` (${c.url})`;
 }

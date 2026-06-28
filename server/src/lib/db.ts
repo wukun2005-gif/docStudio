@@ -207,12 +207,15 @@ function migrate(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS provenance_nodes (
       id            TEXT PRIMARY KEY,
       run_id        TEXT NOT NULL REFERENCES generation_runs(id) ON DELETE CASCADE,
-      paragraph_idx INTEGER NOT NULL,
-      chunk_id      TEXT,
-      score         REAL DEFAULT 0,
-      is_manual     INTEGER DEFAULT 0,
-      parent_id     TEXT,
-      created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+      paragraph_idx  INTEGER NOT NULL,
+      chunk_id       TEXT,
+      web_url        TEXT,
+      web_title      TEXT,
+      web_snippet    TEXT,
+      score          REAL DEFAULT 0,
+      is_manual      INTEGER DEFAULT 0,
+      parent_id      TEXT,
+      created_at     TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     );
     CREATE INDEX IF NOT EXISTS idx_provenance_run ON provenance_nodes(run_id);
   `);
@@ -246,7 +249,7 @@ function migrate(db: Database.Database): void {
     // 表可能还不存在，CREATE TABLE 已经处理了
   }
 
-  // 增量迁移：provenance_nodes 添加 paragraph_title 和 grounding_score 列
+  // 增量迁移：provenance_nodes 添加 paragraph_title、grounding_score 和 web search 列
   try {
     const provCols = db.prepare("PRAGMA table_info(provenance_nodes)").all() as Array<{ name: string }>;
     const provColNames = new Set(provCols.map((c) => c.name));
@@ -257,6 +260,18 @@ function migrate(db: Database.Database): void {
     if (!provColNames.has("grounding_score")) {
       db.exec("ALTER TABLE provenance_nodes ADD COLUMN grounding_score REAL");
       logger.info("[DB] Migration: added provenance_nodes.grounding_score");
+    }
+    if (!provColNames.has("web_url")) {
+      db.exec("ALTER TABLE provenance_nodes ADD COLUMN web_url TEXT");
+      logger.info("[DB] Migration: added provenance_nodes.web_url");
+    }
+    if (!provColNames.has("web_title")) {
+      db.exec("ALTER TABLE provenance_nodes ADD COLUMN web_title TEXT");
+      logger.info("[DB] Migration: added provenance_nodes.web_title");
+    }
+    if (!provColNames.has("web_snippet")) {
+      db.exec("ALTER TABLE provenance_nodes ADD COLUMN web_snippet TEXT");
+      logger.info("[DB] Migration: added provenance_nodes.web_snippet");
     }
   } catch (e) {
     // 表可能还不存在，CREATE TABLE 已经处理了

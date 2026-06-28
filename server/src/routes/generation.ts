@@ -1224,8 +1224,8 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
       ORDER BY p.paragraph_idx, p.score DESC
     `, [req.params.id]);
 
-    const sectionsWithSources = sections.map((sec) => {
-      const secNodes = provNodes.filter((n) => n.paragraph_idx === sec.index);
+    const sectionsWithSources = sections.map((sec, idx) => {
+      const secNodes = provNodes.filter((n) => n.paragraph_idx === idx);
       const sourceMap = new Map<string, { content: string; score: number; sourceName: string; chunkId: string }>();
       for (const n of secNodes) {
         const key = n.chunk_id ?? (n.source_name && n.chunk_content ? `${n.source_name}:${n.chunk_content.slice(0, 40)}` : null);

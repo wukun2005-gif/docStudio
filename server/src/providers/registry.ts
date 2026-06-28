@@ -376,11 +376,7 @@ export class ProviderRegistry {
         lastErrInfo = classifyError(error);
         attempts.push({ providerId: adapter.id, ok: false, errorCode: lastErrInfo.code, message: lastErrInfo.message });
 
-        // 超时日志（照搬 patentExaminator）
-        if (lastErrInfo.code === "timeout") {
-          const timeoutMs = req.timeoutMs ?? TIMEOUT_MS;
-          logger.warn(`[Registry] ${adapter.id} attempt ${attempt + 1}/${MAX_RETRIES + 1} timed out after ${timeoutMs}ms, model=${req.modelId ?? "default"}`);
-        }
+        // 超时日志已在上方 response.error 分支打印，此处不重复
 
         // 客户端断连 — 不浪费重试
         if (clientSignal?.aborted) {

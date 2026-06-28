@@ -1,12 +1,11 @@
 /**
  * Tool Executor — LLM tool calling + 跨源融合重排 + re-inject
  *
- * 流程（照搬 patentExaminator toolExecutor.ts）：
- * 1. 第 1 轮：加载 MCP tools，强制 tool_choice=required 调用搜索
- *    - 不支持 required 的模型自动降级为 auto
- * 2. 后续轮次：LLM 自主判断是否继续搜索（tool_choice=auto）
- * 3. 无 tool calls → LLM 直接回答，结束 loop
- * 4. 跨源融合（RAG + Web）→ 三级降级重排 → re-inject → 最终回答
+ * 流程：
+ * 1. 所有轮次都用 tool_choice=auto：LLM 自主判断是否调用 web_search 或其他工具
+ *    - 不再强制第一轮搜索，完全由 LLM 根据问题需求自主决定
+ * 2. 无 tool calls → LLM 直接回答，结束 loop
+ * 3. 跨源融合（RAG + Web）→ 三级降级重排 → re-inject → 最终回答
  */
 import { logger } from "./logger.js";
 import { mcpClient } from "../mcp/mcpClient.js";
@@ -138,7 +137,17 @@ async function fuseAndRank(
     }
   }
 
-  const ragAsFused: FusedCitation[] = ragCitations.map((c) => ({
+  // ── rag citations 按 sourceId 去重：同一文件的不同 chunk 合并成一个 citation ──
+  // 同一 sourceId 下保留第一个出现的（通常分数最高），避免 LLM 对同一文件分配多个编号
+  const ragDedupMap = new Map<string, typeof ragCitations[0]>();
+  for (const c of ragCitations) {
+    const key = c.sourceId || `fallback:${c.source || ""}`;
+    if (!ragDedupMap.has(key)) {
+      ragDedupMap.set(key, c);
+    }
+  }
+  const dedupedRagCitations = [...ragDedupMap.values()];
+  const ragAsFused: FusedCitation[] = dedupedRagCitations.map((c) => ({
     title: c.source,
     url: (c.sourceId && sourceUrlMap.get(c.sourceId)) || "",
     snippet: c.excerpt,
@@ -250,13 +259,14 @@ export async function executeWithTools(input: ToolExecutorInput): Promise<ToolEx
     return { answer: result.text || "", webSearchCitations: [], mergedCitations: [], toolRounds: 0 };
   }
 
-  // Tool loop（照搬 patentExaminator: 第1轮 required 强制搜索，后续 auto）
+  // 不强制第一轮 web_search：所有 web_search 调用由 LLM 自主决定
+
+  // Tool loop（所有轮次 tool_choice=auto：LLM 自主判断是否调用 web_search 或其他工具）
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    // 第 1 轮强制搜索，后续轮次 LLM 自主判断
-    let toolChoice: "auto" | "required" = round === 0 ? "required" : "auto";
+    const toolChoice: "auto" | "required" = "auto";
 
     // ── web_search 门控：第 2+ 轮时，如果 RAG 已充分命中，提示 LLM 跳过搜索 ──
-    if (round === 1 && ragCitations.length >= 3) {
+    if (round === 1 && ragCitations.length >= 3 && webSearchResults.length > 0) {
       const avgScore = ragCitations.reduce((s, c) => s + c.score, 0) / ragCitations.length;
       if (avgScore >= 0.4) {
         messages.push({
@@ -267,16 +277,9 @@ export async function executeWithTools(input: ToolExecutorInput): Promise<ToolEx
       }
     }
 
-    logger.info(`[ToolExecutor] LLM call #${round + 1} (tool_choice=${toolChoice})`);
+    logger.info(`[ToolExecutor] LLM call #${round + 1} (tool_choice=${toolChoice}, web_search=${webSearchResults.length})`);
 
-    let result = await callLLM({ messages, tools, tool_choice: toolChoice, timeoutMs });
-
-    // 如果 required 不被模型支持，降级为 auto 重试
-    if (result.error && toolChoice === "required") {
-      logger.warn(`[ToolExecutor] tool_choice=required 不支持，降级为 auto`);
-      toolChoice = "auto";
-      result = await callLLM({ messages, tools, tool_choice: toolChoice, timeoutMs });
-    }
+    const result = await callLLM({ messages, tools, tool_choice: toolChoice, timeoutMs });
 
     if (result.error) {
       logger.warn(`[ToolExecutor] LLM error in round ${round + 1}: ${result.error.message}`);
@@ -284,9 +287,9 @@ export async function executeWithTools(input: ToolExecutorInput): Promise<ToolEx
       break;
     }
 
-    // 无 tool calls → LLM 决定直接回答
+    // 无 tool calls → LLM 决定直接回答（不需要重试）
     if (!result.toolCalls || result.toolCalls.length === 0) {
-      logger.info(`[ToolExecutor] LLM returned direct answer`);
+      logger.info(`[ToolExecutor] LLM returned direct answer (web_search_results: ${webSearchResults.length})`);
       finalAnswer = result.text;
       break;
     }

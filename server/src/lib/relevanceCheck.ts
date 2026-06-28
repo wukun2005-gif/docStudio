@@ -36,29 +36,33 @@ export interface RelevanceCheckResult {
 
 // ============ LLM Judge ============
 
-const RELEVANCE_JUDGE_SYSTEM = `You are a strict relevance evaluator for knowledge-grounded document generation.
+const RELEVANCE_JUDGE_SYSTEM = `你是一名严苛的文档相关性核查员。你的任务是逐句判断生成文档中的每个声明是否与用户原始需求直接相关。必须从严判定，宁可误杀不可放过：当你对相关性有任何疑虑时，应标记为 irrelevant。
 
-Your task: Determine whether each sentence/claim in the generated document is relevant to the user's original requirement.
+CORRELATION RULES（严格执行）：
+- relevant：声明直接回答、支撑或展开用户需求的具体方面，删除后文档会在该需求上出现缺口
+- irrelevant：声明是泛泛而谈、偏离主题、 boilerplate 空话、与需求不直接相关、或纯粹的过渡语句
 
-RELEVANCE RULES:
-- relevant: The sentence directly addresses, supports, or elaborates on the user's requirement
-- irrelevant: The sentence is off-topic, tangential, or not related to the user's requirement
+IRRELEVANCE 典型案例（遇到此类必须标记为 irrelevant）：
+- "本报告将对多个维度进行深入分析" — 典型空话，不传递任何与具体需求相关的信息
+- "软件工程是一门复杂的学科" — 常识性铺垫，与用户的具体需求无关
+- "综上所述，情况较为复杂" — 空洞总结
+- 任何不包含具体数据、具体结论、具体事实的过渡性句子
+- 在章节标题后重复用户需求但不提供任何新信息的句子
 
-COMMON PATTERNS OF IRRELEVANCE:
-- Generic filler text that doesn't add value
-- Tangential information not related to the requirement
-- Boilerplate conclusions that don't address the specific topic
-- Repetitive content that doesn't add new information
-
-OUTPUT FORMAT (strict JSON):
+CRITICAL OUTPUT FORMAT（必须严格按以下 JSON schema 输出，不得输出任何非 JSON 内容，不得输出 markdown 代码块）：
 {
   "verdicts": [
-    {"text": "...", "relevant": true, "reason": "直接回答用户需求"},
-    {"text": "...", "relevant": false, "reason": "与用户需求无关"}
+    {"text": "被判定的声明原文", "relevant": true, "reason": "直接回答用户关于XX的具体需求"},
+    {"text": "被判定的声明原文", "relevant": false, "reason": "属于boilerplate空话，不提供与需求相关的具体信息"}
   ],
-  "irrelevant_sentences": ["..."],
-  "relevance_ratio": 0.85
-}`;
+  "irrelevant_sentences": ["不相关声明列表"],
+  "relevance_ratio": 0.72
+}
+
+强制要求：
+1. verdicts 必须覆盖输入中的每一个声明，不得遗漏
+2. relevance_ratio = relevant 数量 / 总声明数量（保留两位小数）
+3. 不要在 JSON 外输出任何解释性文字或 markdown 标记`;
 
 const RELEVANCE_JUDGE_USER = `## 用户原始需求
 
@@ -174,20 +178,40 @@ async function callRelevanceJudge(
     .replace("{{REQUIREMENT}}", requirement)
     .replace("{{DOCUMENT}}", document);
 
+  const dbSettings = readSettingsFromDb();
+  const providers = [providerId];
+  const providerApiKeys: Record<string, string> = {};
+  for (const pid of providers) {
+    const key = apiKey ?? getApiKey(pid);
+    if (key) providerApiKeys[pid] = key;
+  }
+
+  const maxTokens = resolveEvalMaxTokens(modelId);
+  logger.info(`[RelevanceCheck] 模型: ${modelId}, maxTokens: ${maxTokens}`);
+
+  const jsonSchema = {
+    type: "object",
+    properties: {
+      verdicts: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            text: { type: "string" },
+            relevant: { type: "boolean" },
+            reason: { type: "string" },
+          },
+          required: ["text", "relevant"],
+        },
+      },
+      irrelevant_sentences: { type: "array", items: { type: "string" } },
+      relevance_ratio: { type: "number" },
+    },
+    required: ["verdicts", "irrelevant_sentences", "relevance_ratio"],
+  };
+
+  // ── 第一次调用 ──
   try {
-    const dbSettings = readSettingsFromDb();
-    const providers = [providerId];
-    const providerApiKeys: Record<string, string> = {};
-    for (const pid of providers) {
-      const key = apiKey ?? getApiKey(pid);
-      if (key) providerApiKeys[pid] = key;
-    }
-
-    // 评估 judge 使用固定 cap，避免推理模型 4x 放大导致超时
-    const maxTokens = resolveEvalMaxTokens(modelId);
-
-    logger.info(`[RelevanceCheck] 模型: ${modelId}, maxTokens: ${maxTokens}`);
-
     const { response } = await registry.runWithFallback(
       providers,
       {
@@ -201,6 +225,10 @@ async function callRelevanceJudge(
         temperature: 0,
         timeoutMs: 180_000,
         evalMode: true,
+        responseFormat: {
+          type: "json_schema",
+          json_schema: { name: "relevance_result", strict: true, schema: jsonSchema },
+        },
       },
       undefined,
       undefined,
@@ -208,18 +236,55 @@ async function callRelevanceJudge(
     );
 
     const parsed = parseJsonResponse<any>(response.text);
-    if (!parsed) return { score: 1, verdicts: [], irrelevantSentences: [] };
-
-    // LLM 输出 snake_case，需要映射到 camelCase
-    return {
-      score: 1, // 会在 checkDocumentRelevance 中从 verdicts 重新计算
-      verdicts: parsed.verdicts ?? [],
-      irrelevantSentences: parsed.irrelevant_sentences ?? parsed.irrelevantSentences ?? [],
-    };
+    if (parsed && Array.isArray(parsed.verdicts) && parsed.verdicts.length > 0) {
+      return {
+        score: 1,
+        verdicts: parsed.verdicts ?? [],
+        irrelevantSentences: parsed.irrelevant_sentences ?? parsed.irrelevantSentences ?? [],
+      };
+    }
+    logger.warn(`[RelevanceCheck] 首次解析失败或 verdicts 为空，尝试重试`);
   } catch (e) {
-    logger.warn(`[RelevanceCheck] LLM judge call failed: ${e}`);
-    return { score: 1, verdicts: [], irrelevantSentences: [] };
+    logger.warn(`[RelevanceCheck] LLM judge 首次调用失败: ${e}`);
   }
+
+  // ── 重试一次（不使用 json_schema 强制，避免某些模型不支持） ──
+  try {
+    const { response } = await registry.runWithFallback(
+      providers,
+      {
+        modelId: modelId,
+        messages: [
+          { role: "system", content: RELEVANCE_JUDGE_SYSTEM },
+          { role: "user", content: prompt + "\n\n⚠️ 注意：上一次调用未能输出有效的 JSON。请严格按 JSON 格式输出，不要输出任何解释性文字或 markdown 代码块。" },
+        ],
+        apiKey: "",
+        maxTokens,
+        temperature: 0,
+        timeoutMs: 180_000,
+        evalMode: true,
+      },
+      undefined,
+      undefined,
+      providerApiKeys,
+    );
+
+    const parsed = parseJsonResponse<any>(response.text);
+    if (parsed && Array.isArray(parsed.verdicts) && parsed.verdicts.length > 0) {
+      logger.info(`[RelevanceCheck] 重试成功`);
+      return {
+        score: 1,
+        verdicts: parsed.verdicts ?? [],
+        irrelevantSentences: parsed.irrelevant_sentences ?? parsed.irrelevantSentences ?? [],
+      };
+    }
+  } catch (e) {
+    logger.warn(`[RelevanceCheck] LLM judge 重试也失败: ${e}`);
+  }
+
+  // ── 最终降级：score=0.5（而非满分），表示"无法判断" ──
+  logger.warn(`[RelevanceCheck] LLM judge 两次调用/解析均失败，保守降级为 score=0.5`);
+  return { score: 0.5, verdicts: [], irrelevantSentences: [] };
 }
 
 /**
@@ -325,6 +390,7 @@ export async function checkDocumentRelevance(
   const allVerdicts: RelevanceVerdict[] = [];
   const irrelevantSentences: string[] = [];
 
+  let batchFailCount = 0;
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i]!;
     const batchContent = batch.map((section, idx) => {
@@ -332,31 +398,34 @@ export async function checkDocumentRelevance(
       return `### 章节 ${idx + 1}: ${section.title}\n${claims.map((c, i) => `${i + 1}. ${c}`).join("\n")}`;
     }).join("\n\n");
 
-    // 注入 running context：全文大纲 + 前后章节摘要，让评估器有全局视野
-    // 单 batch 也提供大纲，便于评估器把握主线
     const runningCtx = buildRunningContext(i);
     const doc = `${runningCtx}\n\n【当前待评估章节】\n${batchContent}`;
 
     try {
       const result = await callRelevanceJudge(requirement, doc, apiKey, providerId, modelId);
+      // callRelevanceJudge 在失败时返回 score=0.5 的保守降级，这里正常收集 verdicts
       allVerdicts.push(...result.verdicts);
       irrelevantSentences.push(...(result.irrelevantSentences ?? []));
     } catch (e) {
-      // 失败时默认通过
+      // 批次失败时：这些句子不进入相关度计算，但也不影响总分——保守标记为 irrelevant
+      // （之前的逻辑是默认全部 relevant，导致 score=1，这是 bug）
+      batchFailCount++;
       for (const section of batch) {
         const claims = splitIntoClaims(section.content);
         claims.forEach((text) => {
-          allVerdicts.push({ text, relevant: true, reason: "检查失败，默认通过" });
+          allVerdicts.push({ text, relevant: false, reason: "检查失败，保守标记为不相关" });
         });
       }
-      logger.warn(`[RelevanceCheck] 批次 ${i + 1} 失败: ${e}`);
+      logger.warn(`[RelevanceCheck] 批次 ${i + 1} 失败，保守标记为不相关: ${e}`);
     }
   }
 
-  // 计算整体相关度分数
   const total = allVerdicts.length;
   const relevantCount = allVerdicts.filter((v) => v.relevant).length;
-  const score = total > 0 ? relevantCount / total : 1;
+  // 所有批次都失败时 score=0.5（无法判断）；否则按实际 relevant/total 计算
+  const score = total === 0
+    ? 0.5
+    : (batchFailCount === batches.length ? 0.5 : relevantCount / total);
 
   return {
     score,

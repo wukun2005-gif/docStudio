@@ -33,29 +33,32 @@ export interface CompletenessCheckResult {
 
 // ============ LLM Judge ============
 
-const COMPLETENESS_JUDGE_SYSTEM = `You are a strict completeness evaluator for knowledge-grounded document generation.
+const COMPLETENESS_JUDGE_SYSTEM = `你是一名严苛的文档完整度核查员。你的任务是：先从用户原始需求中提取所有具体、可验证的要点，然后逐一检查每个要点是否在生成的文档中被充分覆盖。必须从严判定，宁可误杀不可放过：当你对"是否覆盖"有任何疑虑时，应标记为 missing。
 
-Your task: Extract all key points from the user's requirement, then check if each point is covered in the generated document.
+COMPLETENESS RULES（严格执行）：
+- covered：文档中明确、充分地回答或展开了该需求要点，有具体的事实、数据或结论支撑
+- missing：文档未提及该要点、或仅表面提及但未展开、或回答得不够具体无法满足用户需求
 
-COMPLETENESS RULES:
-- covered: The document explicitly addresses or sufficiently covers the requirement point
-- missing: The document does not address or only superficially touches the requirement point
+EXTRACTION RULES：
+- 提取具体、可验证的需求要点（如"评估 Sprint 3-4 的进度"、"列出关键风险"、"给出 GoToMarket 计划"）
+- 不要提取过于宽泛或模糊的句子（如"写一份报告"不应拆出，必须拆到具体维度）
+- 每个要点应具体到可以独立验证"是否覆盖"
 
-EXTRACTION RULES:
-- Extract concrete, actionable requirement points
-- Do NOT extract vague or overly broad points
-- Each point should be specific enough to verify
-
-OUTPUT FORMAT (strict JSON):
+CRITICAL OUTPUT FORMAT（必须严格按以下 JSON schema 输出，不得输出任何非 JSON 内容，不得输出 markdown 代码块）：
 {
   "requirement_points": [
-    {"point": "具体需求要点", "covered": true, "evidence": "文档中覆盖该要点的内容"},
+    {"point": "具体需求要点", "covered": true, "evidence": "文档中覆盖该要点的具体段落或数据"},
     {"point": "具体需求要点", "covered": false, "evidence": null}
   ],
   "covered_points": ["已覆盖的要点列表"],
   "missing_points": ["遗漏的要点列表"],
-  "completeness_ratio": 0.75
-}`;
+  "completeness_ratio": 0.72
+}
+
+强制要求：
+1. requirement_points 必须覆盖用户需求中所有可独立验证的具体要点
+2. completeness_ratio = covered 数量 / 总要点数量（保留两位小数）
+3. 不要在 JSON 外输出任何解释性文字或 markdown 标记`;
 
 const COMPLETENESS_JUDGE_USER = `## 用户原始需求
 
@@ -116,20 +119,64 @@ async function callCompletenessJudge(
     .replace("{{REQUIREMENT}}", requirement)
     .replace("{{DOCUMENT}}", document);
 
+  const dbSettings = readSettingsFromDb();
+  const providers = [providerId];
+  const providerApiKeys: Record<string, string> = {};
+  for (const pid of providers) {
+    const key = apiKey ?? getApiKey(pid);
+    if (key) providerApiKeys[pid] = key;
+  }
+
+  const maxTokens = resolveEvalMaxTokens(modelId);
+  logger.info(`[CompletenessCheck] 模型: ${modelId}, maxTokens: ${maxTokens}`);
+
+  const jsonSchema = {
+    type: "object",
+    properties: {
+      requirement_points: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            point: { type: "string" },
+            covered: { type: "boolean" },
+            evidence: { type: "string" },
+          },
+          required: ["point", "covered"],
+        },
+      },
+      covered_points: { type: "array", items: { type: "string" } },
+      missing_points: { type: "array", items: { type: "string" } },
+      completeness_ratio: { type: "number" },
+    },
+    required: ["requirement_points", "covered_points", "missing_points", "completeness_ratio"],
+  };
+
+  const parseAndMap = (text: string): CompletenessCheckResult | null => {
+    const parsed = parseJsonResponse<any>(text);
+    if (!parsed) return null;
+    // LLM 按 prompt 用 snake_case 输出，做双向兼容
+    const raw = parsed as unknown as Record<string, unknown>;
+    const coveredPoints = Array.isArray(raw.covered_points)
+      ? (raw.covered_points as string[])
+      : (parsed.coveredPoints ?? []);
+    const missingPoints = Array.isArray(raw.missing_points)
+      ? (raw.missing_points as string[])
+      : (parsed.missingPoints ?? []);
+    const requirementPoints = Array.isArray(raw.requirement_points)
+      ? (raw.requirement_points as RequirementPoint[])
+      : (parsed.requirementPoints ?? []);
+    if (!Array.isArray(requirementPoints) || requirementPoints.length === 0) return null;
+    return {
+      score: parsed.score ?? 1,
+      requirementPoints,
+      coveredPoints,
+      missingPoints,
+    };
+  };
+
+  // ── 第一次调用（带 JSON schema 强制） ──
   try {
-    const dbSettings = readSettingsFromDb();
-    const providers = [providerId];
-    const providerApiKeys: Record<string, string> = {};
-    for (const pid of providers) {
-      const key = apiKey ?? getApiKey(pid);
-      if (key) providerApiKeys[pid] = key;
-    }
-
-    // 评估 judge 使用固定 cap，避免推理模型 4x 放大导致超时
-    const maxTokens = resolveEvalMaxTokens(modelId);
-
-    logger.info(`[CompletenessCheck] 模型: ${modelId}, maxTokens: ${maxTokens}`);
-
     const { response } = await registry.runWithFallback(
       providers,
       {
@@ -143,18 +190,56 @@ async function callCompletenessJudge(
         temperature: 0,
         timeoutMs: 180_000,
         evalMode: true,
+        responseFormat: {
+          type: "json_schema",
+          json_schema: { name: "completeness_result", strict: true, schema: jsonSchema },
+        },
       },
       undefined,
       undefined,
       providerApiKeys,
     );
 
-    const parsed = parseJsonResponse<CompletenessCheckResult>(response.text);
-    return parsed ?? { score: 1, requirementPoints: [], coveredPoints: [], missingPoints: [] };
+    const result = parseAndMap(response.text);
+    if (result) return result;
+    logger.warn(`[CompletenessCheck] 首次解析失败或要点为空，尝试重试`);
   } catch (e) {
-    logger.warn(`[CompletenessCheck] LLM judge call failed: ${e}`);
-    return { score: 1, requirementPoints: [], coveredPoints: [], missingPoints: [] };
+    logger.warn(`[CompletenessCheck] LLM judge 首次调用失败: ${e}`);
   }
+
+  // ── 重试一次（不使用 json_schema 强制） ──
+  try {
+    const { response } = await registry.runWithFallback(
+      providers,
+      {
+        modelId: modelId,
+        messages: [
+          { role: "system", content: COMPLETENESS_JUDGE_SYSTEM },
+          { role: "user", content: prompt + "\n\n⚠️ 注意：上一次调用未能输出有效的 JSON。请严格按 JSON 格式输出，不要输出任何解释性文字或 markdown 代码块。" },
+        ],
+        apiKey: "",
+        maxTokens,
+        temperature: 0,
+        timeoutMs: 180_000,
+        evalMode: true,
+      },
+      undefined,
+      undefined,
+      providerApiKeys,
+    );
+
+    const result = parseAndMap(response.text);
+    if (result) {
+      logger.info(`[CompletenessCheck] 重试成功`);
+      return result;
+    }
+  } catch (e) {
+    logger.warn(`[CompletenessCheck] LLM judge 重试也失败: ${e}`);
+  }
+
+  // ── 最终降级：score=0.5（而非满分），表示"无法判断" ──
+  logger.warn(`[CompletenessCheck] LLM judge 两次调用/解析均失败，保守降级为 score=0.5`);
+  return { score: 0.5, requirementPoints: [], coveredPoints: [], missingPoints: [] };
 }
 
 /**
@@ -239,12 +324,12 @@ export async function checkDocumentCompleteness(
   // 已被覆盖的要点从 missing 中移除
   for (const cp of coveredPointsSet) missingPointsSet.delete(cp);
 
-  // 综合 score：优先用要点覆盖率，回退到各批 ratio 平均
+  // 综合 score：优先用要点覆盖率，回退到各批 ratio 平均，最后回退到 0.5（而非满分）
   const totalPoints = allRequirementPoints.length;
   const coveredCount = allRequirementPoints.filter((p) => p.covered).length;
   const score = totalPoints > 0
     ? coveredCount / totalPoints
-    : (ratioCount > 0 ? totalRatio / ratioCount : 1);
+    : (ratioCount > 0 ? totalRatio / ratioCount : 0.5);
 
   return {
     score,

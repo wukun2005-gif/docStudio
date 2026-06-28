@@ -222,7 +222,7 @@ async function callConflictDetector(
           apiKey: "",
           maxTokens,
           temperature: 0,
-          timeoutMs: 180_000,
+          timeoutMs: 300_000,
           evalMode: true,
         },
         undefined,

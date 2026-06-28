@@ -134,6 +134,21 @@ function start() {
   // 初始化 DB
   getDb();
 
+  // 启动时清理所有遗留的 generating 状态记录（进程崩溃/退出导致的死锁）
+  try {
+    const { dbRun, dbAll } = require("./lib/dbQuery.js");
+    const stale = dbAll(
+      "SELECT id, title FROM generation_runs WHERE status = 'generating'",
+    );
+    if (stale && stale.length > 0) {
+      stale.forEach((r: { id: string; title: string }) => {
+        dbRun("UPDATE generation_runs SET status = 'crashed' WHERE id = ?", [r.id]);
+      });
+      logger.info(`[Server] 启动清理: ${stale.length} 个遗留生成任务标记为 crashed`);
+    }
+  } catch (e) {
+    // 忽略清理失败，不影响启动
+  }
 
   app.listen(PORT, () => {
     logger.info(`[Server] i-Write server running on http://localhost:${PORT}`);
