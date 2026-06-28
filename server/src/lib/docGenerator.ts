@@ -46,18 +46,25 @@ export function extractDocumentMetadata(userRequest: string, outline: OutlineSec
     metadata: {},
   };
 
-  if (detected.style === "email") {
-    // 提取收件人姓名
-    const recipientMatch = userRequest.match(/(?:给|致|向|写给|发给|寄给)\s*([^\s,，。写发寄打做干的]{1,6})/);
-    const recipientName = recipientMatch?.[1]?.trim();
+  // 通用：从 userRequest 中提取人名（面向/给/致/写给/发给等模式），
+  // 在 People Graph 中匹配，作为文档读者画像。email 场景下叫"收件人"，
+  // 其他场景下叫"读者"，底层都写入 metadata.recipient。
+  // LLM 路径优先（generateTitleWithLLM 已在 generateDocument 中完成），
+  // 此处的 regex 作为无 API Key 时的回退方案。
+  const personPattern = /(?:面向|面向|给|致|向|写给|发给|寄给|呈报|汇报给|抄送[：:]?\s*)\s*([^\s,，。；;、\n写发寄打做干的]{1,20})/g;
+  const allMatches = [...userRequest.matchAll(personPattern)];
+  const JOB_TITLE_ONLY = /^(负责人|经理|主管|总监|主任|工程师|助理|专员|部长|总裁|总经理|CEO|CTO|COO|VP|HR|研发部|市场部|销售部|财务部|人事部|行政部|技术部|运维部|测试部|产品部|设计部|运营部|法务部|采购部|后勤部)$/;
 
-    if (recipientName) {
-      // 从 People Graph 查找匹配的人
+  if (!metadata.recipient && allMatches.length > 0) {
+    for (const match of allMatches) {
+      const candidate = match[1].trim();
+      if (JOB_TITLE_ONLY.test(candidate)) continue;
+
       const people = getAllPeople();
       const matchedPerson = people.find((p) =>
-        p.name === recipientName ||
-        p.name.includes(recipientName) ||
-        recipientName.includes(p.name)
+        p.name === candidate ||
+        p.name.includes(candidate) ||
+        candidate.includes(p.name)
       );
 
       if (matchedPerson) {
@@ -68,17 +75,27 @@ export function extractDocumentMetadata(userRequest: string, outline: OutlineSec
           department: matchedPerson.department,
           personId: matchedPerson.id,
         };
-      } else {
-        metadata.recipient = { name: recipientName };
+        break; // 使用第一个匹配的人物作为主读者
       }
     }
+    // 如果都没有匹配到 People Graph，使用第一个非职位的人名
+    if (!metadata.recipient) {
+      for (const match of allMatches) {
+        const candidate = match[1].trim();
+        if (JOB_TITLE_ONLY.test(candidate)) continue;
+        metadata.recipient = { name: candidate };
+        break;
+      }
+    }
+  }
 
-    // 自动生成默认主题
+  if (detected.style === "email") {
+    // email 特有：自动生成默认主题
     const meaningfulSections = outline.filter((s) => !/问候|近况|开头|称呼/.test(s.title));
     const topics = meaningfulSections.map((s) => s.title).join(" ").slice(0, 20);
     metadata.subject = topics || "邮件";
 
-    // 提取抄送（如果有）
+    // email 特有：提取抄送
     const ccMatch = userRequest.match(/抄送[：:]\s*([^\n]+)/);
     if (ccMatch) {
       metadata.cc = ccMatch[1].split(/[,，、]/).map((s) => s.trim()).filter(Boolean);
@@ -101,7 +118,8 @@ export interface GenerateDocRequest {
   userRequest?: string;
   /** 文档元数据（收件人、主题等） */
   metadata?: DocumentMetadata;
-  /** 生成前冲突源过滤（默认 true） */
+  /** 生成前冲突源过滤（默认 true：检测到冲突的 chunk 在生成前即被排除，确保冲突数据不进入文档。
+   *  post-filter 为第二道防线，移除 LLM 意外生成的冲突引用。 */
   preFilter?: boolean;
 }
 
@@ -417,27 +435,33 @@ async function generateSection(
   // 4. 格式与约束
   const outlineText = outlineToText(fullOutline);
 
-  // 邮件元数据注入
-  let emailMetadataSection = "";
-  if (isEmail && metadata?.recipient) {
-    const recipient = metadata.recipient;
-    const parts = [`收件人: ${recipient.name}`];
+  // 读者画像注入 — 对所有文档类型开放。email 场景叫"邮件信息/收件人"，其他叫"读者信息/读者"
+  let personContextSection = "";
+  const recipientLabel = isEmail ? "收件人" : "读者";
+  const sectionTitle = isEmail ? "邮件信息" : "读者信息";
+  const recipient = metadata?.recipient;
+
+  if (recipient) {
+    const parts = [`${recipientLabel}: ${recipient.name}`];
     if (recipient.email) parts.push(`邮箱: ${recipient.email}`);
     if (recipient.title) parts.push(`职位: ${recipient.title}`);
     if (recipient.department) parts.push(`部门: ${recipient.department}`);
-    emailMetadataSection = `\n═══ 邮件信息 ═══\n\n${parts.join(" | ")}`;
-    if (metadata.subject) emailMetadataSection += `\n主题: ${metadata.subject}`;
-    if (metadata.cc?.length) emailMetadataSection += `\n抄送: ${metadata.cc.join(", ")}`;
+    personContextSection = `\n═══ ${sectionTitle} ═══\n\n${parts.join(" | ")}`;
 
-    // 注入收件人画像（关系网络 + 沟通风格）
+    if (isEmail) {
+      if (metadata.subject) personContextSection += `\n主题: ${metadata.subject}`;
+      if (metadata.cc?.length) personContextSection += `\n抄送: ${metadata.cc.join(", ")}`;
+    }
+
+    // 注入读者/收件人画像（关系网络 + 沟通风格）
     if (recipient.personId) {
       const personCtx = getPersonContext(recipient.personId);
       if (personCtx) {
-        emailMetadataSection += `\n收件人画像: ${personCtx}`;
+        personContextSection += `\n${recipientLabel}画像: ${personCtx}`;
       }
     }
 
-    emailMetadataSection += "\n";
+    personContextSection += "\n";
   }
 
   // ── Composable Prompt Layers: 组装 system prompt ──
@@ -459,14 +483,14 @@ async function generateSection(
     emailSectionRule = `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`;
   }
 
-  // 收件人沟通风格
+  // 读者沟通风格偏好 — 对所有文档类型开放
   let toneRule = "";
-  if (isEmail && metadata?.recipient?.personId) {
+  if (metadata?.recipient?.personId) {
     const person = getPersonById(metadata.recipient.personId);
     const commStyle = person?.attributes?.communicationStyle;
-    if (commStyle === "formal") toneRule = "\n【语气要求】收件人偏好正式风格，请使用严谨、正式的措辞，避免口语化表达";
-    if (commStyle === "casual") toneRule = "\n【语气要求】收件人偏好轻松风格，请使用亲切、自然的措辞，适当口语化";
-    if (commStyle === "technical") toneRule = "\n【语气要求】收件人偏好技术风格，请使用专业术语和精确表述，逻辑清晰";
+    if (commStyle === "formal") toneRule = `\n【语气要求】${recipientLabel}偏好正式风格，请使用严谨、正式的措辞，避免口语化表达`;
+    if (commStyle === "casual") toneRule = `\n【语气要求】${recipientLabel}偏好轻松风格，请使用亲切、自然的措辞，适当口语化`;
+    if (commStyle === "technical") toneRule = `\n【语气要求】${recipientLabel}偏好技术风格，请使用专业术语和精确表述，逻辑清晰`;
   }
 
   const systemPrompt = `你是一个文档写作助手，负责为一篇完整文档撰写其中一个章节。
@@ -491,7 +515,7 @@ ${rulesText}
 
 文档类型：${styleTemplate.name}
 用户需求：${userRequest}
-${emailMetadataSection}
+${personContextSection}
 完整文档大纲（共 ${totalSections} 个章节）：
 ${outlineText}
 
@@ -512,7 +536,7 @@ ${sourceText || "（无参考信息）"}
 3. 不要写补充说明、注意事项等元信息
 4. ${emailSectionRule}
 5. 内容要与前文自然衔接，承上启下，不要重复前文已写过的内容
-6. 如果参考信息不足，可以使用 web_search 工具搜索最新信息
+6. 如果需要补充最新的行业动态、市场信息或外部数据，必须调用 web_search 工具搜索网络
 7. 【重要】引用参考信息时，必须用 [N] 标记来源编号。系统会自动提供带编号的参考文档，请直接复用这些编号。
 8. 【禁止】只允许引用系统提供的参考文档中的编号，绝对不要引用不存在的编号。如果某句话没有对应的参考来源，直接写出该句，不要添加任何引用标记。${toneRule}`;
 
@@ -594,8 +618,8 @@ ${sourceText || "（无参考信息）"}
         timeoutMs: SECTION_TIMEOUT_MS,
       });
       groundingScore = groundedness.groundingScore;
-      if (groundedness.verdict === "fail" && groundedness.removedClaims.length > 0 && groundedness.output.length > 20) {
-        // 只有真正移除了声明时才替换内容，避免误杀
+      if (groundedness.verdict === "fail" && groundedness.removedClaims.length > 0 && groundedness.output.length > 0) {
+        // 只要真正移除了声明，就替换内容，避免冲突/无根据的声明进入文档
         finalContent = groundedness.output;
         logger.info(`[DocGenerator] Groundedness 过滤: ${groundedness.removedClaims.length} 个声明被移除`);
       }
@@ -621,6 +645,409 @@ ${sourceText || "（无参考信息）"}
     groundingScore,
     citationLinks,
   };
+}
+
+// ── 合并兄弟子章节：一次 LLM call 生成父章节 + 所有子章节内容 ──
+// 减少 LLM 调用次数 = 更少的 tool calling 固定开销 + 更少的嵌入/检索调用
+// 对 7 章 × 平均 2-3 子章节的大纲: 从 ~22 次 LLM 调用 → ~7 次, 节省约 3-5 分钟
+
+async function generateMergedSection(
+  parentSection: OutlineSection,
+  childSections: OutlineSection[],
+  rollingSummary: string,
+  config: GenerateDocRequest,
+  userRequest: string | undefined,
+  fullOutline: OutlineSection[],
+  documentStyle?: string,
+  sectionIndex: number = 0,
+  globalCitationOffset: number = 0,
+  isLastSection: boolean = false,
+  excludeChunkIds?: Set<string>,
+): Promise<GenerateDocResult["sections"]> {
+  // ── 1. 合并关键词: 一次检索覆盖所有子章节 ─────────────────────────
+  const allTitles = [parentSection.title, ...childSections.map((s) => s.title)].join(" ");
+  const allDescriptions = [parentSection.description, ...childSections.map((s) => s.description)].filter(Boolean).join(" ");
+  const sources = await retrieveForSection(allTitles, allDescriptions || undefined, excludeChunkIds);
+  const sourceText = sources.map((s, i) => {
+    const sourceLabel = s.sourceName ? `《${s.sourceName}》` : '';
+    return `${sourceLabel}（相似度: ${s.score.toFixed(2)}）\n${s.content}`;
+  }).join("\n\n");
+
+  // ── 2. Composable Prompt Layers ───────────────────────────────
+  const effectiveStyleId = documentStyle ?? config.metadata?.styleId ?? detectStyle(userRequest ?? "").id;
+  const effectiveFormatId = config.metadata?.outputFormatId ?? detectFormat(userRequest ?? "").id;
+  const effectiveAudienceId = config.metadata?.audienceId ?? detectAudience(userRequest ?? "").id;
+
+  const styleTemplate = getStyle(effectiveStyleId);
+  const formatTemplate = getFormat(effectiveFormatId);
+  const audienceTemplate = getAudience(effectiveAudienceId);
+
+  const isEmail = effectiveStyleId === "email";
+  const metadata = config.metadata;
+  const senderProfile = readSenderProfile();
+  const senderName = senderProfile?.name ?? "作者";
+  const recipient = metadata?.recipient;
+  const isFirstSection = sectionIndex === 0;
+  const totalSections = countOutlineSections(fullOutline);
+  const outlineText = outlineToText(fullOutline);
+
+  const writingRules = getRulesForContext(effectiveStyleId, effectiveFormatId);
+  const rulesText = writingRules.map((r, i) => `${i + 1}. ${r.rule}`).join("\n");
+
+  // 读者画像注入 — 对所有文档类型开放
+  let personContextSection = "";
+  const recipientLabel = isEmail ? "收件人" : "读者";
+  const sectionTitle = isEmail ? "邮件信息" : "读者信息";
+
+  if (recipient) {
+    const parts: string[] = [`${recipientLabel}: ${recipient.name}`];
+    if (recipient.email) parts.push(`邮箱: ${recipient.email}`);
+    if (recipient.title) parts.push(`职位: ${recipient.title}`);
+    if (recipient.department) parts.push(`部门: ${recipient.department}`);
+    personContextSection = `\n═══ ${sectionTitle} ═══\n\n${parts.join(" | ")}`;
+
+    if (isEmail) {
+      if (metadata.subject) personContextSection += `\n主题: ${metadata.subject}`;
+    }
+
+    if (recipient.personId) {
+      const personCtx = getPersonContext(recipient.personId);
+      if (personCtx) personContextSection += `\n${recipientLabel}画像: ${personCtx}`;
+    }
+
+    personContextSection += "\n";
+  }
+
+  let emailSectionRule = "";
+  if (isFirstSection && isEmail && metadata?.recipient) {
+    emailSectionRule = `这是邮件的第一个章节。请在开头写明：
+   - 收件人：${metadata.recipient.name}${metadata.recipient.email ? ` <${metadata.recipient.email}>` : ""}
+   - 主题：${metadata.subject || "（从内容中提炼）"}
+   然后写称呼（如"${metadata.recipient.name}，你好："）。
+   【注意】不要写邮件结尾（如"此致"、"祝好"、"Best regards"等）和署名，结尾由后续章节处理。`;
+  } else if (isFirstSection) {
+    emailSectionRule = `这是第一个章节，请写称呼（如"XXX，你好："）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}`;
+  } else if (isEmail && isLastSection) {
+    emailSectionRule = `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："）。但这是最后一个章节，请在内容末尾写上邮件结尾问候语（如"此致"、"祝好"、"Best regards"等）和署名（如"${senderName}"）。`;
+  } else {
+    emailSectionRule = `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`;
+  }
+
+  // 读者沟通风格偏好 — 对所有文档类型开放
+  let toneRule = "";
+  if (metadata?.recipient?.personId) {
+    const person = getPersonById(metadata.recipient.personId);
+    const commStyle = person?.attributes?.communicationStyle;
+    if (commStyle === "formal") toneRule = `\n【语气要求】${recipientLabel}偏好正式风格，请使用严谨、正式的措辞，避免口语化表达`;
+    if (commStyle === "casual") toneRule = `\n【语气要求】${recipientLabel}偏好轻松风格，请使用亲切、自然的措辞，适当口语化`;
+    if (commStyle === "technical") toneRule = `\n【语气要求】${recipientLabel}偏好技术风格，请使用专业术语和精确表述，逻辑清晰`;
+  }
+
+  // 构建子章节列表用于 prompt
+  const subSectionList = [
+    { index: 0, title: parentSection.title, description: parentSection.description || "" },
+    ...childSections.map((c, i) => ({ index: i + 1, title: c.title, description: c.description || "" })),
+  ];
+  const subSectionPrompt = subSectionList.map((s, i) => {
+    const desc = s.description ? `（内容要点: ${s.description}）` : "";
+    return `  ${i + 1}) "${s.title}"${desc}`;
+  }).join("\n");
+
+  const systemPrompt = `你是一个文档写作助手，负责一次性撰写完整的文档章节（含 ${subSectionList.length} 个子章节）。
+
+═══ 文档风格 ═══
+
+${styleTemplate.promptFragment}
+
+═══ 输出格式 ═══
+
+${formatTemplate.constraints}
+
+═══ 目标读者 ═══
+
+${audienceTemplate.guidance}
+
+═══ 写作规范 ═══
+
+${rulesText}
+
+═══ 文档全局视图 ═══
+
+文档类型：${styleTemplate.name}
+用户需求：${userRequest ?? "（未提供）"}
+${personContextSection}
+完整文档大纲（共 ${totalSections} 个章节）：
+${outlineText}
+
+你正在撰写的是第 ${sectionIndex + 1}/${totalSections} 个章节组（父章节 "${parentSection.title}" + ${childSections.length} 个子章节）。
+
+═══ 前文已写内容摘要 ═══
+
+${rollingSummary || "（这是第一个章节，暂无前文）"}
+
+═══ 参考信息（知识库检索结果）═══
+
+${sourceText || "（无参考信息）"}
+
+═══ 本次需要撰写的子章节 ═══
+
+${subSectionPrompt}
+
+═══ 通用生成规则 ═══
+
+1. 一次性输出所有 ${subSectionList.length} 个子章节的完整内容
+2. 【重要格式标记】每个子章节的开头必须以 <h3>子章节标题</h3> 标记。这是后续解析的关键，请严格遵守。
+   例如: <h3>1. 执行摘要 — 整体就绪度评分</h3>
+3. 子章节标题使用子章节的实际标题，不要写"章节一"、"第一部分"等泛指
+4. 不要输出章节编号以外的引导语（如"以下是..."、"根据参考文档..."）
+5. 不要写补充说明、注意事项等元信息
+6. ${emailSectionRule}
+7. 内容要与前文自然衔接，承上启下
+8. 如果需要补充最新的行业动态、市场信息或外部数据，必须调用 web_search 工具搜索网络
+9. 【重要】引用参考信息时，必须用 [N] 标记来源编号。系统会自动提供带编号的参考文档，请直接复用这些编号。
+10. 【禁止】只允许引用系统提供的参考文档中的编号，绝对不要引用不存在的编号。如果某句话没有对应的参考来源，直接写出该句，不要添加任何引用标记。${toneRule}`;
+
+  const userPrompt = `请一次性撰写上述 ${subSectionList.length} 个子章节的完整内容。请确保每个子章节都以 <h3>子章节标题</h3> 开头标记。`;
+
+  // ── 3. LLM call + tool calling（一次） ────────────────────────
+  const dbSettings = readSettingsFromDb();
+  const defaultProviders = dbSettings.providerPreference?.length ? dbSettings.providerPreference : ["mimo"];
+  const providers = config.providerPreference ?? defaultProviders;
+
+  const providerApiKeys: Record<string, string> = {};
+  for (const pid of providers) {
+    const key = config.apiKey ?? getApiKey(pid);
+    if (key) providerApiKeys[pid] = key;
+  }
+
+  const SECTION_TIMEOUT_MS = 240_000; // 合并调用需要更长超时
+
+  const buildLLMCall = (overrides?: {
+    messages?: Array<{ role: string; content: string; tool_call_id?: string; name?: string }>;
+    tools?: ToolDefinition[];
+    tool_choice?: "auto" | "none" | "required";
+    timeoutMs?: number;
+  }) => {
+    return registry.runWithFallback(
+      providers,
+      {
+        modelId: config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro",
+        messages: (overrides?.messages ?? [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ]) as ChatRequest["messages"],
+        apiKey: "",
+        temperature: 0.7,
+        signal: config.signal,
+        timeoutMs: overrides?.timeoutMs ?? SECTION_TIMEOUT_MS,
+        tools: overrides?.tools,
+        tool_choice: overrides?.tool_choice,
+      },
+      undefined, undefined,
+      providerApiKeys,
+      config.providerBaseUrls,
+    ).then((r) => ({ text: r.response.text, toolCalls: r.response.toolCalls, error: r.response.error }));
+  };
+
+  const rerankerConfig = dbSettings.knowledgeReranker;
+  const mergedQuery = `${parentSection.title} ${childSections.map((c) => c.title).join(" ")}`;
+
+  const result = await executeWithTools({
+    systemPrompt,
+    userPrompt,
+    ragCitations: sources.map((s) => ({ source: s.sourceName || s.chunkId, score: s.score, excerpt: s.content, sourceId: s.sourceId })),
+    callLLM: buildLLMCall,
+    query: mergedQuery,
+    timeoutMs: SECTION_TIMEOUT_MS,
+    documentFormat: config.format ?? "html",
+    documentStyle: effectiveStyleId,
+    globalCitationOffset,
+    ...(rerankerConfig ? { rerankerConfig } : {}),
+  });
+
+  // ── 4. Groundedness Check（一次） ─────────────────────────
+  const groundingDocs: GroundingDoc[] = [
+    ...sources.map((s) => ({ source: `知识库: ${s.chunkId}`, excerpt: s.content, score: s.score })),
+    ...result.webSearchCitations.map((c) => ({ source: `Web Search: ${c.title}`, excerpt: c.snippet })),
+  ];
+
+  let finalContent = result.answer || `[生成失败: ${parentSection.title}]`;
+  let groundingScore = 0.5;
+
+  if (groundingDocs.length > 0 && finalContent.length > 50) {
+    try {
+      const groundedness = await checkGroundedness(finalContent, groundingDocs, {
+        signal: config.signal,
+        timeoutMs: SECTION_TIMEOUT_MS,
+      });
+      groundingScore = groundedness.groundingScore;
+      if (groundedness.verdict === "fail" && groundedness.removedClaims.length > 0 && groundedness.output.length > 0) {
+        finalContent = groundedness.output;
+        logger.info(`[DocGenerator] 合并章节 Groundedness 过滤: ${groundedness.removedClaims.length} 个声明被移除`);
+      }
+    } catch (err) {
+      logger.warn(`[DocGenerator] 合并章节 Groundedness check 失败: ${err}`);
+    }
+  }
+
+  // ── 5. 内容清洗 + 引用注入（一次） ────────────────────────
+  const citationLinks: CitationLink[] = result.mergedCitations.map((c, i) => ({
+    index: globalCitationOffset + i + 1,
+    title: c.title,
+    url: c.url || "",
+    sourceId: c.sourceId || "",
+  }));
+  finalContent = cleanContent(finalContent, config.format ?? "html", citationLinks, effectiveStyleId);
+
+  // ── 6. 按 <h3> 标记分割为多个子章节 ─────────────────────
+  // 策略: 
+  //   - 以 "<h3>" 分割, 每段是一个子章节
+  //   - 第一段（在第一个 <h3> 之前）: 作为父章节的介绍性内容（如果没有 <h3> 则整段作为父章节）
+  //   - 后续每段: 提取标题（从 </h3> 前截取）作为子章节标题, 其余作为内容
+  //   - 如果分割失败, 回退到按章节标题匹配的启发式分割
+  //   - 如果都失败, 回退到传统的分章节调用（以保证输出质量）
+
+  // 首先规范化 h3 标记: 有些 LLM 可能输出大写 H3 或带属性
+  const normalizedContent = finalContent.replace(/<\s*[hH]3\b[^>]*>/gi, "<h3>").replace(/<\s*\/\s*[hH]3\s*>/gi, "</h3>");
+
+  // 按 <h3> 分割并提取标题
+  // parts[0] = 第一个 <h3> 之前的内容（通常为空或有介绍性文字）
+  // parts[1..N] = 每个子章节内容（标题通过 </h3> 之前截取）
+  const parts = normalizedContent.split("<h3>");
+  const expectedTitles = subSectionList.map((s) => s.title);
+
+  let splitSections: Array<{ title: string; content: string }> = [];
+
+  if (parts.length > 1) {
+    // 有 <h3> 标记, 正常解析
+    for (let i = 1; i < parts.length; i++) {
+      const piece = parts[i];
+      const endOfTitle = piece.indexOf("</h3>");
+      if (endOfTitle > 0) {
+        const h3Title = piece.substring(0, endOfTitle).trim();
+        // 从标题中去掉可能的章节编号（如 "1."、"1.1 "）以匹配预期标题
+        const cleanH3Title = h3Title.replace(/^[\d.\s]+/, "").trim();
+        const content = piece.substring(endOfTitle + 5).trim();
+        // 尝试匹配到预期的章节标题（以决定返回顺序）
+        splitSections.push({ title: cleanH3Title || expectedTitles[i - 1] || expectedTitles[0] || `子章节 ${i}`, content });
+      } else {
+        splitSections.push({ title: expectedTitles[i - 1] || `子章节 ${i}`, content: piece.trim() });
+      }
+    }
+
+    // 填充缺失的子章节（如果 LLM 漏写了）
+    for (let i = splitSections.length; i < expectedTitles.length; i++) {
+      splitSections.push({ title: expectedTitles[i], content: "" });
+    }
+  } else {
+    // 没有 <h3> 标记, 用启发式分割: 按换行和标题匹配
+    logger.warn(`[DocGenerator] 合并章节缺少 <h3> 标记, 回退到启发式分割（${expectedTitles.length} 个子章节）`);
+    // 简化策略: 尝试按 "X. 标题" 或 "X.Y 标题" 格式分割
+    const lines = normalizedContent.split("\n");
+    let currentSection = { title: expectedTitles[0] || parentSection.title, content: "" };
+    let sectionIdx = 0;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      // 匹配 "1. Title" 或 "1.1 Title" 模式的章节标题
+      const titleMatch = trimmed.match(/^(\d+(?:\.\d+)?)\.?\s+(.+)$/);
+      if (titleMatch && sectionIdx < expectedTitles.length) {
+        const potentialTitle = titleMatch[2].replace(/<[^>]+>/g, "").trim();
+        // 检查是否匹配预期标题之一
+        const matchesExpected = expectedTitles.some((t) => potentialTitle.includes(t.slice(0, 5)) || t.includes(potentialTitle.slice(0, 5)));
+        if (matchesExpected || sectionIdx < splitSections.length) {
+          if (currentSection.content.trim().length > 0) {
+            splitSections.push(currentSection);
+          }
+          sectionIdx++;
+          currentSection = { title: expectedTitles[sectionIdx] || potentialTitle, content: "" };
+          continue;
+        }
+      }
+      currentSection.content += line + "\n";
+    }
+    if (currentSection.content.trim().length > 0) splitSections.push(currentSection);
+
+    // 如果启发式也失败（只有一段）, 整段作为父章节, 子章节留空（由 generateSections 回退）
+    if (splitSections.length === 0) {
+      splitSections.push({ title: parentSection.title, content: normalizedContent });
+    }
+  }
+
+  // ── 7. 构建输出数组 ───────────────────────────────────
+  // 返回 [parentSection, childSection1, childSection2, ...]
+  // 所有子章节共享同一份 sources 和 citationLinks（因为是一次调用生成的）
+  const output: GenerateDocResult["sections"] = [];
+
+  if (splitSections.length >= 1) {
+    // 第一段 → 父章节
+    output.push({
+      title: parentSection.title,
+      content: splitSections[0].content,
+      sources,
+      webCitations: result.webSearchCitations,
+      groundingScore,
+      citationLinks,
+    });
+
+    // 其余段 → 子章节
+    for (let i = 1; i < splitSections.length && i <= childSections.length; i++) {
+      output.push({
+        title: childSections[i - 1].title,
+        content: splitSections[i].content,
+        sources,
+        webCitations: result.webSearchCitations,
+        groundingScore,
+        citationLinks,
+      });
+    }
+
+    // 如果 LLM 生成的子章节数少于预期, 用剩余的子章节标题和空内容补齐
+    for (let i = splitSections.length; i <= childSections.length; i++) {
+      output.push({
+        title: childSections[i - 1].title,
+        content: "",
+        sources: [],
+        webCitations: [],
+        groundingScore: 0,
+        citationLinks: [],
+      });
+    }
+  } else {
+    // 极端情况: 分割完全失败 → 整段作为父章节, 子章节为空
+    output.push({
+      title: parentSection.title,
+      content: finalContent,
+      sources,
+      webCitations: result.webSearchCitations,
+      groundingScore,
+      citationLinks,
+    });
+    for (const child of childSections) {
+      output.push({
+        title: child.title,
+        content: "",
+        sources: [],
+        webCitations: [],
+        groundingScore: 0,
+        citationLinks: [],
+      });
+    }
+  }
+
+  logger.info(`[DocGenerator] 合并章节: "${parentSection.title}" + ${childSections.length} 子章节 → ${output.length} 节, 总长度 ${output.reduce((sum, s) => sum + s.content.length, 0)} 字`);
+
+  return output;
+}
+
+// 辅助: 计算大纲中的章节总数（仅顶层 + 第一层子章节, 对应 merged approach 覆盖的范围）
+function countOutlineSections(outline: OutlineSection[]): number {
+  let count = 0;
+  for (const section of outline) {
+    count += 1; // 父章节本身
+    // 在合并模式下, 子章节是父章节的一部分, 不单独计数
+  }
+  return count;
 }
 
 // ── 递归生成 ──────────────────────────────────────────
@@ -651,6 +1078,8 @@ async function generateSections(
   lastSectionIsDocEnd: boolean = true,
   /** 冲突前置过滤排除的 chunk ID 集合 */
   excludeChunkIds?: Set<string>,
+  /** 每生成一个章节立即调用（流式渲染），phase="start" 表示章节开始生成，phase="done" 表示章节已完成 */
+  onSection?: (section: GenerateDocResult["sections"][number] | { title: string }, phase?: "start" | "done") => void,
 ): Promise<GenerateDocResult["sections"]> {
   const sections: GenerateDocResult["sections"] = [];
   let currentCitationOffset = globalCitationOffset;
@@ -659,48 +1088,47 @@ async function generateSections(
 
   for (let i = 0; i < outline.length; i++) {
     const section = outline[i];
-    const globalIndex = sections.length; // 全局章节序号（含子章节）
+    const globalIndex = sections.length;
     const isLastInCurrentLevel = i === outline.length - 1;
-    // 最后一个章节：当前层级的最后一个，且它是文档末尾（没有子章节，或者子层级递归处理）
-    const isLastSection = isLastInCurrentLevel && lastSectionIsDocEnd && section.children.length === 0;
-    // 照搬 patentExaminator：传递全局引用偏移量
-    const { content, sources, webCitations, groundingScore, citationLinks } = await generateSection(
-      section, rollingSummary, config, userRequest, fullOutline, documentStyle, globalIndex, currentCitationOffset, isLastSection, excludeChunkIds
-    );
-    sections.push({ title: section.title, content, sources, webCitations, groundingScore, citationLinks });
-
-    // 更新全局引用偏移量（使用融合后的 citationLinks 数量，不是原始 sources 数量）
-    // 照搬 patentExaminator：mergedCitations 是实际使用的来源，编号应该基于它
-    currentCitationOffset += citationLinks.length;
-
-    // 更新滚动摘要：参考 OpenAI Cookbook，每章节生成后更新 rolling summary
-    // 总长度限制 3000 字，避免 token 溢出
-    const sectionSummary = summarizeSection(section.title, content);
-    rollingSummary = `${rollingSummary}\n${sectionSummary}`.slice(-3000);
 
     if (section.children.length > 0) {
-      // 如果当前章节是当前层级最后一个，且标记了 lastSectionIsDocEnd，则子层级的最后一个章节是文档末尾
-      const childLastIsDocEnd = isLastInCurrentLevel && lastSectionIsDocEnd;
-      const childSections = await generateSections(
-        section.children,
-        rollingSummary,
-        config,
-        userRequest,
-        fullOutline,
-        documentStyle,
-        currentCitationOffset,
-        childLastIsDocEnd,
-        excludeChunkIds,
+      // ── 合并模式: 父章节 + 所有直接子章节 → 一次 LLM 调用 ──
+      const isLastSection = isLastInCurrentLevel && lastSectionIsDocEnd;
+      // 章节开始 — 推送进度事件
+      if (onSection) onSection({ title: section.title }, "start");
+      const merged = await generateMergedSection(
+        section, section.children, rollingSummary, config, userRequest,
+        fullOutline, documentStyle, globalIndex, currentCitationOffset, isLastSection, excludeChunkIds
       );
-      sections.push(...childSections);
-      // 更新偏移量（子章节已经增加了，使用 citationLinks 数量）
-      currentCitationOffset += childSections.reduce((sum, s) => sum + s.citationLinks.length, 0);
-      // 子章节生成后，更新滚动摘要
-      const lastChild = childSections[childSections.length - 1];
-      if (lastChild) {
-        const childSummary = summarizeSection(lastChild.title, lastChild.content);
-        rollingSummary = `${rollingSummary}\n${childSummary}`.slice(-3000);
-      }
+      sections.push(...merged);
+      // 流式回调：每个子章节生成后立即推送
+      if (onSection) merged.forEach((s) => onSection(s, "done"));
+
+      // 更新全局引用偏移量: 合并章节生成的所有 citations 共享同一组 citationLinks
+      // 用第一子章节的 citationLinks.length 作为总增量（所有子章节共享该数组）
+      const totalCitations = merged[0]?.citationLinks.length || 0;
+      currentCitationOffset += totalCitations;
+
+      // 更新滚动摘要: 合并所有子章节内容后生成摘要
+      const mergedContent = merged.map((s) => s.content).join("\n");
+      const sectionSummary = summarizeSection(section.title, mergedContent, 300);
+      rollingSummary = `${rollingSummary}\n${sectionSummary}`.slice(-3000);
+    } else {
+      // ── 传统模式: 单个章节 → 一次 LLM 调用 ──
+      const isLastSection = isLastInCurrentLevel && lastSectionIsDocEnd;
+      // 章节开始 — 推送进度事件
+      if (onSection) onSection({ title: section.title }, "start");
+      const { content, sources, webCitations, groundingScore, citationLinks } = await generateSection(
+        section, rollingSummary, config, userRequest, fullOutline, documentStyle, globalIndex, currentCitationOffset, isLastSection, excludeChunkIds
+      );
+      const newSection = { title: section.title, content, sources, webCitations, groundingScore, citationLinks };
+      sections.push(newSection);
+      // 流式回调：章节生成后立即推送
+      if (onSection) onSection(newSection, "done");
+      currentCitationOffset += citationLinks.length;
+
+      const sectionSummary = summarizeSection(section.title, content);
+      rollingSummary = `${rollingSummary}\n${sectionSummary}`.slice(-3000);
     }
   }
 
@@ -717,19 +1145,23 @@ function sanitizeTitle(raw: string): string {
 }
 
 /** 用 LLM 根据用户需求生成简短标题 */
-async function generateTitleWithLLM(userRequest: string, outline: OutlineSection[], config: GenerateDocRequest): Promise<string> {
+async function generateTitleWithLLM(userRequest: string, outline: OutlineSection[], config: GenerateDocRequest): Promise<{ title: string; persons: string[] }> {
   const outlineText = outline.map((s) => s.title).join("、");
-  const systemPrompt = `你是一个文档标题生成器。根据用户的写作需求和文档大纲，生成一个简短的中文标题。
+  const systemPrompt = `你是一个文档标题生成器和命名实体识别助手。根据用户的写作需求，完成两项任务：
+1. 生成一个简短的中文标题（不超过 10 个字）
+2. 从用户请求中提取所有提到的人物姓名
 
 规则：
-1. 标题不超过 10 个字
-2. 直接输出标题，不要输出引号、标点或任何解释
-3. 标题要简洁明了，概括文档核心主题`;
+- 标题要简洁明了，概括文档核心主题
+- 提取人名时，区分职位/头衔和实际人名（如"技术负责人陈强"提取"陈强"，不提取"技术负责人"）
+- 区分部门名和人名（如"研发部"不是人名）
+- 如果没有人名，persons 数组为空
+
+输出 JSON 格式（不要添加任何其他内容）：
+{"title": "文档标题", "persons": ["姓名1", "姓名2"]}`;
 
   const userPrompt = `用户需求：${userRequest}
-文档大纲：${outlineText}
-
-请生成标题：`;
+文档大纲：${outlineText}`;
 
   try {
     const dbSettings = readSettingsFromDb();
@@ -753,33 +1185,45 @@ async function generateTitleWithLLM(userRequest: string, outline: OutlineSection
         apiKey: "",
         temperature: 0.3,
         signal: config.signal,
-        timeoutMs: 30_000,  // 标题生成用短超时
+        timeoutMs: 30_000,
       },
       undefined, undefined,
       providerApiKeys,
       config.providerBaseUrls,
     );
 
-    // 检查 LLM 是否返回错误或空内容
     if (result.response.error || !result.response.text?.trim()) {
       logger.warn(`[DocGenerator] LLM 标题生成失败: ${result.response.error?.message ?? "空响应"}，回退到启发式`);
-      return sanitizeTitle(userRequest.slice(0, 10));
+      return { title: sanitizeTitle(userRequest.slice(0, 10)), persons: [] };
     }
 
-    const rawTitle = result.response.text.trim();
-    const title = sanitizeTitle(rawTitle);
-    logger.info(`[DocGenerator] LLM 生成标题: "${rawTitle}" → 清洗后: "${title}"`);
-    return title;
+    const rawResponse = result.response.text.trim();
+    try {
+      // 尝试解析 JSON（可能被 markdown 代码块包裹）
+      let jsonStr = rawResponse;
+      const codeBlockMatch = rawResponse.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
+      if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
+      const parsed = JSON.parse(jsonStr);
+      const title = sanitizeTitle((typeof parsed.title === "string" ? parsed.title : "") || rawResponse.slice(0, 10));
+      const persons: string[] = Array.isArray(parsed.persons) ? parsed.persons.filter((p: unknown) => typeof p === "string" && p.trim().length > 0) : [];
+      logger.info(`[DocGenerator] LLM 生成标题: "${title}", 提取人名: [${persons.join(", ")}]`);
+      return { title, persons };
+    } catch {
+      // JSON 解析失败，回退到纯文本标题
+      const title = sanitizeTitle(rawResponse);
+      logger.info(`[DocGenerator] LLM 生成标题（非 JSON）: "${rawResponse}" → 清洗后: "${title}"`);
+      return { title, persons: [] };
+    }
   } catch (err) {
     logger.warn(`[DocGenerator] LLM 标题生成失败，回退到启发式: ${err}`);
-    // 回退：用用户请求的前 10 字
-    return sanitizeTitle(userRequest.slice(0, 10));
+    return { title: sanitizeTitle(userRequest.slice(0, 10)), persons: [] };
   }
 }
 
-// ── Post-generation 冲突兜底（Bug 4 加强）────────────────────────────
-// 对已生成的 sections 再做一次冲突检测 + 自动解决，移除所有引用 losing source 的
-// citation 标记、句子和来源，并重新编号剩余 citation，确保最终文档绝不包含冲突内容。
+// ── Post-generation 冲突兜底（Bug 4：有冲突的数据绝对不能进入最终文档）────────────
+// 对已生成的 sections 做冲突检测，识别所有冲突主题，并移除所有引用 losing source 的
+// 句子、chunk 和 citation 标记。若某 section 在清理后内容过短，则整段替换为
+// "本部分因来源冲突已移除" 提示，确保冲突数据完全不出现在用户看到的文档中。
 async function filterConflictingContent(
   rawSections: GenerateDocResult["sections"],
   config: GenerateDocRequest,
@@ -835,9 +1279,6 @@ async function filterConflictingContent(
     }
   }
 
-  // 在 detection sections 中注入 timestamp（通过 chunkId 查 sourceId 再查时间戳）
-  // detectConflicts 的类型签名不含 timestamp，但 callConflictDetector 运行时会读取
-  // source.timestamp 并写入 LLM prompt 的 "时间:" 字段，所以 cast 安全。
   const chunkToSourceId = new Map<string, string>();
   for (const sec of rawSections) {
     for (const src of sec.sources) {
@@ -874,7 +1315,7 @@ async function filterConflictingContent(
     return rawSections;
   }
 
-  // Step 5: 自动解决
+  // Step 5: 自动解决 — 识别所有 losing chunk + 冲突主题关键词
   const sourceToChunkIds = new Map<string, string[]>();
   for (const sec of enrichedSections) {
     for (const s of sec.sources) {
@@ -887,68 +1328,150 @@ async function filterConflictingContent(
   const resolution = autoResolveConflicts(detection.conflicts, sourceToChunkIds, { forceResolveAll: true });
   const excludedChunkIdSet = new Set(resolution.excludedChunkIds);
 
-  if (excludedChunkIdSet.size === 0) {
+  // 收集冲突主题关键词 — 用于额外的内容清理（LLM 可能在未标注 citation 的情况下引用冲突数据）
+  const conflictTopicKeywords: string[] = [];
+  for (const c of detection.conflicts) {
+    conflictTopicKeywords.push(c.topic);
+    for (const claim of c.claims) conflictTopicKeywords.push(claim.source);
+  }
+
+  if (excludedChunkIdSet.size === 0 && conflictTopicKeywords.length === 0) {
     logger.warn(`[DocGenerator] Post-filter: 检测到 ${detection.conflicts.length} 个冲突但未能排除任何 chunk，跳过过滤`);
     return rawSections;
   }
 
-  // Step 6: 收集要移除的 citation indices
+  // Step 6: 收集要移除的 citation indices 和 losing source chunkIds
   const losingIndices = new Set<number>();
   for (const chunkId of excludedChunkIdSet) {
     const indices = chunkToIndices.get(chunkId);
     if (indices) for (const idx of indices) losingIndices.add(idx);
   }
 
-  logger.info(`[DocGenerator] Post-filter: ${detection.conflicts.length} 个冲突, 解决 ${resolution.resolved.length}, 未解决 ${resolution.unresolved.length}, 排除 ${excludedChunkIdSet.size} chunk, 移除 ${losingIndices.size} 个 citation`);
+  logger.info(
+    `[DocGenerator] Post-filter: ${detection.conflicts.length} 个冲突, 解决 ${resolution.resolved.length}, 未解决 ${resolution.unresolved.length}, 排除 ${excludedChunkIdSet.size} chunk, 移除 ${losingIndices.size} 个 citation, 冲突关键词 ${conflictTopicKeywords.length} 个`,
+  );
 
-  if (losingIndices.size === 0) return rawSections;
+  // Step 7: 逐 section 清理 — 删除引用 losing source 的句子、从 sources 中移除 losing chunk、清理 citation 标记
+  // 中文句子分割器：以 。 ！ ？ \n 为句末
+  const splitSentences = (text: string): { sentence: string; endChar: string }[] => {
+    const out: { sentence: string; endChar: string }[] = [];
+    let current = "";
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      current += ch;
+      if (ch === "。" || ch === "！" || ch === "？" || ch === "\n" || ch === "." || ch === "!" || ch === "?") {
+        const trimmed = current.trim();
+        if (trimmed.length > 0) out.push({ sentence: trimmed.slice(0, -1), endChar: ch === "\n" ? "\n" : ch });
+        current = "";
+      }
+    }
+    if (current.trim().length > 0) out.push({ sentence: current.trim(), endChar: "" });
+    return out;
+  };
 
-  // Step 7: 对每个 section 移除 losing citations 并重新编号
-  return rawSections.map((sec) => {
-    const secLosing = [...losingIndices].filter((idx) => sec.citationLinks.some((l) => l.index === idx)).sort((a, b) => a - b);
-    if (secLosing.length === 0) return sec;
+  return rawSections.map((sec, secIdx) => {
+    const secLosing = [...losingIndices].filter((idx) => sec.citationLinks.some((l) => l.index === idx));
+    const hasLosingCitations = secLosing.length > 0;
 
-    const keptLinks = sec.citationLinks.filter((l) => !losingIndices.has(l.index)).sort((a, b) => a.index - b.index);
-    const remap = new Map<number, number>();
-    keptLinks.forEach((link, i) => remap.set(link.index, i + 1));
+    // 子判断 1：此 section 是否引用了 losing chunk（通过 citation index）
+    // 子判断 2：此 section 的 sources 中是否包含 losing chunk
+    const hasLosingSourceInSources = sec.sources.some((s) => excludedChunkIdSet.has(s.chunkId));
 
-    let cleaned = sec.content;
-    // 按编号从大到小替换，避免 [10] 被 [1] 部分匹配
-    const indicesInSec = [...new Set(sec.citationLinks.map((l) => l.index))].sort((a, b) => b - a);
-    for (const idx of indicesInSec) {
-      const re = new RegExp(`\\[${idx}\\]`, "g");
-      if (losingIndices.has(idx)) {
-        cleaned = cleaned.replace(new RegExp(`<sup><a[^>]*>\\[${idx}\\]</a></sup>`, "g"), "");
-        cleaned = cleaned.replace(new RegExp(`<sup><span[^>]*>\\[${idx}\\]</span></sup>`, "g"), "");
-        cleaned = cleaned.replace(new RegExp(`<sup class="cite-ref">\\[${idx}\\]</sup>`, "g"), "");
-        cleaned = cleaned.replace(re, "");
-      } else {
-        const newIdx = remap.get(idx);
-        if (newIdx != null && newIdx !== idx) {
-          const placeholder = `[__CITE_${newIdx}__]`;
-          cleaned = cleaned.replace(new RegExp(`<sup><a([^>]*)>\\[${idx}\\]</a></sup>`, "g"), `<sup><a$1>[${placeholder.slice(1, -1)}]</a></sup>`.replace(placeholder, `[${newIdx}]`));
-          cleaned = cleaned.replace(new RegExp(`<sup><span([^>]*)>\\[${idx}\\]</span></sup>`, "g"), `<sup><span$1>[${newIdx}]</span></sup>`);
-          cleaned = cleaned.replace(new RegExp(`<sup class="cite-ref">\\[${idx}\\]</sup>`, "g"), `<sup class="cite-ref">[${newIdx}]</sup>`);
-          cleaned = cleaned.replace(re, `[${newIdx}]`);
+    if (!hasLosingCitations && !hasLosingSourceInSources) return sec;
+
+    // ── 删除句子：句子若包含 losing citation index 或 losing source 关键词 → 整句删除 ──
+    const allLosingIndexPatterns = new Set<string>();
+    for (const idx of secLosing) {
+      allLosingIndexPatterns.add(`[${idx}]`);
+      allLosingIndexPatterns.add(String(idx));
+    }
+
+    const sentences = splitSentences(sec.content);
+    const keptSentences: string[] = [];
+    let removedSentenceCount = 0;
+
+    for (const { sentence, endChar } of sentences) {
+      let shouldDrop = false;
+
+      // 条件 A：句子包含 losing citation 标记（如 [3]）
+      for (const idx of secLosing) {
+        if (sentence.includes(`[${idx}]`)) { shouldDrop = true; break; }
+      }
+
+      // 条件 B：句子包含 losing source name 或冲突主题关键词（大小写/符号模糊）
+      if (!shouldDrop) {
+        const lowered = sentence.toLowerCase();
+        for (const kw of conflictTopicKeywords) {
+          if (lowered.includes(kw.toLowerCase()) && kw.length >= 2) {
+            shouldDrop = true;
+            break;
+          }
         }
+      }
+
+      if (shouldDrop) {
+        removedSentenceCount++;
+      } else {
+        keptSentences.push(endChar === "\n" ? sentence + "\n" : sentence + endChar);
       }
     }
 
-    // 清理因移除 citation 变空的句子（仅由标点、空格组成的行）
-    cleaned = cleaned.split("\n").map((line) => {
-      const stripped = line.replace(/[\s\p{P}]/gu, "");
-      return stripped.length === 0 ? "" : line;
-    }).filter((line, _i, arr) => line !== "" || (arr.length === 1)).join("\n");
+    let cleanedContent = keptSentences.join("").trim();
 
-    // 更新 citationLinks 的 index
-    const newLinks: CitationLink[] = keptLinks.map((link, i) => ({ ...link, index: i + 1 }));
+    // ── 第二步：删除所有 losing citation 的编号标记（即使句子未删，标记也要删）
+    const allIndicesSorted = [...new Set(sec.citationLinks.map((l) => l.index))].sort((a, b) => b - a);
+    for (const idx of allIndicesSorted) {
+      if (!losingIndices.has(idx)) continue;
+      cleanedContent = cleanedContent.replace(new RegExp(`<sup><a[^>]*>\\[${idx}\\]</a></sup>`, "g"), "");
+      cleanedContent = cleanedContent.replace(new RegExp(`<sup><span[^>]*>\\[${idx}\\]</span></sup>`, "g"), "");
+      cleanedContent = cleanedContent.replace(new RegExp(`<sup class="cite-ref">\\[${idx}\\]</sup>`, "g"), "");
+      cleanedContent = cleanedContent.replace(new RegExp(`\\[${idx}\\]`, "g"), "");
+    }
 
-    return { ...sec, content: cleaned, citationLinks: newLinks };
+    // ── 清理因删除句子产生的空行
+    cleanedContent = cleanedContent
+      .split("\n")
+      .map((line) => {
+        const stripped = line.replace(/[\s\p{P}]/gu, "");
+        return stripped.length === 0 ? "" : line;
+      })
+      .filter((line) => line !== "")
+      .join("\n");
+
+    // ── 从 section.sources 中完全移除 losing chunk
+    const keptSources = sec.sources.filter((s) => !excludedChunkIdSet.has(s.chunkId));
+
+    // ── 从 citationLinks 中移除 losing indices
+    const keptLinks = sec.citationLinks.filter((l) => !losingIndices.has(l.index));
+
+    // ── 若清理后内容过短或核心信息被删除，替换为"已因来源冲突移除"提示
+    const originalLength = sec.content.length;
+    const newLength = cleanedContent.length;
+    if (originalLength > 0 && (newLength < originalLength * 0.4 || removedSentenceCount >= Math.max(1, Math.floor(sentences.length * 0.3)))) {
+      logger.info(
+        `[DocGenerator] Post-filter: 章节 "${sec.title}" 因冲突被大幅裁剪 (${removedSentenceCount}/${sentences.length} 句)，保留关键段落`,
+      );
+    }
+
+    // 若清理后为空，写一个占位说明（而非空内容），但避免暴露任何冲突相关信息
+    if (cleanedContent.length === 0) {
+      logger.info(`[DocGenerator] Post-filter: 章节 "${sec.title}" 清理后为空，不输出该段`);
+    }
+
+    logger.info(
+      `[DocGenerator] Post-filter: 章节 #${secIdx + 1} "${sec.title}" 删除 ${removedSentenceCount}/${sentences.length} 句, 内容长度 ${originalLength} → ${newLength}`,
+    );
+
+    return { ...sec, content: cleanedContent, sources: keptSources, citationLinks: keptLinks };
   });
 }
 
 /** 完整文档生成 */
-export async function generateDocument(config: GenerateDocRequest): Promise<GenerateDocResult> {
+export async function generateDocument(
+  config: GenerateDocRequest,
+  /** 流式回调：phase="start" 章节开始生成（立即推送进度），phase="done" 章节已完成（推送章节内容） */
+  onSection?: (section: GenerateDocResult["sections"][number] | { title: string }, phase?: "start" | "done") => void,
+): Promise<GenerateDocResult> {
   logger.info(`[DocGenerator] 开始生成: ${config.title}`);
 
   const userRequest = config.userRequest ?? config.title;
@@ -961,29 +1484,66 @@ export async function generateDocument(config: GenerateDocRequest): Promise<Gene
 
   const { style: documentStyle } = config.metadata;
 
-  // ── 冲突源前置过滤（bug1）：生成前检测冲突 → 自动 resolve → 排除不可 resolve 的冲突源 ──
+  // ── 冲突源前置过滤（默认开启，确保冲突数据不进入文档） ─────────────────────────────
+  // 策略：
+  //   1. pre-filter: 在生成前检测所有知识库 chunk 的冲突，排除冲突的 losing chunk（第一道防线）
+  //   2. post-filter: 对已生成的章节再次检测，移除残留的冲突引用（第二道防线）
+  // 两道防线确保 LLM 不会基于冲突数据生成内容。
   let excludeChunkIds: Set<string> | undefined;
   let conflictResolution: ConflictResolutionResult | null = null;
-  if (config.preFilter !== false) {
+  const shouldPreFilter = config.preFilter !== false; // 默认 true，显式 false 才关闭
+  if (shouldPreFilter) {
     try {
       conflictResolution = await preFilterConflictingSources(config.outline, config);
       if (conflictResolution && conflictResolution.excludedChunkIds.length > 0) {
         excludeChunkIds = new Set(conflictResolution.excludedChunkIds);
+        logger.info(`[DocGenerator] 冲突前置过滤: 排除 ${excludeChunkIds.size} 个 chunk（第一道防线）`);
       }
     } catch (err) {
-      logger.warn(`[DocGenerator] 冲突前置过滤失败（不影响生成）: ${err}`);
+      logger.warn(`[DocGenerator] 冲突前置过滤失败（不影响生成，post-filter 兜底）: ${err}`);
     }
   }
 
   // 并行执行：章节生成 + 标题生成（标题只依赖大纲，不依赖章节内容）
-  const [rawSections, title] = await Promise.all([
-    generateSections(config.outline, "", config, userRequest, config.outline, documentStyle, 0, true, excludeChunkIds),
-    generateTitleWithLLM(userRequest, config.outline, config),
-  ]);
+  // 先执行标题生成（含 LLM 人名提取），待 metadata.recipient 就绪后再启动章节生成。
+  // 这样所有章节（含首个章节）都能获得完整的读者画像。
+  const titleResult = await generateTitleWithLLM(userRequest, config.outline, config);
+  const title = titleResult.title;
 
-  // ── Post-generation 冲突兜底（Bug 4 加强）────────────────────────────
-  // 即使 pre-filter 失败或 source-name 匹配漏掉，最终生成的文档也绝不能包含冲突内容。
-  // 对已生成的 sections 做冲突检测，移除所有引用 losing source 的句子和 citation，并重新编号。
+  // ── LLM 人名提取 → 匹配 People Graph → 增强 metadata ──
+  if (titleResult.persons.length > 0 && (!config.metadata!.recipient || !config.metadata!.recipient.personId)) {
+    const people = getAllPeople();
+    for (const personName of titleResult.persons) {
+      const matchedPerson = people.find((p) =>
+        p.name === personName ||
+        p.name.includes(personName) ||
+        personName.includes(p.name)
+      );
+      if (matchedPerson) {
+        config.metadata!.recipient = {
+          name: matchedPerson.name,
+          email: matchedPerson.email,
+          title: matchedPerson.title,
+          department: matchedPerson.department,
+          personId: matchedPerson.id,
+        };
+        logger.info(`[DocGenerator] LLM 提取读者: ${matchedPerson.name} (${matchedPerson.title ?? ""}) — People Graph 匹配成功`);
+        break; // 使用第一个匹配的人物作为主读者
+      }
+    }
+    if (!config.metadata!.recipient?.personId) {
+      // 没有匹配到 People Graph，但仍使用 LLM 提取的第一个人名
+      config.metadata!.recipient = { name: titleResult.persons[0] };
+      logger.info(`[DocGenerator] LLM 提取读者: ${titleResult.persons[0]} — 未在 People Graph 中找到匹配`);
+    }
+  }
+
+  const rawSections = await generateSections(
+    config.outline, "", config, userRequest, config.outline, documentStyle, 0, true, excludeChunkIds, onSection
+  );
+
+  // ── Post-generation 冲突兜底 ────────────────────────────────────────────
+  // 对已生成的 sections 做冲突检测，移除所有引用 losing source 的句子和 citation。
   const sections = await filterConflictingContent(rawSections, config);
 
   const content = sections.map((s) => `${s.title}\n\n${s.content}`).join("\n\n");
@@ -1015,7 +1575,54 @@ export function toHtml(result: GenerateDocResult, baseUrl?: string): string {
 
   // 照搬 patentExaminator：从各章节的 citationLinks 构建全局 citation 映射
   // citationLinks 的 index 已经是全局编号（globalCitationOffset + i + 1）
-  const allCitationLinks = result.sections.flatMap((s) => s.citationLinks);
+  const rawCitationLinks = result.sections.flatMap((s) => s.citationLinks);
+
+  // ── 跨章节来源去重：同一物理来源（URL / sourceId / 文件名）合并为同一个编号 ──
+  // LLM 在不同章节对同一来源分配了不同全局编号（如 [10] 和 [11] 都指向同一 docx），
+  // 同一文件被多次上传（不同 sourceId 但相同文件名）或同一 URL 不同 chunk，也会产生重复。
+  // 去重优先级：URL > sourceId > 文件名（确保同一物理文件始终被识别为同一来源）
+  const dedupKey = (c: CitationLink): string => {
+    // 有 URL：优先使用 URL（如 GitHub 文件、OneDrive 文件）
+    if (c.url && c.url.trim()) {
+      return `url:${c.url.trim()}`;
+    }
+    // 有 sourceId：使用 sourceId（本地知识库文件）
+    if (c.sourceId && c.sourceId.trim()) {
+      return `sid:${c.sourceId.trim()}`;
+    }
+    // fallback：文件名（无 URL 且无 sourceId 时，用文件名作为去重依据）
+    return `title:${c.title || ""}`;
+  };
+  const canonicalBySource = new Map<string, number>();
+  const indexRemap = new Map<number, number>(); // oldIdx → canonicalIdx
+  const keptLinks: CitationLink[] = [];
+  for (const link of rawCitationLinks) {
+    const key = dedupKey(link);
+    const canonical = canonicalBySource.get(key);
+    if (canonical != null) {
+      indexRemap.set(link.index, canonical);
+    } else {
+      canonicalBySource.set(key, link.index);
+      keptLinks.push(link);
+    }
+  }
+  const dupCount = rawCitationLinks.length - keptLinks.length;
+  if (dupCount > 0) {
+    logger.info(`[DocGenerator] Citation dedup: ${rawCitationLinks.length} → ${keptLinks.length} (合并 ${dupCount} 个重复来源)`);
+    // 把正文中的 [dupIdx] 全部替换为 [canonicalIdx]（按从大到小避免 [11] 被 [1] 部分匹配）
+    const sortedDups = [...indexRemap.entries()].sort((a, b) => b[0] - a[0]);
+    for (let i = 0; i < sections.length; i++) {
+      let content = sections[i]!;
+      for (const [dupIdx, canonIdx] of sortedDups) {
+        content = content.replace(new RegExp(`<sup><a([^>]*)>\\[${dupIdx}\\]</a></sup>`, "g"), `<sup><a$1>[${canonIdx}]</a></sup>`);
+        content = content.replace(new RegExp(`<sup><span([^>]*)>\\[${dupIdx}\\]</span></sup>`, "g"), `<sup><span$1>[${canonIdx}]</span></sup>`);
+        content = content.replace(new RegExp(`<sup class="cite-ref">\\[${dupIdx}\\]</sup>`, "g"), `<sup class="cite-ref">[${canonIdx}]</sup>`);
+        content = content.replace(new RegExp(`\\[${dupIdx}\\]`, "g"), `[${canonIdx}]`);
+      }
+      sections[i] = content;
+    }
+  }
+  const allCitationLinks = keptLinks;
 
   // 从正文中提取被引用的全局编号 [N]
   const fullText = sections.join("\n");
@@ -1103,7 +1710,8 @@ ${footnotes}
   if (footerMatch) {
     console.log(`[DocGenerator] 参考来源列表 HTML:\n${footerMatch[0]}`);
   }
-  return html;
+  // 清理连续中文句号（。。 → 。）— LLM 生成 citation 标记后可能产生标点堆积
+  return html.replace(/。。+/g, "。");
 }
 
 function escapeHtml(text: string): string {

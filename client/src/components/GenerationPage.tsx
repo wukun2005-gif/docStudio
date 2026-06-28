@@ -41,6 +41,10 @@ export default function GenerationPage() {
   const [documentStyle, setDocumentStyle] = useState<string | undefined>(undefined);
   const [evaluationMetrics, setEvaluationMetrics] = useState<any>(null);
   const [evaluating, setEvaluating] = useState(false);
+  const [evaluationProgress, setEvaluationProgress] = useState<{
+    totalTasks: number;
+    tasks: Record<string, { taskLabel: string; status: "running" | "done"; score?: number }>;
+  } | null>(null);
 
   // ── Composable Prompt Layers: 维度选择状态 ──
   const [styleOptions, setStyleOptions] = useState<StyleOption[]>([]);
@@ -216,86 +220,269 @@ export default function GenerationPage() {
     // 用 userRequest 作为标题（如"写邮件给苏楠"），而非大纲第一章节名
     const docTitle = currentCase?.userRequest?.trim() || localOutline[0]?.title || "文档";
 
+    const requestBody = JSON.stringify({
+      title: docTitle,
+      outline: localOutline,
+      format: "html",
+      userRequest: currentCase?.userRequest ?? localOutline[0]?.title ?? "",
+      // Composable Prompt Layers: 传递用户选择的维度
+      ...(selectedStyle ? { styleId: selectedStyle } : {}),
+      ...(selectedFormat ? { outputFormatId: selectedFormat } : {}),
+      ...(selectedAudience ? { audienceId: selectedAudience } : {}),
+    });
+
+    // 累积流式章节内容
+    let receivedSections: Array<{ title: string; content: string; groundingScore: number; sources: any[]; webCitations: any[] }> = [];
+
     try {
-      const res = await fetch("/api/generation/generate", {
+      // 使用 SSE 流式接口（POST 请求，手动解析 SSE 流）
+      // 开发环境绕过 Vite 代理直连后端，避免代理层 buffering SSE 响应
+      const apiBase = import.meta.env.DEV ? "http://localhost:3000" : "";
+      console.log("[SSE] POST ->", `${apiBase}/api/generation/generate/stream`);
+      const res = await fetch(`${apiBase}/api/generation/generate/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: docTitle,
-          outline: localOutline,
-          format: "html",
-          userRequest: currentCase?.userRequest ?? localOutline[0]?.title ?? "",
-          // Composable Prompt Layers: 传递用户选择的维度
-          ...(selectedStyle ? { styleId: selectedStyle } : {}),
-          ...(selectedFormat ? { outputFormatId: selectedFormat } : {}),
-          ...(selectedAudience ? { audienceId: selectedAudience } : {}),
-        }),
+        body: requestBody,
       });
-      const data = await res.json();
 
-      if (data.ok) {
-        console.log("[GenerationPage] generate success, content length:", data.content?.length, "first 500:", data.content?.substring(0, 500));
-        // Debug: 检查是否有宽度相关的HTML属性
-        if (data.content) {
-          const widthMatches = data.content.match(/width[:\s]*[:=]["']?\d+|style="[^"]*width[^"]*"/gi);
-          if (widthMatches) console.log("[GenerationPage] FOUND WIDTH in HTML:", widthMatches);
-          const tableMatches = data.content.match(/<table[^>]*>/gi);
-          if (tableMatches) console.log("[GenerationPage] FOUND TABLE tags:", tableMatches);
-        }
-        setDocument(data.content);
-        setTrustScore(data.trustScore);
-        setSections(data.sections ?? []);
-        setDirtySections(new Set());
-        setDocumentStyle(data.documentStyle);
-        if (data.runId) {
-          setRunId(data.runId);
-          updateLastRunId(data.runId);
-        }
-        // 用服务端生成的文件名更新 case 标题
-        if (data.title) {
-          updateTitle(data.title);
-        }
-        updateGeneratedContent(data.content, data.trustScore);
-        updateWorkflowState("completed");
-      } else {
-        const safeError = escapeHtml(data.error ?? "未知错误");
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        const safeError = escapeHtml(errorData.error ?? `HTTP ${res.status}`);
         setDocument(`<p style="color:red">生成失败: ${safeError}</p>`);
-        updateWorkflowState("error", data.error);
+        updateWorkflowState("error", errorData.error);
+        setGenerating(false);
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) {
+        setDocument(`<p style="color:red">生成失败: 无法读取响应流</p>`);
+        updateWorkflowState("error", "无法读取响应流");
+        setGenerating(false);
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let runId: string | null = null;
+      let finalData: any = null;
+      console.log("[SSE] reader created, entering stream loop");
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          console.log("[SSE] stream ended (done=true)");
+          break;
+        }
+
+        const chunk = decoder.decode(value, { stream: true });
+        buffer += chunk;
+        console.log(`[SSE] chunk received (${chunk.length} chars):`, chunk.substring(0, 120).replace(/\n/g, "\\n"));
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        // 解析 SSE 事件（按空行分隔事件）
+        let eventName = "";
+        let eventData = "";
+        for (const line of lines) {
+          if (line === "") {
+            // 事件结束，处理
+            console.log(`[SSE] event dispatched: name="${eventName}", data_len=${eventData.length}`);
+            if (eventName === "start" && eventData) {
+              const startData = JSON.parse(eventData);
+              console.log("[SSE] start event parsed:", startData);
+              if (startData.runId) {
+                runId = startData.runId;
+                setRunId(startData.runId);
+                updateLastRunId(startData.runId);
+              }
+            } else if (eventName === "section-start" && eventData) {
+              const startInfo = JSON.parse(eventData);
+              console.log("[SSE] section-start:", startInfo);
+              // 显示进度状态但不替换 document
+              const status = `<p style="color:#666;font-size:0.9em;padding:10px 0 0 0"><span style="color:#0078d4">●</span> 正在生成 ${startInfo.index + 1}/${startInfo.total}: <strong>${startInfo.title}</strong></p>`;
+              // 用当前已有内容 + 状态提示更新 document（只在还没有内容时显示）
+              const existingContent = receivedSections.map((s) => `<section><h2>${escapeHtml(s.title)}</h2>${s.content}</section>`).join("\n");
+              setDocument(existingContent + status);
+              console.log("[SSE] setDocument called with section-start status");
+            } else if (eventName === "section" && eventData) {
+              const sectionData = JSON.parse(eventData);
+              console.log("[SSE] section:", { title: sectionData.section.title, contentLen: sectionData.section.content?.length });
+              receivedSections.push({
+                title: sectionData.section.title,
+                content: sectionData.section.content,
+                groundingScore: sectionData.section.groundingScore,
+                sources: sectionData.section.sources,
+                webCitations: sectionData.section.webCitations,
+              });
+              // 实时渲染已收到的章节
+              const sectionsHtml = receivedSections.map((s) => `<section><h2>${escapeHtml(s.title)}</h2>${s.content}</section>`).join("\n");
+              setDocument(sectionsHtml);
+              setSections(receivedSections as any);
+              // 更新 trust score 为当前平均分数
+              const groundingScores = receivedSections.map((s) => s.groundingScore).filter((s) => s > 0);
+              if (groundingScores.length > 0) {
+                const avg = groundingScores.reduce((a, b) => a + b, 0) / groundingScores.length;
+                setTrustScore(avg);
+              }
+            } else if (eventName === "done" && eventData) {
+              finalData = JSON.parse(eventData);
+              console.log("[SSE] done event:", { ok: finalData.ok });
+            } else if (eventName === "error" && eventData) {
+              const errData = JSON.parse(eventData);
+              console.log("[SSE] error event:", errData);
+              const safeError = escapeHtml(errData.error ?? "未知错误");
+              setDocument(`<p style="color:red">生成失败: ${safeError}</p>`);
+              updateWorkflowState("error", errData.error);
+              setGenerating(false);
+              return;
+            }
+            eventName = "";
+            eventData = "";
+          } else if (line.startsWith("event: ")) {
+            eventName = line.substring(7).trim();
+          } else if (line.startsWith("data: ")) {
+            eventData += line.substring(6);
+          }
+        }
+      }
+
+      // 处理最终结果
+      if (finalData && finalData.ok) {
+        console.log("[GenerationPage] stream generate success, content length:", finalData.content?.length);
+        setDocument(finalData.content);
+        setTrustScore(finalData.trustScore);
+        setSections(finalData.sections ?? receivedSections as any);
+        setDirtySections(new Set());
+        setDocumentStyle(finalData.documentStyle);
+        if (finalData.runId) {
+          runId = finalData.runId;
+          setRunId(finalData.runId);
+          updateLastRunId(finalData.runId);
+        }
+        if (finalData.title) {
+          updateTitle(finalData.title);
+        }
+        updateGeneratedContent(finalData.content, finalData.trustScore);
+        updateWorkflowState("completed");
+        setGenerating(false);
+
+        // 生成完成后自动触发评估（SSE 流式）
+        if (finalData.runId) {
+          evaluateWithSSE(finalData.runId);
+        }
+      } else if (finalData) {
+        const safeError = escapeHtml(finalData.error ?? "未知错误");
+        setDocument(`<p style="color:red">生成失败: ${safeError}</p>`);
+        updateWorkflowState("error", finalData.error);
+      } else {
+        // 流结束但没有 done 事件，用已收到的章节显示
+        if (receivedSections.length > 0) {
+          const sectionsHtml = receivedSections.map((s) => `<section><h2>${escapeHtml(s.title)}</h2>${s.content}</section>`).join("\n");
+          setDocument(sectionsHtml);
+          updateWorkflowState("completed");
+        } else {
+          setDocument(`<p style="color:red">生成失败: 未收到内容</p>`);
+          updateWorkflowState("error", "未收到内容");
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setDocument(`<p style="color:red">生成失败: ${escapeHtml(msg)}</p>`);
       updateWorkflowState("error", msg);
     } finally {
-      setGenerating(false);
+      // generating state already set above
     }
   }
 
-  // ── 评估内容相关度和完整度 ──
-  const handleEvaluate = async () => {
-    if (!runId) return;
+  // ── 评估内容相关度和完整度（SSE 流式） ──
+  const evaluateWithSSE = async (targetRunId: string) => {
     setEvaluating(true);
+    setEvaluationProgress(null);
+    setEvaluationMetrics(null);
 
     try {
-      const res = await fetch(`/api/generation/${runId}/evaluate`, {
+      const apiBase = import.meta.env.DEV ? "http://localhost:3000" : "";
+      const res = await fetch(`${apiBase}/api/generation/${targetRunId}/evaluate/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userRequest: currentCase?.userRequest ?? localOutline[0]?.title ?? "",
         }),
       });
-      const data = await res.json();
 
-      if (data.ok) {
-        setEvaluationMetrics(data.metrics);
-      } else {
-        console.error("[GenerationPage] Evaluation failed:", data.error);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        console.warn("[GenerationPage] SSE evaluation failed:", err.error);
+        setEvaluating(false);
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) {
+        setEvaluating(false);
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let partialMetrics: any = {};
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        let eventName = "";
+        let eventData = "";
+        for (const line of lines) {
+          if (line === "") {
+            if (eventName === "evaluate-start") {
+              const data = JSON.parse(eventData);
+              setEvaluationProgress({ totalTasks: data.totalTasks, tasks: {} });
+            } else if (eventName === "evaluate-progress") {
+              const data = JSON.parse(eventData);
+              setEvaluationProgress((prev) => prev ? {
+                ...prev,
+                tasks: { ...prev.tasks, [data.task]: data },
+              } : null);
+              // 增量更新对应指标
+              if (data.status === "done" && data.score !== undefined) {
+                partialMetrics[data.task] = { score: data.score };
+                setEvaluationMetrics({ ...partialMetrics });
+              }
+            } else if (eventName === "evaluate-done") {
+              const data = JSON.parse(eventData);
+              if (data.ok) {
+                setEvaluationMetrics(data.metrics);
+              }
+            } else if (eventName === "error") {
+              const data = JSON.parse(eventData);
+              console.warn("[GenerationPage] SSE evaluation error:", data.error);
+            }
+            eventName = "";
+            eventData = "";
+          } else if (line.startsWith("event: ")) {
+            eventName = line.substring(7).trim();
+          } else if (line.startsWith("data: ")) {
+            eventData += line.substring(6);
+          }
+        }
       }
     } catch (err) {
-      console.error("[GenerationPage] Evaluation error:", err);
+      console.warn("[GenerationPage] SSE evaluation stream error:", err);
     } finally {
       setEvaluating(false);
+      setEvaluationProgress(null);
     }
+  };
+
+  const handleEvaluate = async () => {
+    if (!runId) return;
+    evaluateWithSSE(runId);
   };
 
   // ── 章节来源修改回调 ──
@@ -475,6 +662,7 @@ export default function GenerationPage() {
         documentStyle={documentStyle}
         evaluationMetrics={evaluationMetrics}
         evaluating={evaluating}
+        evaluationProgress={evaluationProgress}
         onSectionUpdate={handleSectionUpdate}
         onSourceMove={handleSourceMove}
         onRegenerateSection={handleRegenerateSection}

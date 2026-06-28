@@ -5,7 +5,7 @@
  */
 import { Router } from "express";
 import crypto from "crypto";
-import { generateDocument, toHtml } from "../lib/docGenerator.js";
+import { generateDocument, toHtml, type GenerateDocResult } from "../lib/docGenerator.js";
 import { exportDocument, type ExportFormat, type ExportSection } from "../lib/docExporter.js";
 import { buildProvenanceTree, getProvenanceByRunId } from "../lib/provenanceTree.js";
 import { dbRun, dbGet, dbAll, dbTransaction } from "../lib/dbQuery.js";
@@ -25,15 +25,28 @@ generationRouter.post("/generate", async (req, res) => {
     }
 
     // ── 并发去重：检查是否已有同名文档正在生成 ──
-    const existing = dbGet<{ id: string }>(
-      "SELECT id FROM generation_runs WHERE title = ? AND status = 'generating'",
+    // 注意：若进程中途崩溃/停止，记录可能永远停留在 status='generating'，
+    // 因此用 created_at 时间窗口（10 分钟）判定为「遗留死锁」，自动清理后放行
+    const existing = dbGet<{ id: string; created_at: string }>(
+      "SELECT id, created_at FROM generation_runs WHERE title = ? AND status = 'generating'",
       [title],
     );
 
     if (existing) {
-      logger.warn(`[Generation] 拒绝并发请求: "${title}" 已有生成任务 ${existing.id}`);
-      res.status(409).json({ ok: false, error: "同名文档正在生成中，请等待完成", existingRunId: existing.id });
-      return;
+      // SQLite 时间窗口判定：当前时间 - created_at > 10 分钟 → 视为遗留死锁
+      const staleCheck = dbGet<{ stale: number }>(
+        `SELECT (strftime('%s', 'now', 'localtime') - strftime('%s', ?)) > 60 AS stale`,
+        [existing.created_at],
+      );
+      if (staleCheck?.stale === 1) {
+        logger.warn(`[Generation] 清理遗留死锁记录 ${existing.id} (created_at=${existing.created_at})，允许新请求`);
+        dbRun(`UPDATE generation_runs SET status = 'crashed' WHERE id = ?`, [existing.id],
+          { table: "generation_runs", recordId: existing.id, source: "generation" });
+      } else {
+        logger.warn(`[Generation] 拒绝并发请求: "${title}" 已有生成任务 ${existing.id}`);
+        res.status(409).json({ ok: false, error: "同名文档正在生成中，请等待完成", existingRunId: existing.id });
+        return;
+      }
     }
 
     const runId = crypto.randomUUID();
@@ -70,11 +83,20 @@ generationRouter.post("/generate", async (req, res) => {
 
     // 构建生成树（段落级来源追溯）
     try {
-      const paragraphs = result.sections.flatMap((s, sIdx) =>
-        s.sources.length > 0
-          ? [{ idx: sIdx, title: s.title, groundingScore: s.groundingScore, sources: s.sources.map((src) => ({ chunkId: src.chunkId, score: src.score })) }]
-          : [],
-      );
+      const paragraphs = result.sections.flatMap((s, sIdx) => {
+        const hasSources = s.sources.length > 0;
+        const hasWebCitations = s.webCitations && s.webCitations.length > 0;
+        if (hasSources || hasWebCitations) {
+          return [{
+            idx: sIdx,
+            title: s.title,
+            groundingScore: s.groundingScore,
+            sources: s.sources.map((src) => ({ chunkId: src.chunkId, score: src.score })),
+            webCitations: hasWebCitations ? s.webCitations : undefined,
+          }];
+        }
+        return [];
+      });
       if (paragraphs.length > 0) {
         buildProvenanceTree(runId, paragraphs);
       }
@@ -98,6 +120,157 @@ generationRouter.post("/generate", async (req, res) => {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[Generation] 生成失败: ${msg}`);
     res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** POST /api/generation/generate/stream — 流式生成文档（SSE，章节级推送） */
+generationRouter.post("/generate/stream", async (req, res) => {
+  try {
+    const { title, outline, format, providerPreference, modelId, apiKey, providerBaseUrls, userRequest } = req.body;
+
+    if (!title || !outline) {
+      res.status(400).json({ ok: false, error: "title and outline are required" });
+      return;
+    }
+
+    // ── 并发去重（与非流式版本相同） ──
+    const existing = dbGet<{ id: string; created_at: string }>(
+      "SELECT id, created_at FROM generation_runs WHERE title = ? AND status = 'generating'",
+      [title],
+    );
+
+    if (existing) {
+      const staleCheck = dbGet<{ stale: number }>(
+        `SELECT (strftime('%s', 'now', 'localtime') - strftime('%s', ?)) > 60 AS stale`,
+        [existing.created_at],
+      );
+      if (staleCheck?.stale === 1) {
+        logger.warn(`[Generation] 清理遗留死锁记录 ${existing.id} (created_at=${existing.created_at})，允许新请求`);
+        dbRun(`UPDATE generation_runs SET status = 'crashed' WHERE id = ?`, [existing.id],
+          { table: "generation_runs", recordId: existing.id, source: "generation" });
+      } else {
+        logger.warn(`[Generation] 拒绝并发请求: "${title}" 已有生成任务 ${existing.id}`);
+        res.status(409).json({ ok: false, error: "同名文档正在生成中，请等待完成", existingRunId: existing.id });
+        return;
+      }
+    }
+
+    const runId = crypto.randomUUID();
+    dbRun(`INSERT INTO generation_runs (id, title, outline, format, status) VALUES (?, ?, ?, ?, ?)`,
+      [runId, title, JSON.stringify(outline), format ?? "html", "generating"],
+      { table: "generation_runs", recordId: runId, source: "generation", newData: { title, format: format ?? "html", status: "generating" } });
+
+    // ── 设置 SSE headers ──
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders?.();
+
+    // SSE 推送助手：每次 write 后强制 flush（避免 Node.js/代理 buffering）
+    const writeSSE = (event: string, data: object) => {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // 先推送 runId，让客户端知道请求已被接受
+    writeSSE("start", { ok: true, runId });
+    logger.info(`[Generation] 流式生成开始: ${title}, runId=${runId}, 章节数=${outline.length}`);
+
+    const protocol = req.protocol || "http";
+    const host = req.get("host") || "localhost:3000";
+    const baseUrl = `${protocol}://${host}`;
+
+    // ── 流式生成：每个章节生成后立即推送 SSE ──
+    const totalSections = outline.length;
+    let sectionIndex = 0;
+    const result = await generateDocument({
+      title,
+      outline: outline as OutlineSection[],
+      format: format ?? "html",
+      providerPreference,
+      modelId,
+      apiKey,
+      providerBaseUrls,
+      userRequest,
+    }, (section, phase) => {
+      if (phase === "start") {
+        // 章节开始生成 — 立即推送进度提示
+        writeSSE("section-start", { index: sectionIndex, total: totalSections, title: section.title });
+        logger.info(`[Generation] SSE 推送: section-start [${sectionIndex + 1}/${totalSections}] ${section.title}`);
+      } else {
+        // 章节完成 — 推送章节内容（类型断言：done 阶段 section 是完整对象）
+        const doneSection = section as GenerateDocResult["sections"][number];
+        writeSSE("section", {
+          index: sectionIndex,
+          section: {
+            title: doneSection.title,
+            content: doneSection.content,
+            groundingScore: doneSection.groundingScore,
+            sources: doneSection.sources.map((s) => ({ chunkId: s.chunkId, score: s.score, sourceName: s.sourceName, sourceUrl: s.sourceUrl })),
+            webCitations: doneSection.webCitations,
+          },
+        });
+        logger.info(`[Generation] SSE 推送: section [${sectionIndex + 1}/${totalSections}] ${doneSection.title} (content=${doneSection.content?.length || 0} chars)`);
+        sectionIndex++;
+      }
+    });
+
+    // ── 生成完成：更新 DB 记录，构建 provenance tree ──
+    const htmlContent = toHtml(result, baseUrl);
+    const docTitle = result.title;
+
+    dbRun(`UPDATE generation_runs SET title = ?, content = ?, status = 'done', trust_score = ?, document_style = ?, conflict_resolution = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+      [docTitle, htmlContent, result.trustScore, result.documentStyle, result.conflictResolution ? JSON.stringify(result.conflictResolution) : null, runId],
+      { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "done", trustScore: result.trustScore, documentStyle: result.documentStyle } });
+
+    try {
+      const paragraphs = result.sections.flatMap((s, sIdx) => {
+        const hasSources = s.sources.length > 0;
+        const hasWebCitations = s.webCitations && s.webCitations.length > 0;
+        if (hasSources || hasWebCitations) {
+          return [{
+            idx: sIdx,
+            title: s.title,
+            groundingScore: s.groundingScore,
+            sources: s.sources.map((src) => ({ chunkId: src.chunkId, score: src.score })),
+            webCitations: hasWebCitations ? s.webCitations : undefined,
+          }];
+        }
+        return [];
+      });
+      if (paragraphs.length > 0) {
+        buildProvenanceTree(runId, paragraphs);
+      }
+    } catch (treeErr) {
+      logger.warn(`[Generation] 生成树构建失败（不影响生成）: ${treeErr}`);
+    }
+
+    logger.info(`[Generation] 流式文档生成完成: ${docTitle}`);
+
+    // ── 推送最终结果（done event） ──
+    res.write(`event: done\n`);
+    res.write(`data: ${JSON.stringify({
+      ok: true,
+      runId,
+      title: docTitle,
+      content: htmlContent,
+      sections: result.sections.map((s) => ({ title: s.title, content: s.content, groundingScore: s.groundingScore })),
+      trustScore: result.trustScore,
+      documentStyle: result.documentStyle,
+      ...(result.conflictResolution ? { conflictResolution: result.conflictResolution } : {}),
+    })}\n\n`);
+    res.end();
+
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Generation] 流式生成失败: ${msg}`);
+    // 如果还能写，就写 error event
+    if (!res.writableEnded) {
+      res.write(`event: error\n`);
+      res.write(`data: ${JSON.stringify({ ok: false, error: msg })}\n\n`);
+      res.end();
+    }
   }
 });
 
@@ -218,9 +391,10 @@ generationRouter.get("/:id/sections", (req, res) => {
 
     const outline: Array<{ title: string; description?: string }> = run.outline ? JSON.parse(run.outline) : [];
 
-    // 从 provenance_nodes + kb_chunks + kb_sources 重建 sources
+    // 从 provenance_nodes + kb_chunks + kb_sources 重建 sources（同时包含 web 来源）
     const nodes = dbAll<any>(`
       SELECT p.paragraph_idx, p.paragraph_title, p.grounding_score, p.chunk_id, p.score, p.is_manual,
+             p.web_url, p.web_title, p.web_snippet,
              c.content AS chunk_content, c.source_id,
              s.name AS source_name, s.url AS source_url
       FROM provenance_nodes p
@@ -245,7 +419,7 @@ generationRouter.get("/:id/sections", (req, res) => {
       byIdx.get(n.paragraph_idx)!.push(n);
     }
 
-    // 构建 sections 数组
+    // 构建 sections 数组：从 provenance 中同时提取知识库来源和 web 来源
     const sections = outline.map((sec, idx) => {
       // 优先用 title 匹配，回退到 idx
       const provNodes = byTitle.get(sec.title) ?? byIdx.get(idx) ?? [];
@@ -261,17 +435,27 @@ generationRouter.get("/:id/sections", (req, res) => {
           sourceName: n.source_name ?? undefined,
           sourceUrl: n.source_url ?? undefined,
         }));
+      // 从 provenance 节点中提取 web 来源（有 web_url 的节点）
+      const webCitations = provNodes
+        .filter((n) => n.web_url)
+        .map((n) => ({
+          title: n.web_title || n.web_url,
+          url: n.web_url,
+          snippet: n.web_snippet ?? "",
+        }));
       return {
         title: sec.title,
         content: "", // 无法从 DB 恢复每章节原始内容
         sources,
-        webCitations: [] as Array<{ title: string; url: string; snippet: string }>,
+        webCitations,
         groundingScore: storedGrounding ?? 0.5,
       };
     });
 
-    // 从 HTML footer 提取 web citations 并按内容匹配到章节
-    if (run.content) {
+    // Fallback：如果 provenance 中没有 web 来源（老数据或 web 未写入 provenance），
+    // 尝试从 HTML footer 解析 URL 并按内容匹配到章节
+    const totalWebFromProv = sections.reduce((sum, s) => sum + s.webCitations.length, 0);
+    if (totalWebFromProv === 0 && run.content) {
       const footerMatch = run.content.match(/<footer class="citations">([\s\S]*?)<\/footer>/);
       if (footerMatch) {
         const footerHtml = footerMatch[1];
@@ -452,7 +636,7 @@ function parseCitations(html: string): Array<{ index: number; title: string; url
 }
 
 /** GET /api/generation/:id/export/:format — 导出文档 */
-generationRouter.get("/:id/export/:format", (req, res) => {
+generationRouter.get("/:id/export/:format", async (req, res) => {
   try {
     const run = dbGet<any>("SELECT * FROM generation_runs WHERE id = ?", [req.params.id]);
     if (!run) {
@@ -487,7 +671,7 @@ generationRouter.get("/:id/export/:format", (req, res) => {
       return c;
     });
 
-    const result = exportDocument(format, run.title, sections, resolvedCitations);
+    const result = await exportDocument(format, run.title, sections, resolvedCitations);
 
     res.setHeader("Content-Type", result.contentType);
     res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(run.title)}${result.extension}"`);
@@ -548,10 +732,15 @@ generationRouter.post("/:runId/regenerate-section", async (req, res) => {
             { table: "provenance_nodes", recordId: n.id, source: "generation.regenerate-section" });
         }
       });
-      if (newSectionData.sources.length > 0) {
+      const hasSources = newSectionData.sources.length > 0;
+      const hasWebCitations = newSectionData.webCitations && newSectionData.webCitations.length > 0;
+      if (hasSources || hasWebCitations) {
         buildProvenanceTree(req.params.runId, [{
           idx: sectionIdx,
+          title: newSectionData.title,
+          groundingScore: newSectionData.groundingScore,
           sources: newSectionData.sources.map((src) => ({ chunkId: src.chunkId, score: src.score })),
+          webCitations: hasWebCitations ? newSectionData.webCitations : undefined,
         }]);
       }
     } catch (treeErr) {
@@ -614,6 +803,37 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
     const dbSettings = readSettingsFromDb();
     const effectiveProvider = providerId ?? dbSettings.providerPreference?.[0] ?? "mimo";
     const effectiveModel = modelId ?? dbSettings.modelId ?? "mimo-v2-pro";
+
+    // ── 模型 fallback: 仅当用户显式启用时生效 ─────────────────────────────
+    // 用户明确配置 enableModelFallback[provider] = true 时，
+    // 在主模型超时/失败时自动切换到备用模型。未启用时不切换。
+    const fallbackEnabled = dbSettings.enableModelFallback?.[effectiveProvider] === true;
+    const fallbackModels = fallbackEnabled ? (dbSettings.modelFallbacks?.[effectiveProvider] ?? []) : [];
+    const modelCandidates = [effectiveModel, ...fallbackModels.filter((m) => m !== effectiveModel)];
+
+    logger.info(`[Generation] 评估模型配置: provider=${effectiveProvider}, primaryModel=${effectiveModel}, fallbackEnabled=${fallbackEnabled}, candidates=[${modelCandidates.join(", ")}]`);
+
+    // 封装: 按 modelCandidates 顺序尝试调用，失败时切换（仅 fallback 启用时）
+    async function tryWithFallback<T>(
+      fn: (model: string) => Promise<T>,
+      taskName: string,
+    ): Promise<T> {
+      let lastErr: unknown = null;
+      for (let i = 0; i < modelCandidates.length; i++) {
+        const candidate = modelCandidates[i];
+        try {
+          if (i > 0) logger.info(`[Generation] ${taskName} 尝试备用模型 ${i + 1}/${modelCandidates.length}: ${candidate}`);
+          return await fn(candidate);
+        } catch (err) {
+          lastErr = err;
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.warn(`[Generation] ${taskName} 模型 ${candidate} 失败: ${msg}`);
+          // 若 fallback 未启用，只尝试主模型
+          if (!fallbackEnabled) break;
+        }
+      }
+      throw lastErr ?? new Error(`${taskName} 所有模型均失败`);
+    }
 
     // 获取 API Key：优先使用请求中的，否则从 keyStore 读取
     const apiKey = reqApiKey ?? getApiKey(effectiveProvider);
@@ -697,9 +917,18 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
     // 3 个长推理请求并发会导致全部排队挂起，最终 180s 超时。串行更可靠。
     logger.info(`[Generation] 开始评估: runId=${req.params.id}, provider=${effectiveProvider}, model=${effectiveModel}, sections=${sections.length}`);
 
-    const relevanceResult = await checkDocumentRelevance(sections, requirement, apiKey, effectiveProvider, effectiveModel);
-    const completenessResult = await checkDocumentCompleteness(sections, requirement, apiKey, effectiveProvider, effectiveModel);
-    const conflictResult = await detectConflicts(sectionsWithSources, apiKey, effectiveProvider, effectiveModel);
+    const relevanceResult = await tryWithFallback(
+      (model) => checkDocumentRelevance(sections, requirement, apiKey, effectiveProvider, model),
+      "内容相关度评估"
+    );
+    const completenessResult = await tryWithFallback(
+      (model) => checkDocumentCompleteness(sections, requirement, apiKey, effectiveProvider, model),
+      "内容完整度评估"
+    );
+    const conflictResult = await tryWithFallback(
+      (model) => detectConflicts(sectionsWithSources, apiKey, effectiveProvider, model),
+      "冲突检测"
+    );
 
     logger.info(`[Generation] 评估完成: relevance=${relevanceResult.score.toFixed(2)}, completeness=${completenessResult.score.toFixed(2)}, conflicts=${conflictResult.conflicts.length}`);
 
@@ -884,6 +1113,306 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[Generation] 评估失败: ${msg}`);
     res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** POST /api/generation/:id/evaluate/stream — 流式计算用户可见指标（SSE，phase-level progress） */
+generationRouter.post("/:id/evaluate/stream", async (req, res) => {
+  // ── SSE setup ──
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+
+  const writeSSE = (event: string, data: object) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  try {
+    const { apiKey: reqApiKey, providerId, modelId, userRequest } = req.body;
+
+    // 动态导入评估模块
+    const { checkDocumentRelevance } = await import("../lib/relevanceCheck.js");
+    const { checkDocumentCompleteness } = await import("../lib/completenessCheck.js");
+    const { detectConflicts } = await import("../lib/conflictDetection.js");
+    const { readSettingsFromDb } = await import("../lib/settingsReader.js");
+    const { getApiKey } = await import("../security/keyStore.js");
+
+    // 读取用户配置的 provider 和 model
+    const dbSettings = readSettingsFromDb();
+    const effectiveProvider = providerId ?? dbSettings.providerPreference?.[0] ?? "mimo";
+    const effectiveModel = modelId ?? dbSettings.modelId ?? "mimo-v2-pro";
+
+    const fallbackEnabled = dbSettings.enableModelFallback?.[effectiveProvider] === true;
+    const fallbackModels = fallbackEnabled ? (dbSettings.modelFallbacks?.[effectiveProvider] ?? []) : [];
+    const modelCandidates = [effectiveModel, ...fallbackModels.filter((m) => m !== effectiveModel)];
+
+    async function tryWithFallback<T>(fn: (model: string) => Promise<T>, taskName: string): Promise<T> {
+      let lastErr: unknown = null;
+      for (let i = 0; i < modelCandidates.length; i++) {
+        const candidate = modelCandidates[i];
+        try {
+          if (i > 0) logger.info(`[Generation] ${taskName} 尝试备用模型 ${i + 1}/${modelCandidates.length}: ${candidate}`);
+          return await fn(candidate);
+        } catch (err) {
+          lastErr = err;
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.warn(`[Generation] ${taskName} 模型 ${candidate} 失败: ${msg}`);
+          if (!fallbackEnabled) break;
+        }
+      }
+      throw lastErr ?? new Error(`${taskName} 所有模型均失败`);
+    }
+
+    const apiKey = reqApiKey ?? getApiKey(effectiveProvider);
+    if (!apiKey) {
+      writeSSE("error", { ok: false, error: "apiKey is required（请在设置页配置或在请求中提供）" });
+      res.end();
+      return;
+    }
+
+    const run = dbGet<any>("SELECT * FROM generation_runs WHERE id = ?", [req.params.id]);
+    if (!run) {
+      writeSSE("error", { ok: false, error: "Run not found" });
+      res.end();
+      return;
+    }
+
+    const sections = run.content ? parseHtmlSections(run.content, run.title) : [];
+    if (sections.length === 0) {
+      writeSSE("error", { ok: false, error: "No sections found in document" });
+      res.end();
+      return;
+    }
+
+    let requirement = userRequest;
+    if (!requirement) {
+      const runTime = new Date(run.created_at).getTime() / 1000;
+      const caseRows = dbAll<{ data: string }>(`
+        SELECT data FROM sync_data
+        WHERE store_name = 'cases'
+          AND data IS NOT NULL
+          AND json_extract(data, '$.userRequest') IS NOT NULL
+          AND json_extract(data, '$.userRequest') != ''
+        LIMIT 100
+      `);
+      let bestMatch: { userRequest: string; diff: number } | null = null;
+      for (const row of caseRows) {
+        try {
+          const caseData = JSON.parse(row.data);
+          if (!caseData.userRequest || !caseData.createdAt) continue;
+          const caseTime = new Date(caseData.createdAt).getTime() / 1000;
+          const diff = Math.abs(caseTime - runTime);
+          if (diff < 86400 && (!bestMatch || diff < bestMatch.diff)) {
+            bestMatch = { userRequest: caseData.userRequest, diff };
+          }
+        } catch { /* skip parse errors */ }
+      }
+      requirement = bestMatch?.userRequest ?? run.title;
+    }
+
+    // 从 provenance 重建章节来源详情（用于冲突检测）
+    const provNodes = dbAll<any>(`
+      SELECT p.paragraph_idx, p.paragraph_title, p.chunk_id, p.score,
+             c.content AS chunk_content, s.name AS source_name
+      FROM provenance_nodes p
+      LEFT JOIN kb_chunks c ON c.id = p.chunk_id
+      LEFT JOIN kb_sources s ON s.id = c.source_id
+      WHERE p.run_id = ? AND p.chunk_id IS NOT NULL
+      ORDER BY p.paragraph_idx, p.score DESC
+    `, [req.params.id]);
+
+    const sectionsWithSources = sections.map((sec) => {
+      const secNodes = provNodes.filter((n) => n.paragraph_idx === sec.index);
+      const sourceMap = new Map<string, { content: string; score: number; sourceName: string; chunkId: string }>();
+      for (const n of secNodes) {
+        const key = n.chunk_id ?? (n.source_name && n.chunk_content ? `${n.source_name}:${n.chunk_content.slice(0, 40)}` : null);
+        if (key && !sourceMap.has(key)) {
+          sourceMap.set(key, {
+            content: n.chunk_content ?? "",
+            score: n.score ?? 0,
+            sourceName: n.source_name ?? "Unknown",
+            chunkId: n.chunk_id ?? "",
+          });
+        }
+      }
+      return { ...sec, sources: Array.from(sourceMap.values()) };
+    });
+
+    logger.info(`[Generation] 开始流式评估: runId=${req.params.id}, provider=${effectiveProvider}, model=${effectiveModel}, sections=${sections.length}`);
+
+    // ── Emit start ──
+    writeSSE("evaluate-start", {
+      ok: true,
+      runId: req.params.id,
+      totalTasks: 3,
+      tasks: [
+        { id: "relevance", label: "内容相关度" },
+        { id: "completeness", label: "内容完整度" },
+        { id: "conflicts", label: "内容冲突检测" },
+      ],
+    });
+
+    // ── Task 1: Relevance ──
+    writeSSE("evaluate-progress", { task: "relevance", taskIndex: 0, taskLabel: "内容相关度", status: "running" });
+    const relevanceResult = await tryWithFallback(
+      (model) => checkDocumentRelevance(sections, requirement, apiKey, effectiveProvider, model),
+      "内容相关度评估"
+    );
+    writeSSE("evaluate-progress", {
+      task: "relevance", taskIndex: 0, taskLabel: "内容相关度", status: "done",
+      score: relevanceResult.score,
+      irrelevantSentences: relevanceResult.irrelevantSentences,
+    });
+
+    // ── Task 2: Completeness ──
+    writeSSE("evaluate-progress", { task: "completeness", taskIndex: 1, taskLabel: "内容完整度", status: "running" });
+    const completenessResult = await tryWithFallback(
+      (model) => checkDocumentCompleteness(sections, requirement, apiKey, effectiveProvider, model),
+      "内容完整度评估"
+    );
+    writeSSE("evaluate-progress", {
+      task: "completeness", taskIndex: 1, taskLabel: "内容完整度", status: "done",
+      score: completenessResult.score,
+      coveredPoints: completenessResult.coveredPoints,
+      missingPoints: completenessResult.missingPoints,
+    });
+
+    // ── Task 3: Conflicts ──
+    writeSSE("evaluate-progress", { task: "conflicts", taskIndex: 2, taskLabel: "内容冲突检测", status: "running" });
+    const conflictResult = await tryWithFallback(
+      (model) => detectConflicts(sectionsWithSources, apiKey, effectiveProvider, model),
+      "冲突检测"
+    );
+
+    // 冲突与 generation 阶段交叉对比（复用现有逻辑）
+    type ResolvedItem = { topic: string; winningSource: string; losingSources: string[]; reason: string; resolution: string };
+    let priorResolution: { resolved: ResolvedItem[]; unresolved: ResolvedItem[]; excludedChunkIds: string[] } | null = null;
+    if (run.conflict_resolution) {
+      try {
+        priorResolution = JSON.parse(run.conflict_resolution);
+      } catch (e) {
+        logger.warn(`[Generation] conflict_resolution JSON 解析失败: ${e}`);
+      }
+    }
+
+    const provenanceSources = new Set<string>();
+    for (const sec of sectionsWithSources) {
+      for (const s of sec.sources) {
+        if (s.sourceName) provenanceSources.add(s.sourceName);
+      }
+    }
+
+    const normalizeSourceName = (s: string): string =>
+      s.toLowerCase().replace(/[\s_\-./\\|:：,，;；()（）\[\]【】《》]+/g, "").replace(/\.(pdf|docx|txt|md|eml|pptx|json|csv|xlsx)$/i, "");
+    const normalizeTopic = (s: string): string =>
+      s.toLowerCase().replace(/[\s_\-./\\|:：,，;；()（）\[\]【】《》]+/g, "");
+    const topicsClose = (a: string, b: string): boolean => {
+      const na = normalizeTopic(a), nb = normalizeTopic(b);
+      if (na === nb || na.includes(nb) || nb.includes(na)) return true;
+      const grams = (s: string) => { const set = new Set<string>(); for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2)); return set; };
+      const ga = grams(na), gb = grams(nb);
+      if (ga.size === 0 || gb.size === 0) return false;
+      let inter = 0; for (const g of ga) if (gb.has(g)) inter++;
+      return inter / (ga.size + gb.size - inter) >= 0.5;
+    };
+    const isSourceInProvenance = (llmSource: string): boolean => {
+      const norm = normalizeSourceName(llmSource);
+      for (const ps of provenanceSources) {
+        const nps = normalizeSourceName(ps);
+        if (nps === norm || nps.includes(norm) || norm.includes(nps)) return true;
+      }
+      return false;
+    };
+
+    type EvalConflictItem = (typeof conflictResult.conflicts)[number] & { status?: "resolved" | "unresolved" | "new"; resolutionReason?: string };
+    const filteredConflicts: EvalConflictItem[] = [];
+
+    for (const c of conflictResult.conflicts) {
+      const matchedResolved = priorResolution?.resolved.find((r) => topicsClose(r.topic, c.topic));
+      if (matchedResolved) {
+        const losersStillPresent = matchedResolved.losingSources.filter((ls) => isSourceInProvenance(ls));
+        if (losersStillPresent.length === 0) continue;
+        filteredConflicts.push({ ...c, status: "resolved", resolutionReason: `${matchedResolved.resolution} — ${matchedResolved.reason}` });
+        continue;
+      }
+      const matchedUnresolved = priorResolution?.unresolved.find((u) => topicsClose(u.topic, c.topic));
+      if (matchedUnresolved) {
+        filteredConflicts.push({ ...c, status: "unresolved", resolutionReason: "生成阶段未能自动解决" });
+        continue;
+      }
+      filteredConflicts.push({ ...c, status: "new" });
+    }
+
+    const finalConflicts = {
+      conflicts: filteredConflicts,
+      conflictRate: filteredConflicts.length > 0 ? conflictResult.conflictRate : 0,
+      hasConflicts: filteredConflicts.length > 0,
+    };
+
+    writeSSE("evaluate-progress", {
+      task: "conflicts", taskIndex: 2, taskLabel: "内容冲突检测", status: "done",
+      hasConflicts: finalConflicts.hasConflicts,
+      conflictRate: finalConflicts.conflictRate,
+      conflictItems: finalConflicts.conflicts,
+    });
+
+    // 获取 groundedness 分数
+    const groundingNodes = dbAll<{ grounding_score: number }>(`
+      SELECT grounding_score FROM provenance_nodes WHERE run_id = ? AND grounding_score IS NOT NULL
+    `, [req.params.id]);
+    const groundingScores = groundingNodes.map((n) => n.grounding_score).filter((s) => s > 0);
+    const groundednessScore = groundingScores.length > 0
+      ? groundingScores.reduce((a, b) => a + b, 0) / groundingScores.length
+      : 0.5;
+
+    // 保存评估结果
+    try {
+      const evalId = crypto.randomUUID();
+      dbRun(`
+        INSERT INTO trust_evaluations (id, run_id, metrics, created_at)
+        VALUES (?, ?, ?, datetime('now','localtime'))
+      `, [
+        evalId,
+        req.params.id,
+        JSON.stringify({
+          groundedness: groundednessScore,
+          relevance: relevanceResult.score,
+          completeness: completenessResult.score,
+          conflictRate: finalConflicts.conflictRate,
+          hasConflicts: finalConflicts.hasConflicts,
+          irrelevantSentences: relevanceResult.irrelevantSentences ?? [],
+          coveredPoints: completenessResult.coveredPoints ?? [],
+          missingPoints: completenessResult.missingPoints ?? [],
+          conflictItems: finalConflicts.conflicts ?? [],
+        }),
+      ], { table: "trust_evaluations", recordId: evalId, source: "generation" });
+    } catch (e) {
+      logger.warn(`[Generation] 保存评估结果失败: ${e}`);
+    }
+
+    writeSSE("evaluate-done", {
+      ok: true,
+      runId: req.params.id,
+      metrics: {
+        groundedness: { score: groundednessScore, label: "有据可查度", description: "内容是否有来源支撑" },
+        relevance: { score: relevanceResult.score, label: "内容相关度", description: "内容是否与需求相关", irrelevantSentences: relevanceResult.irrelevantSentences },
+        completeness: { score: completenessResult.score, label: "内容完整度", description: "是否覆盖需求的所有要点", coveredPoints: completenessResult.coveredPoints, missingPoints: completenessResult.missingPoints },
+        conflicts: { hasConflicts: finalConflicts.hasConflicts, conflictRate: finalConflicts.conflictRate, items: finalConflicts.conflicts, label: "内容冲突", description: "不同来源之间的矛盾信息" },
+      },
+    });
+
+    res.end();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Generation] 流式评估失败: ${msg}`);
+    if (!res.writableEnded) {
+      res.write(`event: error\n`);
+      res.write(`data: ${JSON.stringify({ ok: false, error: msg })}\n\n`);
+      res.end();
+    }
   }
 });
 

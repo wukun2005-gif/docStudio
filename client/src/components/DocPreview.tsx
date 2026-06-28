@@ -8,7 +8,7 @@
  * - 支持拖拽来源到其他章节
  * - 修改后显式触发重新生成
  */
-import { useState, useRef, useMemo, useCallback } from "react";
+import { useState, useRef, useMemo, useCallback, useEffect } from "react";
 import DOMPurify from "dompurify";
 import type { OutlineSection } from "../../../shared/src/types/generation.js";
 
@@ -55,6 +55,10 @@ interface DocPreviewProps {
   documentStyle?: string;
   evaluationMetrics?: EvaluationMetrics | null;
   evaluating?: boolean;
+  evaluationProgress?: {
+    totalTasks: number;
+    tasks: Record<string, { taskLabel: string; status: "running" | "done"; score?: number }>;
+  } | null;
   onSectionClick?: (sectionIdx: number) => void;
   onSectionUpdate?: (sectionIdx: number, updated: SectionData) => void;
   onSourceMove?: (fromSectionIdx: number, sourceIdx: number, toSectionIdx: number, type?: string, mode?: "move" | "copy") => void;
@@ -66,7 +70,7 @@ interface DocPreviewProps {
 export default function DocPreview({
   content, trustScore, sections, generating, runId,
   dirtySections, regeneratingSections, documentStyle,
-  evaluationMetrics, evaluating, onSectionClick, onSectionUpdate, onSourceMove, onRegenerateSection, onSave, onEvaluate,
+  evaluationMetrics, evaluating, evaluationProgress, onSectionClick, onSectionUpdate, onSourceMove, onRegenerateSection, onSave, onEvaluate,
 }: DocPreviewProps) {
   const [activeSection, setActiveSection] = useState<number | null>(null);
   const [dragOverSection, setDragOverSection] = useState<number | null>(null);
@@ -76,6 +80,27 @@ export default function DocPreview({
   const [editedContent, setEditedContent] = useState("");
   const [saving, setSaving] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // 当没有文档内容时，自动关闭评估面板（避免"新建文档后显示评估"的问题）
+  useEffect(() => {
+    if (content === null) {
+      setShowMetrics(false);
+    }
+  }, [content]);
+
+  // 评估开始时自动展开 metrics 面板
+  useEffect(() => {
+    if (evaluating) {
+      setShowMetrics(true);
+    }
+  }, [evaluating]);
+
+  // 评估指标到达时自动展开 metrics 面板
+  useEffect(() => {
+    if (evaluationMetrics) {
+      setShowMetrics(true);
+    }
+  }, [evaluationMetrics]);
 
   // DOMPurify 净化 + 段落标记
   const sanitizedContent = useMemo(() => {
@@ -281,6 +306,17 @@ export default function DocPreview({
             {sections.length > 0 && (
               <span className="text-xs text-gray-400">{sections.length} 个章节</span>
             )}
+            {evaluating && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200 flex items-center gap-1">
+                <span className="animate-spin w-3 h-3 border-2 border-purple-500 border-t-transparent rounded-full" />
+                🧪 评估中...
+                {evaluationProgress && (
+                  <span className="text-purple-500">
+                    ({Object.values(evaluationProgress.tasks).filter((t) => t.status === "done").length}/{evaluationProgress.totalTasks})
+                  </span>
+                )}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {/* 编辑按钮 */}
@@ -342,7 +378,7 @@ export default function DocPreview({
                 </button>
               </div>
             )}
-          {trustScore !== null && (
+          {content !== null && trustScore !== null && (
             <button
               onClick={() => setShowMetrics(!showMetrics)}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors hover:opacity-80 ${
@@ -357,7 +393,7 @@ export default function DocPreview({
           )}
           </div>
         </div>
-        {showMetrics && (
+        {content !== null && showMetrics && (
           <div className="px-5 pb-4 border-t bg-gray-50 max-h-[50vh] overflow-y-auto">
             <div className="pt-3">
               {/* 三维度指标说明 */}
@@ -490,29 +526,35 @@ export default function DocPreview({
                     </div>
                   )}
 
-                  {/* 内容冲突 */}
-                  {evaluationMetrics.conflicts?.hasConflicts && evaluationMetrics.conflicts.items.length > 0 && (
-                    <div className="px-3 py-2 rounded-lg bg-red-50 border border-red-200">
-                      <p className="text-[11px] text-red-700 font-medium mb-1">🔴 发现 {evaluationMetrics.conflicts.items.length} 处内容冲突：</p>
-                      <div className="space-y-2">
-                        {evaluationMetrics.conflicts.items.slice(0, 2).map((conflict, i) => (
-                          <div key={i} className="ml-2">
-                            <p className="text-[10px] text-red-600 font-medium">
-                              {conflict.severity === "high" ? "🔴" : conflict.severity === "medium" ? "🟡" : "🟢"} {conflict.topic}
-                            </p>
-                            <ul className="text-[10px] text-red-500 ml-3 space-y-0.5">
-                              {conflict.claims.slice(0, 2).map((claim, j) => (
-                                <li key={j} className="cursor-pointer hover:underline" onClick={() => scrollToParagraph(claim.text)}>• {claim.source}: {claim.text.substring(0, 50)}...</li>
-                              ))}
-                            </ul>
-                            {conflict.recommendation && (
-                              <p className="text-[10px] text-red-400 ml-3 mt-0.5">💡 {conflict.recommendation}</p>
-                            )}
-                          </div>
-                        ))}
+                  {/* 内容冲突（过滤已 resolved 的，只展示 unresolved/new） */}
+                  {(() => {
+                    const visibleItems = (evaluationMetrics.conflicts?.items ?? []).filter(
+                      (i) => (i as any).status !== "resolved",
+                    );
+                    if (visibleItems.length === 0) return null;
+                    return (
+                      <div className="px-3 py-2 rounded-lg bg-red-50 border border-red-200">
+                        <p className="text-[11px] text-red-700 font-medium mb-1">🔴 发现 {visibleItems.length} 处内容冲突：</p>
+                        <div className="space-y-2">
+                          {visibleItems.slice(0, 2).map((conflict, i) => (
+                            <div key={i} className="ml-2">
+                              <p className="text-[10px] text-red-600 font-medium">
+                                {(conflict as any).severity === "high" ? "🔴" : (conflict as any).severity === "medium" ? "🟡" : "🟢"} {(conflict as any).topic}
+                              </p>
+                              <ul className="text-[10px] text-red-500 ml-3 space-y-0.5">
+                                {((conflict as any).claims ?? []).slice(0, 2).map((claim, j) => (
+                                  <li key={j} className="cursor-pointer hover:underline" onClick={() => scrollToParagraph(claim.text)}>• {claim.source}: {String(claim.text).substring(0, 50)}...</li>
+                                ))}
+                              </ul>
+                              {(conflict as any).recommendation && (
+                                <p className="text-[10px] text-red-400 ml-3 mt-0.5">💡 {(conflict as any).recommendation}</p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
                 </div>
               )}
 
@@ -567,13 +609,22 @@ export default function DocPreview({
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
         {generating ? (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-center">
+          sanitizedContent ? (
+            <div className="p-6">
+              <div className="doc-content max-w-none" dangerouslySetInnerHTML={{ __html: sanitizedContent }} />
+              {sections.length > 0 && (
+                <div className="mt-8 pt-6 border-t">{/* 章节来源占位 */}</div>
+              )}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center h-full">
+              <div className="text-center">
               <div className="animate-spin w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full mx-auto mb-4"></div>
               <p className="text-gray-500 text-sm">正在生成文档...</p>
               <p className="text-gray-400 text-xs mt-1">检索知识库 + Web 搜索 + 生成 + 验证</p>
+              </div>
             </div>
-          </div>
+          )
         ) : sanitizedContent ? (
           <div className="p-6" ref={containerRef}>
             {/* 编辑模式：textarea */}
@@ -584,11 +635,11 @@ export default function DocPreview({
                 className="w-full h-full min-h-[400px] border rounded-lg p-4 font-sans text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             ) : (
-              /* 渲染净化后的 HTML 内容 */
-              <div
-                className="doc-content max-w-none"
-                dangerouslySetInnerHTML={{ __html: sanitizedContent }}
-              />
+                /* 渲染净化后的 HTML 内容 */
+                <div
+                  className="doc-content max-w-none"
+                  dangerouslySetInnerHTML={{ __html: sanitizedContent }}
+                />
             )}
 
             {/* 🌳 章节来源详情（可展开、支持拖拽和删除） */}

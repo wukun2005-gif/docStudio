@@ -1198,3 +1198,12 @@ npm run samples          # 生成 sample 数据
 npm run eval:run         # 运行离线评估
 npm run eval:report      # 查看评估报告
 ```
+
+---
+
+## Change Log
+
+| 日期 | 简述 | 影响范围 | 关联 commit |
+|------|------|---------|-------------|
+| 2026-06-28 | Bug3: 修复生成阶段 SSE spinner 刷新问题 + 新增评估阶段 SSE 流式端点 | DocPreview.tsx, GenerationPage.tsx, generation.ts | — |
+| 2026-06-28 | Bug2: extractDocumentMetadata 人名提取改为 LLM NER（合并到标题生成）+ regex 回退改进 | docGenerator.ts | — |
