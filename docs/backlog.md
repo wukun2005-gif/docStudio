@@ -1,5 +1,15 @@
 # i-Write Backlog
 
+bug3: [✅] **流式体验断层**：章节生成完成后，质量评估阶段没有任何流式进度反馈。用户看到章节全显示了但 spinner 还在转，误以为卡住或生成已完成。
+  - 位置：`GenerationPage.tsx` 中 `fetch(${runId}/evaluate)` 是独立的阻塞请求，无事件流；`DocPreview.tsx` `generating=true` 时虽渲染内容但进度条文字未更新为"评估中"
+  - 期望：章节完成 → 用户立即可读（`generating=false`）→ 顶部显示"🧪 评估中..." → `/evaluate` 走 SSE（`evaluate-start` / `evaluate-done`）→ metrics 平滑出现
+  - 涉及：`GenerationPage.tsx` / `DocPreview.tsx` / `generation.ts` 的 evaluate 路由
+  - 现在有regression，页面和log都看不到任何流式进度反馈。
+
+bug2: [✅] extractDocumentMetadata 人名提取用正则而非 LLM 解析 | 当前用正则从 userRequest 中提取人名，存在根本性缺陷：(1) 捕获长度硬编码 {1,10}，无法处理"技术负责人陈强"等长前缀；(2) find() 只返回第一个匹配，多个人名（如"面向 CEO 张明和 COO 李婷"）后续全部丢失；(3) 正则无法区分职位头衔和人名，靠 includes 侥幸匹配；(4) 排除字符集靠不断加字维护，不可持续。正确方案：
+不需要单独的 LLM 调用。人名提取可以跟章节生成的 LLM 调用合并——在第一个章节的 system prompt 里加一句"请从用户请求中提取所有目标读者的人名"，然后解析 LLM 的输出。但这需要改动 pipeline 结构。用 LLM 调用做 NER 提取全部人名，再查 People Graph 匹配。 |
+
+
 bug1: [✅] 冲突源前置过滤 | 生成文档前检测知识库冲突 → 尝试resolve conflict （比如时间顺序，版本顺序，作者职位高低，等等）-> 排除无法resolve的冲突源不引用 → 用户 resolve 后才允许引用。当前冲突检测在评估阶段（生成后），文档仍引用冲突源，输出不可靠 |
 
 
