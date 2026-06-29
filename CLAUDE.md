@@ -28,6 +28,19 @@
 
 ---
 
+## 核心原则：工作目录外文件直接用 RunCommand 读取
+
+`Read` 工具只能访问工作目录内的文件。对于工作目录外的文件（如 `~/Downloads/`、`/tmp/`、`~/.marscode/` 等），**禁止**先 `cp` 到工作目录再 `Read`。
+
+❌ **绝对禁止**：
+- `cp /outside/file ./project/` 然后 `Read ./project/xxx`（无意义的 IO，还留临时文件）
+
+✅ **正确做法**：
+- 直接用 `RunCommand` 读取：`cat "/outside/file"`、`head -N "/outside/file"`、`tail -N "/outside/file"`
+- 读取后无需清理
+
+---
+
 ## 核心原则：Client 只做 UI，Server 做业务逻辑（ADR-001）
 
 **client 端只负责 UI 渲染和调用后端 API，绝对不能包含业务逻辑、数据存储、数据处理。**

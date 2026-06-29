@@ -10,9 +10,11 @@ data_old/
 coverage/
 *.log
 *.tsbuildinfo
+*.md
 docs/backlog.md
 docs/sample-data-upgrade-plan.md
 docs/llm-parallel-optimization.md
+.marscode/
 .trae/
 .qoder/
 samples_old/
