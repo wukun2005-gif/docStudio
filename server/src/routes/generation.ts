@@ -35,8 +35,11 @@ generationRouter.post("/generate", async (req, res) => {
 
     if (existing) {
       // SQLite 时间窗口判定：当前时间 - created_at > 10 分钟 → 视为遗留死锁
+      // 注意：章节级 LLM 调用多轮 3-5 分钟是常态，必须使用分钟级阈值，
+      // 否则正常任务会被误判为死锁并清理，造成"既 crashed 又在继续写"的竞态。
+      const STALE_THRESHOLD_SECONDS = 10 * 60;
       const staleCheck = dbGet<{ stale: number }>(
-        `SELECT (strftime('%s', 'now', 'localtime') - strftime('%s', ?)) > 60 AS stale`,
+        `SELECT (strftime('%s', 'now', 'localtime') - strftime('%s', ?)) > ${STALE_THRESHOLD_SECONDS} AS stale`,
         [existing.created_at],
       );
       if (staleCheck?.stale === 1) {
@@ -139,8 +142,10 @@ generationRouter.post("/generate/stream", async (req, res) => {
     );
 
     if (existing) {
+      // 与非流式版本保持一致：10 分钟阈值
+      const STALE_THRESHOLD_SECONDS = 10 * 60;
       const staleCheck = dbGet<{ stale: number }>(
-        `SELECT (strftime('%s', 'now', 'localtime') - strftime('%s', ?)) > 60 AS stale`,
+        `SELECT (strftime('%s', 'now', 'localtime') - strftime('%s', ?)) > ${STALE_THRESHOLD_SECONDS} AS stale`,
         [existing.created_at],
       );
       if (staleCheck?.stale === 1) {
