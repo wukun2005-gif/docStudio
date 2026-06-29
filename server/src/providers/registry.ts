@@ -33,6 +33,12 @@ const MAX_RETRIES = 2;
 const MAX_TOTAL_ATTEMPTS = 8;
 const TIMEOUT_MS = 240_000;
 
+// ── 会话级配额耗尽冷却 ──────────────────────────────────────
+// 当模型返回 insufficient_quota 错误时，将其加入此 Set，
+// 本 session 内后续 fallback chain 遍历时直接跳过，不再重试。
+
+const quotaExhaustedModels = new Set<string>();
+
 export interface AttemptRecord {
   providerId: string;
   ok: boolean;
@@ -152,6 +158,15 @@ export class ProviderRegistry {
           }
         }
 
+        // 过滤配额已耗尽的模型（会话级冷却）
+        // 保留用户主动选择的首选模型（可能是新配额恢复的调用）
+        const preFilterCount = models.length;
+        models = models.filter((m) => m === req.modelId || !quotaExhaustedModels.has(m));
+        if (models.length < preFilterCount) {
+          const skipped = preFilterCount - models.length;
+          logger.warn(`[Registry] 跳过 ${skipped} 个配额耗尽的模型: ${Array.from(quotaExhaustedModels).join(", ")}`);
+        }
+
         logger.info(`[Registry] ${pid} fallback chain: initialModel=${req.modelId ?? "default"}, models=[${models.slice(0, 5).join(", ")}${models.length > 5 ? `, ...+${models.length - 5}` : ""}]`);
 
         for (const modelId of models) {
@@ -196,6 +211,13 @@ export class ProviderRegistry {
             const inner = (error as Error & { attempts?: AttemptRecord[] }).attempts;
             if (inner) attempts.push(...inner);
             else attempts.push({ providerId: pid, ok: false, errorCode: errInfo.code, message: errInfo.message });
+
+            // 会话级冷却：配额耗尽的模型加入黑名单，后续请求直接跳过
+            if (errInfo.code === "quota-exceeded") {
+              quotaExhaustedModels.add(modelId);
+              logger.warn(`[Registry] 模型 ${modelId} 配额耗尽，加入会话级冷却（跳过后续重试）`);
+            }
+
             if (errInfo.code === "auth-failed") {
               return { response: buildErrorResponse(errInfo), attempts };
             }
@@ -244,6 +266,13 @@ export class ProviderRegistry {
         const inner = (error as Error & { attempts?: AttemptRecord[] }).attempts;
         if (inner) attempts.push(...inner);
         else attempts.push({ providerId: pid, ok: false, errorCode: errInfo.code });
+
+        // 会话级冷却：配额耗尽的模型加入黑名单，后续请求直接跳过
+        if (errInfo.code === "quota-exceeded" && req.modelId) {
+          quotaExhaustedModels.add(req.modelId);
+          logger.warn(`[Registry] 模型 ${req.modelId} 配额耗尽，加入会话级冷却（跳过后续重试）`);
+        }
+
         if (errInfo.code === "auth-failed") {
           return { response: buildErrorResponse(errInfo), attempts };
         }
@@ -444,6 +473,8 @@ function classifyError(error: unknown): ErrorInfo {
       if (code === "network" && (resp.error.message.includes("aborted") || resp.error.message.includes("timed out"))) {
         return { code: "timeout", message: resp.error.message, retryable: false };
       }
+      // 配额耗尽（API 返回 insufficient_quota / insufficent_quota 等）：不重试，直接 fallback
+      if (/quota|insufficient/i.test(code)) return { code: "quota-exceeded", message: resp.error.message, retryable: false };
       return { code, message: resp.error.message, retryable: resp.error.retryable };
     }
   }

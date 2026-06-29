@@ -6,14 +6,15 @@
  */
 import { registry } from "../providers/registry.js";
 import { getApiKey } from "../security/keyStore.js";
-import { hybridSearch } from "./hybridSearch.js";
+import { hybridSearch, hybridSearchWithRemote, type CrossSourceSearchResult } from "./hybridSearch.js";
+import { getValidAccessToken } from "./connectors/msGraphOAuth.js";
 import { readSettingsFromDb, readSenderProfile } from "./settingsReader.js";
 import { executeWithTools } from "./toolExecutor.js";
 import { checkGroundedness, type GroundingDoc } from "./groundednessCheck.js";
 import { cleanContent, type CitationLink } from "./contentCleaner.js";
 import { logger } from "./logger.js";
 import { dbGet, dbAll } from "./dbQuery.js";
-import { getAllPeople, getPersonById, getPersonContext, type Person } from "./peopleGraph.js";
+import { getAllPeople, getPersonById, getPersonContext, findPersonByTitle, type Person } from "./peopleGraph.js";
 import { detectStyle, detectFormat, detectAudience, getStyle, getFormat, getAudience } from "./promptTemplates.js";
 import { getRulesForContext } from "./writingRules.js";
 import { detectConflicts, autoResolveConflicts, type ConflictResolutionResult } from "./conflictDetection.js";
@@ -84,6 +85,27 @@ export function extractDocumentMetadata(userRequest: string, outline: OutlineSec
         const candidate = match[1].trim();
         if (JOB_TITLE_ONLY.test(candidate)) continue;
         metadata.recipient = { name: candidate };
+        break;
+      }
+    }
+  }
+
+  // ── 回退：按职位匹配 People Graph ──
+  // 用户用职位（如 "CEO"、"产品总监"）描述读者时，在 People Graph 中按 title 字段查找
+  // 通过 personPattern 已提取的所有候选（包括被 JOB_TITLE_ONLY 过滤的）重新尝试
+  if (!metadata.recipient?.personId && allMatches.length > 0) {
+    for (const match of allMatches) {
+      const candidate = match[1].trim();
+      if (!candidate) continue;
+      const matchedByTitle = findPersonByTitle(candidate);
+      if (matchedByTitle) {
+        metadata.recipient = {
+          name: matchedByTitle.name,
+          email: matchedByTitle.email,
+          title: matchedByTitle.title,
+          department: matchedByTitle.department,
+          personId: matchedByTitle.id,
+        };
         break;
       }
     }
@@ -194,11 +216,35 @@ async function retrieveForSection(
     }
   }
 
-  const results = hybridSearch(query, { limit: 5, useQueryExpansion: false, queryEmbedding });
+  // bug3: 启用远程检索（OneDrive）—— 先获取 MS Graph access token
+  let msAccessToken: string | null = null;
+  try {
+    msAccessToken = await getValidAccessToken();
+    if (!msAccessToken) {
+      logger.warn("[DocGenerator] MS Graph token 不可用，OneDrive 远程检索已跳过（未连接或 token 过期）");
+    }
+  } catch {
+    logger.warn("[DocGenerator] MS Graph token 获取异常，OneDrive 远程检索已跳过");
+  }
+
+  const searchConfig: Parameters<typeof hybridSearchWithRemote>[1] = {
+    limit: 5,
+    useQueryExpansion: false,
+    queryEmbedding,
+    ...(msAccessToken ? { msAccessToken } : {}),
+    ...(embConfig ? { embedding: embConfig } : {}),
+  };
+  const results: CrossSourceSearchResult[] = await hybridSearchWithRemote(query, searchConfig);
 
   // 批量查询 source 信息（文件名、URL）
+  // bug3: 远程结果（OneDrive）没有 kb_sources 条目，用 remoteInfo 预填充
   const sourceIds = [...new Set(results.map((r) => r.sourceId))];
   const sourceMap = new Map<string, { name: string; url?: string }>();
+  for (const r of results) {
+    if (r.platform && r.platform !== "local" && r.remoteInfo) {
+      sourceMap.set(r.sourceId, { name: r.remoteInfo.fileName, url: r.remoteInfo.fileUrl });
+    }
+  }
   for (const sid of sourceIds) {
     const row = dbGet<{ name: string; url?: string }>("SELECT name, url FROM kb_sources WHERE id = ?", [sid]);
     if (row) sourceMap.set(sid, { name: row.name, url: row.url });
@@ -248,16 +294,30 @@ async function batchRetrieveForOutline(
     }
   }
 
+  // bug3: 批量检索也启用远程（OneDrive）检索
+  let batchMsToken: string | null = null;
+  try {
+    batchMsToken = await getValidAccessToken();
+    if (!batchMsToken) {
+      logger.warn("[DocGenerator] 批量检索: MS Graph token 不可用，OneDrive 远程检索已跳过");
+    }
+  } catch {
+    logger.warn("[DocGenerator] 批量检索: MS Graph token 获取异常，OneDrive 远程检索已跳过");
+  }
+
   const allSourceIds = new Set<string>();
-  const rawResults: Array<{ sectionTitle: string; results: ReturnType<typeof hybridSearch> }> = [];
+  const rawResults: Array<{ sectionTitle: string; results: CrossSourceSearchResult[] }> = [];
 
   for (let i = 0; i < flatSections.length; i++) {
     const section = flatSections[i]!;
-    const results = hybridSearch(queries[i]!, {
+    const batchSearchCfg: Parameters<typeof hybridSearchWithRemote>[1] = {
       limit: 5,
       useQueryExpansion: false,
       queryEmbedding: embeddings[i],
-    });
+      ...(batchMsToken ? { msAccessToken: batchMsToken } : {}),
+      ...(embConfig ? { embedding: embConfig } : {}),
+    };
+    const results: CrossSourceSearchResult[] = await hybridSearchWithRemote(queries[i]!, batchSearchCfg);
     for (const r of results) {
       allSourceIds.add(r.sourceId);
     }
@@ -265,6 +325,17 @@ async function batchRetrieveForOutline(
   }
 
   const sourceMetaMap = new Map<string, { name: string; url?: string; indexedAt?: string }>();
+  // bug3: 远程结果预填 sourceMetaMap（kb_sources 表没有这些条目）
+  for (const entry of rawResults) {
+    for (const r of entry.results) {
+      if (r.platform && r.platform !== "local" && r.remoteInfo) {
+        sourceMetaMap.set(r.sourceId, {
+          name: r.remoteInfo.fileName,
+          url: r.remoteInfo.fileUrl,
+        });
+      }
+    }
+  }
   for (const sid of allSourceIds) {
     // kb_sources 没有 indexed_at 列，改用 updated_at 作为最近更新时间戳的近似；
     // 如果该 source 是远程源（GitHub/OneDrive/SharePoint），再尝试从 kb_remote_index 取 indexed_at。
@@ -1535,6 +1606,28 @@ export async function generateDocument(
       // 没有匹配到 People Graph，但仍使用 LLM 提取的第一个人名
       config.metadata!.recipient = { name: titleResult.persons[0] };
       logger.info(`[DocGenerator] LLM 提取读者: ${titleResult.persons[0]} — 未在 People Graph 中找到匹配`);
+    }
+  }
+
+  // ── 回退：LLM 未提取到人名时，尝试从 userRequest 中按职位匹配 People Graph ──
+  if (!config.metadata!.recipient?.personId) {
+    const titlePattern = /(?:面向|面向|给|致|向|写给|发给|寄给|呈报|汇报给|抄送[：:]?\s*)\s*([^\s,，。；;、\n写发寄打做干的]{1,20})/g;
+    const titleMatches = [...userRequest.matchAll(titlePattern)];
+    for (const tm of titleMatches) {
+      const candidate = tm[1].trim();
+      if (!candidate) continue;
+      const matchedByTitle = findPersonByTitle(candidate);
+      if (matchedByTitle) {
+        config.metadata!.recipient = {
+          name: matchedByTitle.name,
+          email: matchedByTitle.email,
+          title: matchedByTitle.title,
+          department: matchedByTitle.department,
+          personId: matchedByTitle.id,
+        };
+        logger.info(`[DocGenerator] 职位匹配读者: ${matchedByTitle.name} (${matchedByTitle.title ?? ""}) ← "${candidate}"`);
+        break;
+      }
     }
   }
 

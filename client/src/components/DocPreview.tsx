@@ -129,32 +129,50 @@ export default function DocPreview({
   function scrollToParagraph(text: string) {
     if (!containerRef.current) return;
 
-    // 在文档中搜索包含该文本的段落
+    // 准备多种匹配模式
+    const searchTexts: string[] = [text.substring(0, 30)];
+    // 去掉引文标记 [N] 再匹配
+    const stripped = text.replace(/\s*\[\d+\]\s*/g, '').trim();
+    if (stripped !== text.substring(0, 30)) {
+      searchTexts.push(stripped.substring(0, 30));
+    }
+    // 空格标准化再匹配
+    const normalized = text.replace(/[\s\u00A0]+/g, ' ').trim();
+    if (!searchTexts.includes(normalized.substring(0, 30))) {
+      searchTexts.push(normalized.substring(0, 30));
+    }
+
     const paragraphs = containerRef.current.querySelectorAll("p, h1, h2, h3, h4, h5, h6, li");
-    for (const para of paragraphs) {
-      if (para.textContent?.includes(text.substring(0, 30))) {
-        const htmlPara = para as HTMLElement;
+    for (const searchText of searchTexts) {
+      for (const para of paragraphs) {
+        let content = (para.textContent || '').replace(/[\s\u00A0]+/g, ' ').trim();
+        let contentStripped = content.replace(/\s*\[\d+\]\s*/g, '').trim();
+        if (
+          content.includes(searchText) ||
+          contentStripped.includes(searchText)
+        ) {
+          const htmlPara = para as HTMLElement;
+          htmlPara.scrollIntoView({ behavior: "smooth", block: "center" });
 
-        // 滚动到该段落
-        htmlPara.scrollIntoView({ behavior: "smooth", block: "center" });
+          const originalBg = htmlPara.style.backgroundColor;
+          const originalTransition = htmlPara.style.transition;
+          htmlPara.style.transition = "background-color 0.3s ease";
+          htmlPara.style.backgroundColor = "#fef08a";
 
-        // 高亮效果
-        const originalBg = htmlPara.style.backgroundColor;
-        const originalTransition = htmlPara.style.transition;
-        htmlPara.style.transition = "background-color 0.3s ease";
-        htmlPara.style.backgroundColor = "#fef08a"; // yellow-200
-
-        // 3秒后恢复
-        setTimeout(() => {
-          htmlPara.style.backgroundColor = originalBg;
           setTimeout(() => {
-            htmlPara.style.transition = originalTransition;
-          }, 300);
-        }, 3000);
+            htmlPara.style.backgroundColor = originalBg;
+            setTimeout(() => {
+              htmlPara.style.transition = originalTransition;
+            }, 300);
+          }, 3000);
 
-        break;
+          return;
+        }
       }
     }
+
+    // 未找到匹配时输出调试信息
+    console.warn("[scrollToParagraph] 未在文档中找到匹配的段落:", text.substring(0, 80));
   }
 
   // ── 删除来源 ──
@@ -442,21 +460,21 @@ export default function DocPreview({
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-[11px] text-gray-500">内容相关度</span>
                     <span className={`text-sm font-bold ${
-                      evaluationMetrics?.relevance.score != null && evaluationMetrics.relevance.score >= 0.8 ? "text-green-600" :
-                      evaluationMetrics?.relevance.score != null && evaluationMetrics.relevance.score >= 0.5 ? "text-yellow-600" :
+                      evaluationMetrics?.relevance?.score != null && evaluationMetrics?.relevance?.score >= 0.8 ? "text-green-600" :
+                      evaluationMetrics?.relevance?.score != null && evaluationMetrics?.relevance?.score >= 0.5 ? "text-yellow-600" :
                       "text-gray-400"
                     }`}>
-                      {evaluationMetrics?.relevance.score != null ? `${(evaluationMetrics.relevance.score * 100).toFixed(0)}%` : "待评估"}
+                      {evaluationMetrics?.relevance?.score != null ? `${(evaluationMetrics?.relevance?.score * 100).toFixed(0)}%` : "待评估"}
                     </span>
                   </div>
                   <div className="w-full bg-gray-200 rounded-full h-1.5">
                     <div
                       className={`h-1.5 rounded-full ${
-                        evaluationMetrics?.relevance.score != null && evaluationMetrics.relevance.score >= 0.8 ? "bg-green-500" :
-                        evaluationMetrics?.relevance.score != null && evaluationMetrics.relevance.score >= 0.5 ? "bg-yellow-500" :
+                        evaluationMetrics?.relevance?.score != null && evaluationMetrics?.relevance?.score >= 0.8 ? "bg-green-500" :
+                        evaluationMetrics?.relevance?.score != null && evaluationMetrics?.relevance?.score >= 0.5 ? "bg-yellow-500" :
                         "bg-gray-300"
                       }`}
-                      style={{ width: `${(evaluationMetrics?.relevance.score ?? 0) * 100}%` }}
+                      style={{ width: `${(evaluationMetrics?.relevance?.score ?? 0) * 100}%` }}
                     />
                   </div>
                   <p className="text-[10px] text-gray-400 mt-1">内容是否与需求相关</p>
@@ -467,21 +485,21 @@ export default function DocPreview({
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-[11px] text-gray-500">内容完整度</span>
                     <span className={`text-sm font-bold ${
-                      evaluationMetrics?.completeness.score != null && evaluationMetrics.completeness.score >= 0.8 ? "text-green-600" :
-                      evaluationMetrics?.completeness.score != null && evaluationMetrics.completeness.score >= 0.5 ? "text-yellow-600" :
+                      evaluationMetrics?.completeness?.score != null && evaluationMetrics?.completeness?.score >= 0.8 ? "text-green-600" :
+                      evaluationMetrics?.completeness?.score != null && evaluationMetrics?.completeness?.score >= 0.5 ? "text-yellow-600" :
                       "text-gray-400"
                     }`}>
-                      {evaluationMetrics?.completeness.score != null ? `${(evaluationMetrics.completeness.score * 100).toFixed(0)}%` : "待评估"}
+                      {evaluationMetrics?.completeness?.score != null ? `${(evaluationMetrics?.completeness?.score * 100).toFixed(0)}%` : "待评估"}
                     </span>
                   </div>
                   <div className="w-full bg-gray-200 rounded-full h-1.5">
                     <div
                       className={`h-1.5 rounded-full ${
-                        evaluationMetrics?.completeness.score != null && evaluationMetrics.completeness.score >= 0.8 ? "bg-green-500" :
-                        evaluationMetrics?.completeness.score != null && evaluationMetrics.completeness.score >= 0.5 ? "bg-yellow-500" :
+                        evaluationMetrics?.completeness?.score != null && evaluationMetrics?.completeness?.score >= 0.8 ? "bg-green-500" :
+                        evaluationMetrics?.completeness?.score != null && evaluationMetrics?.completeness?.score >= 0.5 ? "bg-yellow-500" :
                         "bg-gray-300"
                       }`}
-                      style={{ width: `${(evaluationMetrics?.completeness.score ?? 0) * 100}%` }}
+                      style={{ width: `${(evaluationMetrics?.completeness?.score ?? 0) * 100}%` }}
                     />
                   </div>
                   <p className="text-[10px] text-gray-400 mt-1">是否覆盖需求的所有要点</p>
@@ -502,20 +520,9 @@ export default function DocPreview({
               {/* 详细信息 */}
               {evaluationMetrics && (
                 <div className="space-y-2">
-                  {/* 不相关内容 */}
-                  {evaluationMetrics.relevance.irrelevantSentences && evaluationMetrics.relevance.irrelevantSentences.length > 0 && (
-                    <div className="px-3 py-2 rounded-lg bg-yellow-50 border border-yellow-200">
-                      <p className="text-[11px] text-yellow-700 font-medium mb-1">⚠️ 以下内容可能与需求无关（点击跳转）：</p>
-                      <ul className="text-[10px] text-yellow-600 space-y-0.5">
-                        {evaluationMetrics.relevance.irrelevantSentences.slice(0, 3).map((s, i) => (
-                          <li key={i} className="cursor-pointer hover:underline" onClick={() => scrollToParagraph(s)}>• {s.substring(0, 50)}...</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
 
                   {/* 遗漏要点 */}
-                  {evaluationMetrics.completeness.missingPoints && evaluationMetrics.completeness.missingPoints.length > 0 && (
+                  {evaluationMetrics.completeness?.missingPoints && evaluationMetrics.completeness.missingPoints.length > 0 && (
                     <div className="px-3 py-2 rounded-lg bg-orange-50 border border-orange-200">
                       <p className="text-[11px] text-orange-700 font-medium mb-1">⚠️ 以下需求要点可能未覆盖：</p>
                       <ul className="text-[10px] text-orange-600 space-y-0.5">

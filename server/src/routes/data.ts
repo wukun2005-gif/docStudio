@@ -28,6 +28,7 @@ dataRouter.get("/:store", (req, res) => {
 
     const records: Array<Record<string, unknown>> = [];
     const needsTitleFix: Array<{ record: Record<string, unknown>; recordId: string }> = [];
+    const needsWorkflowFix: Array<{ record: Record<string, unknown>; recordId: string }> = [];
     for (const row of rows) {
       try {
         const parsed = JSON.parse(row.data);
@@ -35,6 +36,9 @@ dataRouter.get("/:store", (req, res) => {
         records.push(record);
         if (store === "cases" && (!record.title || record.title === "新文档") && record.createdAt) {
           needsTitleFix.push({ record, recordId: row.record_id });
+        }
+        if (store === "cases" && record.workflowState === "generating") {
+          needsWorkflowFix.push({ record, recordId: row.record_id });
         }
       } catch {
         logger.warn(`[Data] Corrupted JSON in store=${store} record=${row.record_id}, skipping`);
@@ -68,6 +72,55 @@ dataRouter.get("/:store", (req, res) => {
             { table: "sync_data", recordId, source: "data_api", newData: fullData },
           );
           logger.debug(`[Data] 动态修正 case 标题: "新文档" → "${bestTitle}" (case: ${record.id})`);
+        }
+      }
+    }
+
+    // 动态修正 case workflowState：用 generation_runs 真实状态校准
+    if (needsWorkflowFix.length > 0) {
+      const runIds = needsWorkflowFix
+        .map((r) => (r.record.lastRunId as string | undefined) || "")
+        .filter((id) => id.length > 0);
+      const runsMap = new Map<string, string>();
+      if (runIds.length > 0) {
+        const placeholder = runIds.map(() => "?").join(",");
+        const runs = dbAll<{ id: string; status: string }>(
+          `SELECT id, status FROM generation_runs WHERE id IN (${placeholder})`,
+          runIds,
+        );
+        for (const r of runs) runsMap.set(r.id, r.status);
+      }
+      for (const { record, recordId } of needsWorkflowFix) {
+        const lastRunId = (record.lastRunId as string | undefined) || "";
+        const runStatus = lastRunId ? runsMap.get(lastRunId) : undefined;
+        let newState: string | undefined;
+        if (runStatus === "done") newState = "completed";
+        else if (runStatus === "crashed") newState = "error";
+        else if (!lastRunId) {
+          // 没有 lastRunId，用 created_at 时间戳找最近的 run
+          const caseCreated = new Date((record.createdAt as string) || Date.now()).getTime() / 1000;
+          const latestRun = dbGet<{ id: string; status: string; created_at: string }>(
+            "SELECT id, status, created_at FROM generation_runs ORDER BY ABS(strftime('%s', created_at) - ?) ASC LIMIT 1",
+            [caseCreated.toString()],
+          );
+          if (latestRun) {
+            const diff = Math.abs(new Date(latestRun.created_at).getTime() / 1000 - caseCreated);
+            if (diff < 86400) {
+              if (latestRun.status === "done") newState = "completed";
+              else if (latestRun.status === "crashed") newState = "error";
+            }
+          }
+        }
+        if (newState) {
+          record.workflowState = newState;
+          const fullData = { ...record };
+          delete fullData.id;
+          dbRun(
+            "UPDATE sync_data SET data = ?, updated_at = datetime('now','localtime') WHERE store_name = 'cases' AND record_id = ?",
+            [JSON.stringify(fullData), recordId],
+            { table: "sync_data", recordId, source: "data_api", newData: fullData },
+          );
+          logger.info(`[Data] 动态修正 case workflowState: generating → ${newState} (case: ${record.id})`);
         }
       }
     }

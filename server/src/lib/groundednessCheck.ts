@@ -8,9 +8,49 @@
  */
 import { logger } from "./logger.js";
 import { registry } from "../providers/registry.js";
+import { isReasoningModelStatic } from "../providers/openai.js";
 import { getApiKey } from "../security/keyStore.js";
 import { readSettingsFromDb } from "./settingsReader.js";
 import { resolveEvalMaxTokens } from "./llmUtils.js";
+
+// ── 任务感知的模型选择 ──────────────────────────────────
+//
+// groundedness check 是"事实匹配 + JSON 结构化输出"任务，
+// 不需要推理模型的推理深度。当且仅当用户启用了 model fallback 时，
+// 主动从 fallback 链中挑选第一个非推理模型。
+//
+// 原则：用户未启用 fallback 时，尊重用户的显式选择，不做替换。
+
+function selectBestEvalModel(
+  primaryModel: string,
+  providerPreference: string[],
+  dbSettings: ReturnType<typeof readSettingsFromDb>,
+): string {
+  // 主模型不是推理模型 → 直接用
+  if (!isReasoningModelStatic(primaryModel)) return primaryModel;
+
+  // 当且仅当用户启用了至少一个 provider 的 model fallback
+  const fallbackMap = dbSettings.enableModelFallback ?? {};
+  const fallbackEnabled = Object.values(fallbackMap).some(Boolean);
+  if (!fallbackEnabled) return primaryModel;
+
+  // 从 fallback 链扫描，找第一个非推理模型
+  const fallbackLists = dbSettings.modelFallbacks ?? {};
+  for (const pid of providerPreference) {
+    if (!fallbackMap[pid]) continue; // 该 provider 未启用 fallback
+    const list = fallbackLists[pid];
+    if (!list || list.length === 0) continue;
+    for (const m of list) {
+      if (!isReasoningModelStatic(m)) {
+        logger.info(`[Groundedness] 任务感知选模型: ${primaryModel} → ${m} (非推理模型)`);
+        return m;
+      }
+    }
+  }
+
+  // fallback 链全是推理模型 → 回落到主模型
+  return primaryModel;
+}
 
 // ── 类型定义 ──────────────────────────────────────────
 
@@ -201,7 +241,10 @@ async function callJudge(
       if (key) providerApiKeys[pid] = key;
     }
 
-    const modelId = config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro";
+    const primaryModel = config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro";
+    const modelId = config.modelId // 调用方显式指定模型时，尊重选择
+      ? primaryModel
+      : selectBestEvalModel(primaryModel, providers, dbSettings);
 
     // 评估 judge 使用固定 cap，避免推理模型 4x 放大导致超时
     const maxTokens = resolveEvalMaxTokens(modelId);
@@ -277,10 +320,15 @@ async function callJudge(
         if (key) providerApiKeys[pid] = key;
       }
 
+      const retryPrimaryModel = config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro";
+      const retryModelId = config.modelId
+        ? retryPrimaryModel
+        : selectBestEvalModel(retryPrimaryModel, providers, dbSettings);
+
       const { response: retryResponse } = await registry.runWithFallback(
         providers,
         {
-          modelId: config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro",
+          modelId: retryModelId,
           messages: [
             { role: "system", content: buildJudgePrompt(sentences, groundingDocs).system },
             { role: "user", content: buildJudgePrompt(sentences, groundingDocs).user },

@@ -106,7 +106,18 @@ export function buildProvenanceTree(
 ): void {
   dbTransaction(() => {
     for (const para of paragraphs) {
-      // ── 每个段落内归一化分数到 0–1（Bug 5 fix：RRF 原始分数 ~0.003–0.015 对 UI 无意义）──
+      const hasSources = para.sources.length > 0 || (para.webCitations?.length ?? 0) > 0;
+
+      if (!hasSources) {
+        const nodeId = crypto.randomUUID();
+        dbRun(`INSERT INTO provenance_nodes
+          (id, run_id, paragraph_idx, paragraph_title, grounding_score, score, is_manual, created_at)
+          VALUES (?, ?, ?, ?, ?, 0, 0, datetime('now','localtime'))`,
+          [nodeId, runId, para.idx, para.title ?? null, para.groundingScore ?? null],
+          { table: "provenance_nodes", recordId: nodeId, source: "provenance", skipReadOld: true });
+        continue;
+      }
+
       const allScores: number[] = [
         ...para.sources.map((s) => s.score),
         ...(para.webCitations ?? []).map((wc) => wc.score ?? 0.5),

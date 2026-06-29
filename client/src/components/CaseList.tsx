@@ -8,6 +8,7 @@ const STATE_LABELS: Record<string, string> = {
   draft: "编辑中",
   "outline-ready": "大纲就绪",
   generating: "生成中",
+  evaluating: "评估中",
   completed: "已完成",
   error: "失败",
 };
@@ -16,6 +17,7 @@ const STATE_COLORS: Record<string, string> = {
   draft: "bg-gray-100 text-gray-600",
   "outline-ready": "bg-blue-100 text-blue-700",
   generating: "bg-yellow-100 text-yellow-700",
+  evaluating: "bg-purple-100 text-purple-700",
   completed: "bg-green-100 text-green-700",
   error: "bg-red-100 text-red-700",
 };

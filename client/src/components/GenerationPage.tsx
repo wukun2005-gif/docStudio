@@ -117,11 +117,17 @@ export default function GenerationPage() {
           .then((data) => {
             if (data.ok && data.evaluation?.metrics) {
               setEvaluationMetrics(data.evaluation.metrics);
+            } else {
+              // 无评估结果时清空，避免其他 case 的旧数据泄漏
+              setEvaluationMetrics(null);
             }
           })
-          .catch(() => { /* 静默失败 */ });
+          .catch(() => {
+            setEvaluationMetrics(null);
+          });
       } else {
         setSections([]);
+        setEvaluationMetrics(null);
       }
     } else {
       setLocalOutline([]);
@@ -132,6 +138,8 @@ export default function GenerationPage() {
       setDirtySections(new Set());
       setDocumentStyle(undefined);
       setEvaluationMetrics(null);
+      setEvaluating(false);
+      setEvaluationProgress(null);
     }
   }, [currentCase?.id]);
 
@@ -264,6 +272,8 @@ export default function GenerationPage() {
 
       const decoder = new TextDecoder();
       let buffer = "";
+      let eventName = "";
+      let eventData = "";  // eventName/eventData 必须在 while 外，跨 chunk 持久化
       let runId: string | null = null;
       let finalData: any = null;
       console.log("[SSE] reader created, entering stream loop");
@@ -281,9 +291,8 @@ export default function GenerationPage() {
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
 
-        // 解析 SSE 事件（按空行分隔事件）
-        let eventName = "";
-        let eventData = "";
+        console.log(`[SSE] chunk state: eventName="${eventName}" eventData=${eventData.length} bufferRest=${buffer.length}`);
+
         for (const line of lines) {
           if (line === "") {
             // 事件结束，处理
@@ -341,18 +350,31 @@ export default function GenerationPage() {
             eventData = "";
           } else if (line.startsWith("event: ")) {
             eventName = line.substring(7).trim();
+            console.log(`[SSE gen] eventName set to "${eventName}"`);
           } else if (line.startsWith("data: ")) {
             eventData += line.substring(6);
+          } else if (line.length > 0) {
+            const hexPrefix = Array.from(line.substring(0, 40)).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join(' ');
+            console.warn(`[SSE gen] unmatched line (${line.length} chars): hex[0..40]=${hexPrefix} text="${line.substring(0, 40).replace(/\n/g, '\\n')}"`);
           }
         }
       }
+      // ── 流结束后：检查 buffer 中是否还有残留数据 ──
+      console.log(`[SSE gen] after stream: bufferRest=${buffer.length} eventName="${eventName}" eventData=${eventData.length}`);
 
       // 处理最终结果
       if (finalData && finalData.ok) {
         console.log("[GenerationPage] stream generate success, content length:", finalData.content?.length);
         setDocument(finalData.content);
         setTrustScore(finalData.trustScore);
-        setSections(finalData.sections ?? receivedSections as any);
+        // 合并 done event 数据和流式收到的 source 数据（done event 的 sections 不含 sources/webCitations）
+        const doneSections = finalData.sections ?? [];
+        const finalSections = doneSections.map((s: any, i: number) => ({
+          ...s,
+          sources: receivedSections[i]?.sources ?? [],
+          webCitations: receivedSections[i]?.webCitations ?? [],
+        }));
+        setSections(finalSections.length > 0 ? finalSections : receivedSections as any);
         setDirtySections(new Set());
         setDocumentStyle(finalData.documentStyle);
         if (finalData.runId) {
@@ -364,7 +386,7 @@ export default function GenerationPage() {
           updateTitle(finalData.title);
         }
         updateGeneratedContent(finalData.content, finalData.trustScore);
-        updateWorkflowState("completed");
+        updateWorkflowState("evaluating");
         setGenerating(false);
 
         // 生成完成后自动触发评估（SSE 流式）
@@ -376,14 +398,30 @@ export default function GenerationPage() {
         setDocument(`<p style="color:red">生成失败: ${safeError}</p>`);
         updateWorkflowState("error", finalData.error);
       } else {
-        // 流结束但没有 done 事件，用已收到的章节显示
+        // 流结束但没有 done 事件（SSE event 数据跨 TCP chunk 解析失败时的 fallback）
         if (receivedSections.length > 0) {
+          console.log("[GenerationPage] no done event, reconstructing from receivedSections, count:", receivedSections.length);
           const sectionsHtml = receivedSections.map((s) => `<section><h2>${escapeHtml(s.title)}</h2>${s.content}</section>`).join("\n");
           setDocument(sectionsHtml);
-          updateWorkflowState("completed");
+          // 计算 trustScore
+          const groundingScores = receivedSections.map((s) => s.groundingScore).filter((s) => s > 0);
+          const avgTrust = groundingScores.length > 0
+            ? groundingScores.reduce((a, b) => a + b, 0) / groundingScores.length
+            : null;
+          setTrustScore(avgTrust);
+          setSections(receivedSections as any);
+          setDirtySections(new Set());
+          updateGeneratedContent(sectionsHtml, avgTrust ?? undefined);
+          updateWorkflowState("evaluating");
+          setGenerating(false);
+          // 触发评估
+          if (runId) {
+            evaluateWithSSE(runId);
+          }
         } else {
           setDocument(`<p style="color:red">生成失败: 未收到内容</p>`);
           updateWorkflowState("error", "未收到内容");
+          setGenerating(false);
         }
       }
     } catch (err) {
@@ -401,6 +439,9 @@ export default function GenerationPage() {
     setEvaluationProgress(null);
     setEvaluationMetrics(null);
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 300_000);
+
     try {
       const apiBase = import.meta.env.DEV ? "http://localhost:3000" : "";
       const res = await fetch(`${apiBase}/api/generation/${targetRunId}/evaluate/stream`, {
@@ -409,23 +450,30 @@ export default function GenerationPage() {
         body: JSON.stringify({
           userRequest: currentCase?.userRequest ?? localOutline[0]?.title ?? "",
         }),
+        signal: controller.signal,
       });
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
         console.warn("[GenerationPage] SSE evaluation failed:", err.error);
+        updateWorkflowState("completed", err.error);
         setEvaluating(false);
+        clearTimeout(timeoutId);
         return;
       }
 
       const reader = res.body?.getReader();
       if (!reader) {
+        updateWorkflowState("completed", "无法读取评估流");
         setEvaluating(false);
+        clearTimeout(timeoutId);
         return;
       }
 
       const decoder = new TextDecoder();
       let buffer = "";
+      let eventName = "";
+      let eventData = "";
       let partialMetrics: any = {};
 
       while (true) {
@@ -436,8 +484,6 @@ export default function GenerationPage() {
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
 
-        let eventName = "";
-        let eventData = "";
         for (const line of lines) {
           if (line === "") {
             if (eventName === "evaluate-start") {
@@ -449,7 +495,6 @@ export default function GenerationPage() {
                 ...prev,
                 tasks: { ...prev.tasks, [data.task]: data },
               } : null);
-              // 增量更新对应指标
               if (data.status === "done" && data.score !== undefined) {
                 partialMetrics[data.task] = { score: data.score };
                 setEvaluationMetrics({ ...partialMetrics });
@@ -472,9 +517,17 @@ export default function GenerationPage() {
           }
         }
       }
+      updateWorkflowState("completed");
     } catch (err) {
-      console.warn("[GenerationPage] SSE evaluation stream error:", err);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "AbortError" || msg.includes("aborted")) {
+        updateWorkflowState("completed", "评估超时");
+      } else {
+        console.warn("[GenerationPage] SSE evaluation stream error:", err);
+        updateWorkflowState("completed", msg);
+      }
     } finally {
+      clearTimeout(timeoutId);
       setEvaluating(false);
       setEvaluationProgress(null);
     }
@@ -482,6 +535,7 @@ export default function GenerationPage() {
 
   const handleEvaluate = async () => {
     if (!runId) return;
+    updateWorkflowState("evaluating");
     evaluateWithSSE(runId);
   };
 

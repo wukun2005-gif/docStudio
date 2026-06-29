@@ -16,6 +16,7 @@ export const generationRouter = Router();
 
 /** POST /api/generation/generate — 一键生成文档 */
 generationRouter.post("/generate", async (req, res) => {
+  let runId = "";
   try {
     const { title, outline, format, providerPreference, modelId, apiKey, providerBaseUrls, userRequest } = req.body;
 
@@ -49,7 +50,7 @@ generationRouter.post("/generate", async (req, res) => {
       }
     }
 
-    const runId = crypto.randomUUID();
+    runId = crypto.randomUUID();
     dbRun(`INSERT INTO generation_runs (id, title, outline, format, status) VALUES (?, ?, ?, ?, ?)`,
       [runId, title, JSON.stringify(outline), format ?? "html", "generating"],
       { table: "generation_runs", recordId: runId, source: "generation", newData: { title, format: format ?? "html", status: "generating" } });
@@ -83,20 +84,13 @@ generationRouter.post("/generate", async (req, res) => {
 
     // 构建生成树（段落级来源追溯）
     try {
-      const paragraphs = result.sections.flatMap((s, sIdx) => {
-        const hasSources = s.sources.length > 0;
-        const hasWebCitations = s.webCitations && s.webCitations.length > 0;
-        if (hasSources || hasWebCitations) {
-          return [{
-            idx: sIdx,
-            title: s.title,
-            groundingScore: s.groundingScore,
-            sources: s.sources.map((src) => ({ chunkId: src.chunkId, score: src.score })),
-            webCitations: hasWebCitations ? s.webCitations : undefined,
-          }];
-        }
-        return [];
-      });
+      const paragraphs = result.sections.map((s, sIdx) => ({
+        idx: sIdx,
+        title: s.title,
+        groundingScore: s.groundingScore,
+        sources: s.sources.map((src) => ({ chunkId: src.chunkId, score: src.score })),
+        webCitations: s.webCitations?.length ? s.webCitations : undefined,
+      }));
       if (paragraphs.length > 0) {
         buildProvenanceTree(runId, paragraphs);
       }
@@ -119,12 +113,17 @@ generationRouter.post("/generate", async (req, res) => {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[Generation] 生成失败: ${msg}`);
+    try {
+      dbRun(`UPDATE generation_runs SET status = 'crashed', updated_at = datetime('now','localtime') WHERE id = ?`,
+        [runId], { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "crashed" } });
+    } catch {}
     res.status(500).json({ ok: false, error: msg });
   }
 });
 
 /** POST /api/generation/generate/stream — 流式生成文档（SSE，章节级推送） */
 generationRouter.post("/generate/stream", async (req, res) => {
+  let runId = "";
   try {
     const { title, outline, format, providerPreference, modelId, apiKey, providerBaseUrls, userRequest } = req.body;
 
@@ -155,7 +154,7 @@ generationRouter.post("/generate/stream", async (req, res) => {
       }
     }
 
-    const runId = crypto.randomUUID();
+    runId = crypto.randomUUID();
     dbRun(`INSERT INTO generation_runs (id, title, outline, format, status) VALUES (?, ?, ?, ?, ?)`,
       [runId, title, JSON.stringify(outline), format ?? "html", "generating"],
       { table: "generation_runs", recordId: runId, source: "generation", newData: { title, format: format ?? "html", status: "generating" } });
@@ -225,20 +224,13 @@ generationRouter.post("/generate/stream", async (req, res) => {
       { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "done", trustScore: result.trustScore, documentStyle: result.documentStyle } });
 
     try {
-      const paragraphs = result.sections.flatMap((s, sIdx) => {
-        const hasSources = s.sources.length > 0;
-        const hasWebCitations = s.webCitations && s.webCitations.length > 0;
-        if (hasSources || hasWebCitations) {
-          return [{
-            idx: sIdx,
-            title: s.title,
-            groundingScore: s.groundingScore,
-            sources: s.sources.map((src) => ({ chunkId: src.chunkId, score: src.score })),
-            webCitations: hasWebCitations ? s.webCitations : undefined,
-          }];
-        }
-        return [];
-      });
+      const paragraphs = result.sections.map((s, sIdx) => ({
+        idx: sIdx,
+        title: s.title,
+        groundingScore: s.groundingScore,
+        sources: s.sources.map((src) => ({ chunkId: src.chunkId, score: src.score })),
+        webCitations: s.webCitations?.length ? s.webCitations : undefined,
+      }));
       if (paragraphs.length > 0) {
         buildProvenanceTree(runId, paragraphs);
       }
@@ -249,8 +241,7 @@ generationRouter.post("/generate/stream", async (req, res) => {
     logger.info(`[Generation] 流式文档生成完成: ${docTitle}`);
 
     // ── 推送最终结果（done event） ──
-    res.write(`event: done\n`);
-    res.write(`data: ${JSON.stringify({
+    const donePayload = {
       ok: true,
       runId,
       title: docTitle,
@@ -259,12 +250,30 @@ generationRouter.post("/generate/stream", async (req, res) => {
       trustScore: result.trustScore,
       documentStyle: result.documentStyle,
       ...(result.conflictResolution ? { conflictResolution: result.conflictResolution } : {}),
-    })}\n\n`);
+    };
+    const doneJson = JSON.stringify(donePayload);
+    logger.info(`[Generation] done event JSON: jsonLen=${doneJson.length} contentLen=${htmlContent.length} sections=${result.sections.length} conflictRes=${!!result.conflictResolution}`);
+
+    // 诊断：检查 JSON 是否包含未转义的换行符（会破坏 SSE 协议）
+    const nlInJson = doneJson.split('\n').length - 1;
+    if (nlInJson > 0) {
+      logger.warn(`[Generation] done event JSON 包含 ${nlInJson} 个实际换行符（应为 0）— 会导致客户端 SSE 解析失败`);
+    }
+
+    const write1Ok = res.write(`event: done\n`);
+    const write2Ok = res.write(`data: ${doneJson}\n\n`);
+    if (!write1Ok) logger.warn(`[Generation] done event write1 返回 false（backpressure）`);
+    if (!write2Ok) logger.warn(`[Generation] done event write2 返回 false（backpressure）`);
     res.end();
+    logger.info(`[Generation] done event sent & stream ended, total=${13 + doneJson.length + 2} bytes`);
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[Generation] 流式生成失败: ${msg}`);
+    try {
+      dbRun(`UPDATE generation_runs SET status = 'crashed', updated_at = datetime('now','localtime') WHERE id = ?`,
+        [runId], { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "crashed" } });
+    } catch {}
     // 如果还能写，就写 error event
     if (!res.writableEnded) {
       res.write(`event: error\n`);
@@ -555,16 +564,16 @@ function parseHtmlSections(html: string, title: string): ExportSection[] {
   const sections: ExportSection[] = [];
 
   // 先将 citation 链接转换为 [N] 纯文本，避免 HTML 标签剥离不完整导致属性残留
-  // 注意：使用 [\s\S]*? 而不是 [^>]* 来匹配，因为 markdown 处理可能破坏 HTML 结构（如 _blank 变成 <em>blank）
+  // 逐层清理：先处理完整 sup+link 结构，再处理残留
   let processedHtml = html
-    // 完整的链接结构：<sup><a ...>[N]</a></sup> → [N]
-    .replace(/<sup><a[\s\S]*?>\[(\d+)\]<\/a><\/sup>/g, '[$1]')
-    // span 结构：<sup><span ...>[N]</span></sup> → [N]
-    .replace(/<sup><span[\s\S]*?>\[(\d+)\]<\/span><\/sup>/g, '[$1]')
-    // 其他 sup 包裹：<sup...>[N]</sup> → [N]
-    .replace(/<sup[\s\S]*?>\[(\d+)\]<\/sup>/g, '[$1]')
-    // 剩余的裸链接（不含 sup）：<a ...>[N]</a> → [N]
-    .replace(/<a[\s\S]*?>\[(\d+)\]<\/a>/g, '[$1]');
+    // 完整的 <sup><a ...>[N]</a></sup> 或 <sup><span ...>[N]</span></sup> → [N]
+    .replace(/<sup>\s*<(?:a|span)[^>]*?>\[(\d+)\]<\/(?:a|span)>\s*<\/sup>/gi, '[$1]')
+    // 残留 sup 标签包裹的：[N] → [N]
+    .replace(/<sup[^>]*?>\s*\[(\d+)\]\s*<\/sup>/gi, '[$1]')
+    // 残留裸 a 链接：[N] → [N]
+    .replace(/<a[^>]*?>\s*\[(\d+)\]\s*<\/a>/gi, '[$1]')
+    // 残留裸 span：[N] → [N]
+    .replace(/<span[^>]*?>\s*\[(\d+)\]\s*<\/span>/gi, '[$1]');
 
   // 尝试从 <section><h2>...</h2>...</section> 结构提取
   const sectionRegex = /<section>\s*<h2>(.*?)<\/h2>([\s\S]*?)<\/section>/gi;
@@ -1368,6 +1377,12 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
       ? groundingScores.reduce((a, b) => a + b, 0) / groundingScores.length
       : 0.5;
 
+    // 计算 faithfulness：基于 provenance 数据，有源可查的章节比例
+    const sectionsWithAnySource = sectionsWithSources.filter((s) => s.sources.length > 0).length;
+    const faithfulnessScore = sections.length > 0
+      ? Math.min(1, (sectionsWithAnySource / sections.length) * (groundednessScore > 0 ? 1 : 0.5))
+      : 0.5;
+
     // 保存评估结果
     try {
       const evalId = crypto.randomUUID();
@@ -1378,6 +1393,7 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
         evalId,
         req.params.id,
         JSON.stringify({
+          faithfulness: faithfulnessScore,
           groundedness: groundednessScore,
           relevance: relevanceResult.score,
           completeness: completenessResult.score,
@@ -1393,10 +1409,13 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
       logger.warn(`[Generation] 保存评估结果失败: ${e}`);
     }
 
+    logger.info(`[Generation] 流式评估完成: runId=${req.params.id}, faithfulness=${faithfulnessScore.toFixed(3)}, groundedness=${groundednessScore.toFixed(3)}, relevance=${relevanceResult.score.toFixed(3)}, completeness=${completenessResult.score.toFixed(3)}, conflicts=${finalConflicts.conflicts.length}`);
+
     writeSSE("evaluate-done", {
       ok: true,
       runId: req.params.id,
       metrics: {
+        faithfulness: { score: faithfulnessScore, label: "事实忠实度", description: "文档内容是否忠实于参考来源" },
         groundedness: { score: groundednessScore, label: "有据可查度", description: "内容是否有来源支撑" },
         relevance: { score: relevanceResult.score, label: "内容相关度", description: "内容是否与需求相关", irrelevantSentences: relevanceResult.irrelevantSentences },
         completeness: { score: completenessResult.score, label: "内容完整度", description: "是否覆盖需求的所有要点", coveredPoints: completenessResult.coveredPoints, missingPoints: completenessResult.missingPoints },
@@ -1405,6 +1424,7 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
     });
 
     res.end();
+    logger.info(`[Generation] 流式评估 SSE 响应已关闭: runId=${req.params.id}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[Generation] 流式评估失败: ${msg}`);
@@ -1436,6 +1456,11 @@ generationRouter.get("/:id/evaluation", (req, res) => {
 
     // 转换为前端期望的格式（兼容旧格式和新格式）
     const metrics = {
+      faithfulness: {
+        score: rawMetrics.faithfulness ?? 0.5,
+        label: "事实忠实度",
+        description: "文档内容是否忠实于参考来源",
+      },
       groundedness: {
         score: rawMetrics.groundedness ?? 0.5,
         label: "有据可查度",

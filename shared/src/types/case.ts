@@ -8,7 +8,8 @@ export type CaseWorkflowState =
   | "draft"           // 刚创建，用户正在输入需求
   | "outline-ready"   // 大纲已生成，用户可编辑
   | "generating"      // 文档生成中
-  | "completed"       // 文档生成完成
+  | "evaluating"      // 评估进行中（生成已完成，内容评估中）
+  | "completed"       // 文档生成与评估完成
   | "error";          // 生成失败
 
 export interface DocumentCase {

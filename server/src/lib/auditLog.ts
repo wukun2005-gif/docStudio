@@ -6,6 +6,7 @@
  */
 import { appendFileSync, mkdirSync, renameSync, statSync, readFileSync, existsSync } from "fs";
 import { join, dirname } from "path";
+import { localShort } from "../../../shared/src/datetime.js";
 
 const DATA_DIR = process.env.DB_DIR ?? join(process.cwd(), "data");
 const LOG_FILE = join(DATA_DIR, "db-audit.log");
@@ -81,7 +82,7 @@ function rotateIfNeeded(): void {
  * 异常不抛出，仅 warn 日志（审计失败不应阻断业务）
  */
 export function logAudit(entry: AuditLogEntry): void {
-  const ts = new Date().toISOString();
+  const ts = localShort();
   const line = JSON.stringify({
     ts,
     table: entry.table,

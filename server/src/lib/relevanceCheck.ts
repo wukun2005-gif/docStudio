@@ -16,9 +16,42 @@
 
 import { logger } from "./logger.js";
 import { registry } from "../providers/registry.js";
+import { isReasoningModelStatic } from "../providers/openai.js";
 import { getApiKey } from "../security/keyStore.js";
 import { readSettingsFromDb } from "./settingsReader.js";
 import { resolveEvalMaxTokens, estimateTokens, getModelContextInfo, calculateAvailableInputTokens } from "./llmUtils.js";
+
+// ── 任务感知的模型选择 ──────────────────────────────────
+//
+// relevance check 是"逐句相关性判定 + JSON 结构化输出"任务，
+// 不需要推理模型的推理深度。当且仅当用户启用了 model fallback 时，
+// 主动从 fallback 链中挑选第一个非推理模型。
+
+function selectBestEvalModel(
+  primaryModel: string,
+  providerPreference: string[],
+  dbSettings: ReturnType<typeof readSettingsFromDb>,
+): string {
+  if (!isReasoningModelStatic(primaryModel)) return primaryModel;
+
+  const fallbackMap = dbSettings.enableModelFallback ?? {};
+  const fallbackEnabled = Object.values(fallbackMap).some(Boolean);
+  if (!fallbackEnabled) return primaryModel;
+
+  const fallbackLists = dbSettings.modelFallbacks ?? {};
+  for (const pid of providerPreference) {
+    if (!fallbackMap[pid]) continue;
+    const list = fallbackLists[pid];
+    if (!list || list.length === 0) continue;
+    for (const m of list) {
+      if (!isReasoningModelStatic(m)) {
+        logger.info(`[RelevanceCheck] 任务感知选模型: ${primaryModel} → ${m} (非推理模型)`);
+        return m;
+      }
+    }
+  }
+  return primaryModel;
+}
 
 // ============ Types ============
 
@@ -36,27 +69,37 @@ export interface RelevanceCheckResult {
 
 // ============ LLM Judge ============
 
-const RELEVANCE_JUDGE_SYSTEM = `你是一名严苛的文档相关性核查员。你的任务是逐句判断生成文档中的每个声明是否与用户原始需求直接相关。必须从严判定，宁可误杀不可放过：当你对相关性有任何疑虑时，应标记为 irrelevant。
+const RELEVANCE_JUDGE_SYSTEM = `你是一名专业的文档相关性核查员。你的任务是逐句判断生成文档中的每个声明是否与用户原���需求直接相关。
 
-CORRELATION RULES（严格执行）：
-- relevant：声明直接回答、支撑或展开用户需求的具体方面，删除后文档会在该需求上出现缺口
-- irrelevant：声明是泛泛而谈、偏离主题、 boilerplate 空话、与需求不直接相关、或纯粹的过渡语句
+CORRELATION RULES（按以下标准判定）：
+- relevant：声明直接回答、支撑或展开用户需求的具体方面；或是文档结构中必要的组成部分
+- irrelevant：声明是泛泛而谈、完全偏离主题、无意义的空洞内容
 
-IRRELEVANCE 典型案例（遇到此类必须标记为 irrelevant）：
-- "本报告将对多个维度进行深入分析" — 典型空话，不传递任何与具体需求相关的信息
-- "软件工程是一门复杂的学科" — 常识性铺垫，与用户的具体需求无关
-- "综上所述，情况较为复杂" — 空洞总结
-- 任何不包含具体数据、具体结论、具体事实的过渡性句子
-- 在章节标题后重复用户需求但不提供任何新信息的句子
+RELEVANT 的典型场景（遇到此类应标记为 relevant）：
+- 文档开头的称呼/敬语（如"尊敬的陈宇、各位管理层"）— 这是面向特定读者的格式礼仪，与用户需求中指定的读者角色直接相关
+- 章节间的结构引导句（如"下一节将分析技术就绪度"、"后续章节将详细拆解各业务线"）— 帮助读者理解文档结构，是专业文档的必要组成
+- 面向不同读者的行动指引（如"请各部门负责人重点审阅对应模块"）— 与用户需��中"面向各负责人"的指示直接相关
+- 总结性陈述（如"综上所述"）— 用于收束章节、提炼要点，是文档结构的正常组成
+
+IRRELEVANT 的典型场景（遇到此类应标记为 irrelevant）：
+- 纯常识性铺垫（如"软件工程是一门复杂的学科"）— 与用户的具体需求无关
+- 完全空洞的套话（如"本报告将对多个维度进行深入分析"而不指明具体维度）
+- 明显偏离用户需求主题的离题内容
+- 在章节标题后机械重复用户需求但不提供任何新信息的句子
+
+判定原则：
+- 仅当声明完全无信息量或明显离题时标记为 irrelevant
+- 对正常文档结构要素（称呼、过渡、总结）给予 relevant 判定
+- 不确定时倾向于 relevant，因为文档结构完整性本身就是合格的
 
 CRITICAL OUTPUT FORMAT（必须严格按以下 JSON schema 输出，不得输出任何非 JSON 内容，不得输出 markdown 代码块）：
 {
   "verdicts": [
-    {"text": "被判定的声明原文", "relevant": true, "reason": "直接回答用户关于XX的具体需求"},
-    {"text": "被判定的声明原文", "relevant": false, "reason": "属于boilerplate空话，不提供与需求相关的具体信息"}
+    {"text": "���判定的声明原文", "relevant": true, "reason": "具体相关原因"},
+    {"text": "被判定的声明原文", "relevant": false, "reason": "具体不相关原因"}
   ],
   "irrelevant_sentences": ["不相关声明列表"],
-  "relevance_ratio": 0.72
+  "relevance_ratio": 0.85
 }
 
 强制要求：
@@ -94,11 +137,15 @@ const RELEVANCE_JUDGE_USER = `## 用户原始需求
 // ============ Core Logic ============
 
 /**
- * 拆分文档为句子/声明
+ * 拆分文档为句子/声明（先去除 HTML 标签，避免 LLM 看到标签碎片导致返回的文本与 DOM textContent 不匹配）
  */
+function stripHtml(html: string): string {
+  return html.replace(/<[^>]*>/g, '');
+}
+
 function splitIntoClaims(text: string): string[] {
-  // 按句子拆分，过滤空行和过短的句子（5字符阈值，保留更多有效句子）
-  return text
+  const cleanText = stripHtml(text);
+  return cleanText
     .split(/[。！？；\n]/)
     .map((s) => s.trim())
     .filter((s) => s.length > 5);
@@ -108,16 +155,30 @@ function splitIntoClaims(text: string): string[] {
  * 解析 JSON 响应
  */
 function parseJsonResponse<T>(content: string): T | null {
+  // 先剥离 markdown 代码块标记（如 ```json ... ```）
+  let cleaned = content.trim();
+  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenceMatch) {
+    cleaned = fenceMatch[1].trim();
+  }
   try {
-    // 尝试直接解析
-    const parsed = JSON.parse(content);
+    const parsed = JSON.parse(cleaned);
     return parsed as T;
   } catch {
-    // 尝试提取 JSON 块
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    // 尝试提取 JSON 块（非贪婪匹配，防止跨多个 JSON 对象误匹配）
+    const jsonMatch = cleaned.match(/\{(?:[^{}]|\{[^{}]*\})*\}/);
     if (jsonMatch) {
       try {
         return JSON.parse(jsonMatch[0]) as T;
+      } catch {
+        return null;
+      }
+    }
+    // 最后回退：贪婪匹配整个 JSON
+    const greedyMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (greedyMatch) {
+      try {
+        return JSON.parse(greedyMatch[0]) as T;
       } catch {
         return null;
       }
@@ -186,8 +247,9 @@ async function callRelevanceJudge(
     if (key) providerApiKeys[pid] = key;
   }
 
-  const maxTokens = resolveEvalMaxTokens(modelId);
-  logger.info(`[RelevanceCheck] 模型: ${modelId}, maxTokens: ${maxTokens}`);
+  const effectiveModelId = selectBestEvalModel(modelId, [providerId], dbSettings);
+  const maxTokens = resolveEvalMaxTokens(effectiveModelId);
+  logger.info(`[RelevanceCheck] 模型: ${effectiveModelId}, maxTokens: ${maxTokens}`);
 
   const jsonSchema = {
     type: "object",
@@ -215,7 +277,7 @@ async function callRelevanceJudge(
     const { response } = await registry.runWithFallback(
       providers,
       {
-        modelId: modelId,
+        modelId: effectiveModelId,
         messages: [
           { role: "system", content: RELEVANCE_JUDGE_SYSTEM },
           { role: "user", content: prompt },
@@ -253,7 +315,7 @@ async function callRelevanceJudge(
     const { response } = await registry.runWithFallback(
       providers,
       {
-        modelId: modelId,
+        modelId: effectiveModelId,
         messages: [
           { role: "system", content: RELEVANCE_JUDGE_SYSTEM },
           { role: "user", content: prompt + "\n\n⚠️ 注意：上一次调用未能输出有效的 JSON。请严格按 JSON 格式输出，不要输出任何解释性文字或 markdown 代码块。" },

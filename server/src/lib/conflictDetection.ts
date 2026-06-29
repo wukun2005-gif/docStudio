@@ -17,9 +17,42 @@
 
 import { logger } from "./logger.js";
 import { registry } from "../providers/registry.js";
+import { isReasoningModelStatic } from "../providers/openai.js";
 import { getApiKey } from "../security/keyStore.js";
 import { readSettingsFromDb } from "./settingsReader.js";
 import { resolveEvalMaxTokens, estimateTokens } from "./llmUtils.js";
+
+// ── 任务感知的模型选择 ──────────────────────────────────
+//
+// conflict detection 是"跨来源声明对比 + JSON 结构化输出"任务，
+// 不需要推理模型的推理深度。当且仅当用户启用了 model fallback 时，
+// 主动从 fallback 链中挑选第一个非推理模型。
+
+function selectBestEvalModel(
+  primaryModel: string,
+  providerPreference: string[],
+  dbSettings: ReturnType<typeof readSettingsFromDb>,
+): string {
+  if (!isReasoningModelStatic(primaryModel)) return primaryModel;
+
+  const fallbackMap = dbSettings.enableModelFallback ?? {};
+  const fallbackEnabled = Object.values(fallbackMap).some(Boolean);
+  if (!fallbackEnabled) return primaryModel;
+
+  const fallbackLists = dbSettings.modelFallbacks ?? {};
+  for (const pid of providerPreference) {
+    if (!fallbackMap[pid]) continue;
+    const list = fallbackLists[pid];
+    if (!list || list.length === 0) continue;
+    for (const m of list) {
+      if (!isReasoningModelStatic(m)) {
+        logger.info(`[ConflictDetection] 任务感知选模型: ${primaryModel} → ${m} (非推理模型)`);
+        return m;
+      }
+    }
+  }
+  return primaryModel;
+}
 
 // ============ Types ============
 
@@ -107,15 +140,30 @@ const CONFLICT_DETECTOR_USER = `## 知识来源内容
  * 解析 JSON 响应
  */
 function parseJsonResponse<T>(content: string): T | null {
+  // 先剥离 markdown 代码块标记（如 ```json ... ```）
+  let cleaned = content.trim();
+  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenceMatch) {
+    cleaned = fenceMatch[1].trim();
+  }
   try {
-    const parsed = JSON.parse(content);
+    const parsed = JSON.parse(cleaned);
     return parsed as T;
   } catch {
-    // 尝试提取 JSON 块
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    // 尝试提取 JSON 块（非贪婪匹配，防止跨多个 JSON 对象误匹配）
+    const jsonMatch = cleaned.match(/\{(?:[^{}]|\{[^{}]*\})*\}/);
     if (jsonMatch) {
       try {
         return JSON.parse(jsonMatch[0]) as T;
+      } catch {
+        return null;
+      }
+    }
+    // 最后回退：贪婪匹配整个 JSON
+    const greedyMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (greedyMatch) {
+      try {
+        return JSON.parse(greedyMatch[0]) as T;
       } catch {
         return null;
       }
@@ -205,16 +253,19 @@ async function callConflictDetector(
         if (key) providerApiKeys[pid] = key;
       }
 
-      const maxTokens = resolveEvalMaxTokens(modelId);
+      // 任务感知：conflict detection 不需要推理模型
+      const effectiveModelId = selectBestEvalModel(modelId, providers, dbSettings);
+
+      const maxTokens = resolveEvalMaxTokens(effectiveModelId);
 
       if (i === 0) {
-        logger.info(`[ConflictDetection] 模型: ${modelId}, maxTokens: ${maxTokens}`);
+        logger.info(`[ConflictDetection] 模型: ${effectiveModelId}, maxTokens: ${maxTokens}`);
       }
 
       const { response } = await registry.runWithFallback(
         providers,
         {
-          modelId: modelId,
+          modelId: effectiveModelId,
           messages: [
             { role: "system", content: CONFLICT_DETECTOR_SYSTEM },
             { role: "user", content: prompt },

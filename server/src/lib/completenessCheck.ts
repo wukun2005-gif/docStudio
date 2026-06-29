@@ -12,9 +12,42 @@
 
 import { logger } from "./logger.js";
 import { registry } from "../providers/registry.js";
+import { isReasoningModelStatic } from "../providers/openai.js";
 import { getApiKey } from "../security/keyStore.js";
 import { readSettingsFromDb } from "./settingsReader.js";
 import { resolveEvalMaxTokens, estimateTokens } from "./llmUtils.js";
+
+// ── 任务感知的模型选择 ──────────────────────────────────
+//
+// completeness check 是"需求要点覆盖判定 + JSON 结构化输出"任务，
+// 不需要推理模型的推理深度。当且仅当用户启用了 model fallback 时，
+// 主动从 fallback 链中挑选第一个非推理模型。
+
+function selectBestEvalModel(
+  primaryModel: string,
+  providerPreference: string[],
+  dbSettings: ReturnType<typeof readSettingsFromDb>,
+): string {
+  if (!isReasoningModelStatic(primaryModel)) return primaryModel;
+
+  const fallbackMap = dbSettings.enableModelFallback ?? {};
+  const fallbackEnabled = Object.values(fallbackMap).some(Boolean);
+  if (!fallbackEnabled) return primaryModel;
+
+  const fallbackLists = dbSettings.modelFallbacks ?? {};
+  for (const pid of providerPreference) {
+    if (!fallbackMap[pid]) continue;
+    const list = fallbackLists[pid];
+    if (!list || list.length === 0) continue;
+    for (const m of list) {
+      if (!isReasoningModelStatic(m)) {
+        logger.info(`[CompletenessCheck] 任务感知选模型: ${primaryModel} → ${m} (非推理模型)`);
+        return m;
+      }
+    }
+  }
+  return primaryModel;
+}
 
 // ============ Types ============
 
@@ -33,16 +66,24 @@ export interface CompletenessCheckResult {
 
 // ============ LLM Judge ============
 
-const COMPLETENESS_JUDGE_SYSTEM = `你是一名严苛的文档完整度核查员。你的任务是：先从用户原始需求中提取所有具体、可验证的要点，然后逐一检查每个要点是否在生成的文档中被充分覆盖。必须从严判定，宁可误杀不可放过：当你对"是否覆盖"有任何疑虑时，应标记为 missing。
+const COMPLETENESS_JUDGE_SYSTEM = `你是一名专业的文档完整度核查员。你的任务是：先从用户原始需求中提取所有具体、可验证的内容要点，然后逐一检查每个要点是否在生成的文档中被充分覆盖。用专业判断而非极端标准：仅当文档完全缺少对要点的实质性覆盖时才标记为 missing。
 
 COMPLETENESS RULES（严格执行）：
 - covered：文档中明确、充分地回答或展开了该需求要点，有具体的事实、数据或结论支撑
 - missing：文档未提及该要点、或仅表面提及但未展开、或回答得不够具体无法满足用户需求
 
 EXTRACTION RULES：
-- 提取具体、可验证的需求要点（如"评估 Sprint 3-4 的进度"、"列出关键风险"、"给出 GoToMarket 计划"）
+- 提取的是内容维度的需求要点（如"评估 Sprint 3-4 的进度"、"列出关键风险"、"给出 GoToMarket 计划"）
+- 不要提取格式/结构类元数据作为需求要点（如"文档标题应为XXX"、"章节应命名为XXX"）— 这类格式要素不影响内容质量判定
 - 不要提取过于宽泛或模糊的句子（如"写一份报告"不应拆出，必须拆到具体维度）
 - 每个要点应具体到可以独立验证"是否覆盖"
+
+COVERAGE RULES（覆盖面判定原则）：
+- 覆盖可以是直接引用，也可以是合理但表述不同的覆盖
+- 例如：需求要求"技术就绪度章节包含系统架构稳定性评估"，文档在技术就绪度章节中描述了架构稳定性，即使措辞不完全相同，也应判定为 covered
+- 例如：需求中写了完整的文档标题，但文档使用了简化的标题（如"产品发布准备度评估"），这是合理的标题改写，不应作为遗漏的内容要点
+- 仅当文档对需求要点完全缺少实质性覆盖时，才标记为 missing
+- 不确定时倾向于 covered
 
 CRITICAL OUTPUT FORMAT（必须严格按以下 JSON schema 输出，不得输出任何非 JSON 内容，不得输出 markdown 代码块）：
 {
@@ -56,7 +97,7 @@ CRITICAL OUTPUT FORMAT（必须严格按以下 JSON schema 输出，不得输出
 }
 
 强制要求：
-1. requirement_points 必须覆盖用户需求中所有可独立验证的具体要点
+1. requirement_points 必须覆盖用户需求中所有可独立验证的具体内容要点，但不包括格式/标题类元数据
 2. completeness_ratio = covered 数量 / 总要点数量（保留两位小数）
 3. 不要在 JSON 外输出任何解释性文字或 markdown 标记`;
 
@@ -88,15 +129,30 @@ const COMPLETENESS_JUDGE_USER = `## 用户原始需求
  * 解析 JSON 响应
  */
 function parseJsonResponse<T>(content: string): T | null {
+  // 先剥离 markdown 代码块标记（如 ```json ... ```）
+  let cleaned = content.trim();
+  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenceMatch) {
+    cleaned = fenceMatch[1].trim();
+  }
   try {
-    const parsed = JSON.parse(content);
+    const parsed = JSON.parse(cleaned);
     return parsed as T;
   } catch {
-    // 尝试提取 JSON 块
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    // 尝试提取 JSON 块（非贪婪匹配，防止跨多个 JSON 对象误匹配）
+    const jsonMatch = cleaned.match(/\{(?:[^{}]|\{[^{}]*\})*\}/);
     if (jsonMatch) {
       try {
         return JSON.parse(jsonMatch[0]) as T;
+      } catch {
+        return null;
+      }
+    }
+    // 最后回退：贪婪匹配整个 JSON
+    const greedyMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (greedyMatch) {
+      try {
+        return JSON.parse(greedyMatch[0]) as T;
       } catch {
         return null;
       }
@@ -127,8 +183,9 @@ async function callCompletenessJudge(
     if (key) providerApiKeys[pid] = key;
   }
 
-  const maxTokens = resolveEvalMaxTokens(modelId);
-  logger.info(`[CompletenessCheck] 模型: ${modelId}, maxTokens: ${maxTokens}`);
+  const effectiveModelId = selectBestEvalModel(modelId, [providerId], dbSettings);
+  const maxTokens = resolveEvalMaxTokens(effectiveModelId);
+  logger.info(`[CompletenessCheck] 模型: ${effectiveModelId}, maxTokens: ${maxTokens}`);
 
   const jsonSchema = {
     type: "object",
@@ -180,7 +237,7 @@ async function callCompletenessJudge(
     const { response } = await registry.runWithFallback(
       providers,
       {
-        modelId: modelId,
+        modelId: effectiveModelId,
         messages: [
           { role: "system", content: COMPLETENESS_JUDGE_SYSTEM },
           { role: "user", content: prompt },
@@ -212,7 +269,7 @@ async function callCompletenessJudge(
     const { response } = await registry.runWithFallback(
       providers,
       {
-        modelId: modelId,
+        modelId: effectiveModelId,
         messages: [
           { role: "system", content: COMPLETENESS_JUDGE_SYSTEM },
           { role: "user", content: prompt + "\n\n⚠️ 注意：上一次调用未能输出有效的 JSON。请严格按 JSON 格式输出，不要输出任何解释性文字或 markdown 代码块。" },
@@ -368,10 +425,12 @@ ${requirement}
       if (key) providerApiKeys[pid] = key;
     }
 
+    const effectiveModelId = selectBestEvalModel(modelId, [providerId], dbSettings);
+
     const { response } = await registry.runWithFallback(
       providers,
       {
-        modelId: modelId,
+        modelId: effectiveModelId,
         messages: [
           { role: "user", content: prompt },
         ],

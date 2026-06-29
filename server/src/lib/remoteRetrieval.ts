@@ -13,6 +13,11 @@ import { ingestFile, type EmbeddingConfig } from "./ingestion.js";
 import { getAllChunks, getAllVectors } from "./knowledgeDb.js";
 import crypto from "crypto";
 
+// ── 会话级缓存 ────────────────────────────────────────────
+
+/** 当前进程已下载的 OneDrive 文件缓存：Graph fileId → sourceId（避免同会话重复下载） */
+const onedriveCache = new Map<string, string>();
+
 // ── 类型定义 ────────────────────────────────────────────
 
 export interface RemoteRetrieveConfig {
@@ -97,6 +102,14 @@ export async function twoStageRetrieve(
 
   for (const candidate of topCandidates) {
     try {
+      // 检查会话缓存：是否已经下载并入库过
+      const cachedSourceId = onedriveCache.get(candidate.id);
+      if (cachedSourceId) {
+        ingestedSourceIds.push(cachedSourceId);
+        logger.info(`[RemoteRetrieve] 已有缓存（跳过下载）: ${candidate.name}`);
+        continue;
+      }
+
       // 下载文件
       logger.info(`[RemoteRetrieve] 下载文件: ${candidate.name} (${candidate.id})`);
       const { content, mimeType } = await downloadFile(
@@ -114,9 +127,15 @@ export async function twoStageRetrieve(
         embedding: config.embedding,
       });
 
-      if (result.status === "ok" || result.status === "duplicate") {
+      if (result.status === "ok") {
+        onedriveCache.set(candidate.id, result.sourceId);
         ingestedSourceIds.push(result.sourceId);
         logger.info(`[RemoteRetrieve] 入库成功: ${candidate.name}, ${result.chunkCount} chunks`);
+      } else if (result.status === "duplicate") {
+        // 内容相同，已在库中（可能由之前的 generation run 入库）
+        onedriveCache.set(candidate.id, result.sourceId);
+        ingestedSourceIds.push(result.sourceId);
+        logger.info(`[RemoteRetrieve] 文件已存在（复用入库）: ${candidate.name}, sourceId=${result.sourceId.slice(0, 8)}...`);
       }
     } catch (err) {
       logger.warn(`[RemoteRetrieve] 文件处理失败: ${candidate.name}: ${err instanceof Error ? err.message : String(err)}`);

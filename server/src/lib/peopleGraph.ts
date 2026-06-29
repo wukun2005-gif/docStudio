@@ -87,6 +87,34 @@ export function getPeopleByDepartment(department: string): Person[] {
   }));
 }
 
+/** 按职位关键词查找人员（三级模糊匹配，用于将用户 prompt 中的职位映射到 People Graph 人物） */
+export function findPersonByTitle(keyword: string): Person | undefined {
+  const kw = keyword.toLowerCase().trim();
+  if (!kw) return undefined;
+
+  const people = getAllPeople();
+
+  // 1. 完整关键词包含在 title 中
+  for (const p of people) {
+    if (p.title && p.title.toLowerCase().includes(kw)) return p;
+  }
+
+  // 2. 拆分关键词，逐个 token 匹配（处理 "VP 工程" vs "VP Engineering" 跨语言情况）
+  const tokens = kw.split(/\s+/).filter(t => t.length >= 2);
+  for (const token of tokens) {
+    for (const p of people) {
+      if (p.title && p.title.toLowerCase().includes(token)) return p;
+    }
+  }
+
+  // 3. 回退：关键词包含 person.title（适用于缩写如 "VP"）
+  for (const p of people) {
+    if (p.title && kw.includes(p.title.toLowerCase())) return p;
+  }
+
+  return undefined;
+}
+
 export function deletePerson(id: string): void {
   // 清理其他人员中指向该人员的反向关系
   const allPeople = getAllPeople();

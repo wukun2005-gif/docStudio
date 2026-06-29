@@ -45,6 +45,8 @@ describe("logAudit 基本功能", () => {
     expect(logs[0].record_id).toBe("test-001");
     expect(JSON.parse(logs[0].new_data!)).toEqual({ name: "测试数据" });
     expect(logs[0].source).toBe("test");
+    expect(logs[0].ts).not.toMatch(/Z$/);
+    expect(logs[0].ts).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });
 
   it("UPDATE 操作记录 old_data + new_data", () => {

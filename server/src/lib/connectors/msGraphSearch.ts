@@ -8,6 +8,34 @@
 
 import { logger } from "../logger.js";
 
+// ── 分词（兼容中英文）────────────────────────────────────
+
+/** 简单中文 + 英文分词：中文按 2-gram，英文按单词拆分 */
+function tokenize(text: string): string[] {
+  const normalized = text.toLowerCase().replace(/[^一-鿿a-z0-9]/g, " ");
+  const tokens: string[] = [];
+
+  // 英文单词
+  const englishWords = normalized.match(/[a-z]+/g) ?? [];
+  tokens.push(...englishWords);
+
+  // 连续数字（日期、编号等）
+  const numberGroups = normalized.match(/[0-9]+/g) ?? [];
+  tokens.push(...numberGroups);
+
+  // 中文按 2-gram
+  const chinese = normalized.match(/[一-鿿]+/g) ?? [];
+  for (const segment of chinese) {
+    for (let i = 0; i < segment.length - 1; i++) {
+      tokens.push(segment.slice(i, i + 2));
+    }
+    // 单字也算上
+    if (segment.length === 1) tokens.push(segment);
+  }
+
+  return tokens.filter((t) => t.length > 0);
+}
+
 // ── 类型定义 ────────────────────────────────────────────
 
 export interface GraphSearchConfig {
@@ -52,6 +80,36 @@ export interface GraphSearchOptions {
  * @param options 搜索选项
  * @returns 候选文件列表
  */
+/**
+ * Sanitize query for Microsoft Graph Search API.
+ *
+ * Graph Search 的查询解析器对特殊字符非常敏感：
+ *   - `:` 会被解析为 field 运算符（如 `author:john`）
+ *   - `(` `)` / `（` `）` 会被解析为分组语法
+ *   - `/` 会被解析为路径分隔符
+ *   - `AND` / `OR` / `NOT` 会被解析为布尔运算符
+ *
+ * 这些字符在中文文档标题和 section 描述中非常常见，
+ * 如果不剥离会导致 400 Bad Request。
+ *
+ * 策略：保留中文字符、字母、数字、空格、以及安全的标点（`-` `_` `.`），
+ *       其他所有特殊字符替换为空格，然后折叠连续空白。
+ */
+export function sanitizeGraphSearchQuery(raw: string): string {
+  if (!raw) return "";
+  // 1. 替换所有非安全字符为空格
+  //    安全字符：CJK 统一表意文字、CJK 扩展 A/B、字母、数字、- _ . 空格
+  let sanitized = raw.replace(/[^\u3400-\u9FFF\uF900-\uFAFFa-zA-Z0-9\-_.\s]/g, " ");
+  // 2. 折叠连续空白为单个空格
+  sanitized = sanitized.replace(/\s+/g, " ").trim();
+  // 3. 极限保护：如果 sanitized 为空（极端情况），用原始 query 的前几个词
+  if (!sanitized) {
+    const fallback = raw.slice(0, 20).replace(/\s+/g, " ").trim();
+    return fallback || "document";
+  }
+  return sanitized;
+}
+
 export async function searchFiles(
   config: GraphSearchConfig,
   query: string,
@@ -59,21 +117,71 @@ export async function searchFiles(
 ): Promise<GraphSearchResult[]> {
   const { top = 20, fileTypes, scope = "me" } = options;
 
-  // 构建查询字符串
-  let queryString = query;
-  if (fileTypes && fileTypes.length > 0) {
-    // 添加文件类型过滤
-    const typeFilter = fileTypes.map(t => `fileType:${t}`).join(" OR ");
-    queryString = `${query} AND (${typeFilter})`;
+  // Graph Search 不支持 section 描述中的复杂标点和布尔语法。
+  // 在调用 API 前必须 sanitize，否则会返回 400 Bad Request。
+  const sanitizedQuery = sanitizeGraphSearchQuery(query);
+
+  // ── 端点选择与查询构建 ──────────────────────────────────
+  //
+  // /me/drive/root/search（GET）: 简单关键字搜索，URL 参数中放 query。
+  //   ❌ 不支持 KQL： AND / OR / fileType: / (...)
+  //   ❌ 不支持特殊字符（冒号会触发 "Paths can only contain at most two colons"）
+  //
+  // /search/query（POST）: 高级搜索，JSON body 中放 query。
+  //   ✅ 支持 KQL 语法和字段运算符
+  //
+  // 策略：scope="me" 时纯关键字搜索，文件类型在客户端过滤。
+  //       scope="org" 时用高级搜索，可以注入 KQL 字段运算符。
+
+  const simpleEndpoint = "https://graph.microsoft.com/v1.0/me/drive/root/search(q='{query}')";
+  const advancedEndpoint = "https://graph.microsoft.com/v1.0/search/query";
+
+  let url: string;
+  let body: string | undefined;
+
+  if (scope === "me") {
+    // ── 简单搜索：只放关键字，KQL 和文件类型在客户端处理 ──
+    url = simpleEndpoint.replace("{query}", encodeURIComponent(sanitizedQuery));
+    body = undefined;
+  } else {
+    // ── 高级搜索：支持 KQL 字段运算符 ──
+    let queryString = sanitizedQuery;
+    if (fileTypes && fileTypes.length > 0) {
+      const typeFilter = fileTypes.map(t => `fileType:${t}`).join(" OR ");
+      queryString = `${sanitizedQuery} AND (${typeFilter})`;
+    }
+    url = advancedEndpoint;
+    body = JSON.stringify({
+      requests: [{
+        entityTypes: ["driveItem"],
+        query: { queryString },
+        from: 0,
+        size: top,
+      }],
+    });
   }
 
-  const endpoint = scope === "me"
-    ? "https://graph.microsoft.com/v1.0/me/drive/root/search(q='{query}')"
-    : "https://graph.microsoft.com/v1.0/search/query";
+  logger.info(`[GraphSearch] 搜索: query="${sanitizedQuery}", scope=${scope}, top=${top}`);
 
-  const body = scope === "me"
-    ? undefined
-    : JSON.stringify({
+  // 单次请求 + 解析
+  const doOneRequest = async (q: string, runScope: "me" | "org"): Promise<{
+    results: GraphSearchResult[];
+    rawCount: number;
+    usedClientFilter: boolean;
+  }> => {
+    let runUrl: string;
+    let runBody: string | undefined;
+    if (runScope === "me") {
+      runUrl = simpleEndpoint.replace("{query}", encodeURIComponent(q));
+      runBody = undefined;
+    } else {
+      let queryString = q;
+      if (fileTypes && fileTypes.length > 0) {
+        const typeFilter = fileTypes.map(t => `fileType:${t}`).join(" OR ");
+        queryString = `${q} AND (${typeFilter})`;
+      }
+      runUrl = advancedEndpoint;
+      runBody = JSON.stringify({
         requests: [{
           entityTypes: ["driveItem"],
           query: { queryString },
@@ -81,22 +189,16 @@ export async function searchFiles(
           size: top,
         }],
       });
+    }
 
-  const url = scope === "me"
-    ? endpoint.replace("{query}", encodeURIComponent(queryString))
-    : endpoint;
-
-  logger.info(`[GraphSearch] 搜索: query="${query}", scope=${scope}, top=${top}`);
-
-  try {
-    const res = await fetch(url, {
-      method: body ? "POST" : "GET",
+    const res = await fetch(runUrl, {
+      method: runBody ? "POST" : "GET",
       headers: {
         Authorization: `Bearer ${config.accessToken}`,
         "Content-Type": "application/json",
         Accept: "application/json",
       },
-      body,
+      body: runBody,
       signal: AbortSignal.timeout(30_000),
     });
 
@@ -114,7 +216,6 @@ export async function searchFiles(
         webUrl: string;
         lastModifiedDateTime: string;
         parentReference?: { path?: string };
-        resourceVisualization?: { title?: string };
       }>;
       value2?: Array<{
         hitsContainers?: Array<{
@@ -134,13 +235,26 @@ export async function searchFiles(
       }>;
     };
 
-    // 解析结果（兼容两种 API 格式）
+    const needFilter = runScope === "me" && !!fileTypes && fileTypes.length > 0;
+    const allowedExts = needFilter
+      ? new Set(fileTypes.map(ext => ext.toLowerCase().replace(/^\./, "")))
+      : null;
+
+    const matchByExt = (name: string): boolean => {
+      if (!allowedExts) return true;
+      const dot = name.lastIndexOf(".");
+      if (dot < 0) return false;
+      return allowedExts.has(name.slice(dot + 1).toLowerCase());
+    };
+
     const results: GraphSearchResult[] = [];
+    let rawCount = 0;
 
     if (data.value) {
-      // /me/drive/root/search 格式
       for (const item of data.value) {
-        if (!item.file) continue; // 跳过文件夹
+        rawCount++;
+        if (!item.file) continue;
+        if (!matchByExt(item.name)) continue;
         results.push({
           id: item.id,
           name: item.name,
@@ -152,10 +266,10 @@ export async function searchFiles(
         });
       }
     } else if (data.value2) {
-      // /search/query 格式
       for (const container of data.value2) {
         for (const hit of container.hitsContainers ?? []) {
           for (const h of hit.hits ?? []) {
+            rawCount++;
             const resource = h.resource;
             if (!resource?.file) continue;
             results.push({
@@ -173,8 +287,95 @@ export async function searchFiles(
       }
     }
 
-    logger.info(`[GraphSearch] 搜索完成: ${results.length} 个结果`);
-    return results;
+    return { results, rawCount, usedClientFilter: needFilter };
+  };
+
+  const takeFirstNTokens = (q: string, n: number): string => {
+    const tokens = q.split(/\s+/).filter(t => t.length > 0);
+    return tokens.slice(0, n).join(" ").trim();
+  };
+
+  try {
+    // 1) 原始 query
+    const first = await doOneRequest(sanitizedQuery, scope);
+    if (first.results.length > 0) {
+      const filterMsg = first.usedClientFilter && fileTypes ? `，客户端过滤: ${fileTypes.join(",")}` : "";
+      logger.info(`[GraphSearch] 搜索完成（首次成功）: ${first.results.length} 个结果（原始返回=${first.rawCount}${filterMsg}）`);
+      return first.results;
+    }
+
+    // 2) 回退 1：只保留前 3 个 token
+    const f1 = takeFirstNTokens(sanitizedQuery, 3);
+    if (f1 && f1 !== sanitizedQuery) {
+      logger.info(`[GraphSearch] 首次 0 结果，回退简化 query: "${f1}"`);
+      const second = await doOneRequest(f1, scope);
+      if (second.results.length > 0) {
+        logger.info(`[GraphSearch] 简化查询成功: ${second.results.length} 个结果`);
+        return second.results;
+      }
+    }
+
+    // 3) 回退 2：只保留前 2 个 token
+    const f2 = takeFirstNTokens(sanitizedQuery, 2);
+    if (f2 && f2 !== f1 && f2 !== sanitizedQuery) {
+      logger.info(`[GraphSearch] 再简化 query: "${f2}"`);
+      const third = await doOneRequest(f2, scope);
+      if (third.results.length > 0) {
+        logger.info(`[GraphSearch] 进一步简化成功: ${third.results.length} 个结果`);
+        return third.results;
+      }
+    }
+
+    // 4) 回退 3：Graph Search API 对 MSA 中文 docx 基本搜不到（搜内容不搜文件名）。
+    //    降级为 listRootFiles + 本地文件名关键词匹配。
+    logger.info(`[GraphSearch] Graph Search API 零结果，降级为 list + 本地文件名匹配`);
+    try {
+      const allFiles = await listRootFiles(config, { top: 200 });
+      const keywords = tokenize(sanitizedQuery);
+      const allowedExts = fileTypes && fileTypes.length > 0
+        ? new Set(fileTypes.map(ext => ext.toLowerCase().replace(/^\./, "")))
+        : null;
+
+      const matchByExt = (name: string): boolean => {
+        if (!allowedExts) return true;
+        const dot = name.lastIndexOf(".");
+        if (dot < 0) return false;
+        return allowedExts.has(name.slice(dot + 1).toLowerCase());
+      };
+
+      const scored = allFiles
+        .filter(f => matchByExt(f.name))
+        .map(f => {
+          const nameLower = f.name.toLowerCase();
+          let score = 0;
+          for (const kw of keywords) {
+            if (nameLower.includes(kw)) score++;
+          }
+          return { ...f, relevanceScore: score };
+        })
+        .filter(f => f.relevanceScore! > 0)
+        .sort((a, b) => b.relevanceScore! - a.relevanceScore!)
+        .slice(0, top);
+
+      if (scored.length > 0) {
+        logger.info(`[GraphSearch] 本地文件名匹配: ${scored.length} 个结果（来自 ${allFiles.length} 个文件）`);
+        return scored;
+      }
+
+      // 文件名匹配也失败时，返回所有文件（上限 top 个）供 Phase 2 语义检索
+      // 这是最后的兜底：Graph Search API 无法搜索中文 docx 内容，文件名也没匹配上，
+      // 但 Phase 2 可以通过下载+索引文件内容来做真正的语义匹配。
+      const fallbackCandidates = allFiles
+        .filter(f => matchByExt(f.name))
+        .slice(0, top);
+      logger.info(`[GraphSearch] 文件名匹配无结果，返回 ${fallbackCandidates.length} 个文件供 Phase 2 语义检索（来自 ${allFiles.length} 个文件）`);
+      return fallbackCandidates;
+    } catch (listErr) {
+      logger.warn(`[GraphSearch] listRootFiles 降级也失败: ${listErr instanceof Error ? listErr.message : String(listErr)}`);
+    }
+
+    logger.info(`[GraphSearch] 搜索完成（最终零结果）: 0 个结果`);
+    return [];
   } catch (err) {
     logger.error(`[GraphSearch] 搜索失败: ${err instanceof Error ? err.message : String(err)}`);
     throw err;
