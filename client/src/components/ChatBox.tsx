@@ -8,12 +8,13 @@ import { useCaseStore } from "../store/caseStore.js";
 import {
   getSessionsByCaseId,
   getMessagesBySessionId,
+  updateSession as repoUpdateSession,
 } from "../lib/chatRepo.js";
 import type { ChatSession, ChatMessage } from "../../../shared/src/types/chat.js";
 
 interface ChatBoxProps {
   collapsed?: boolean;
-  onOutlineRequest?: (outline: Array<{ title: string; description?: string }>, skipEdit?: boolean) => void;
+  onOutlineRequest?: (outline: Array<{ title: string; description?: string }>, skipEdit?: boolean, userRequest?: string) => void;
 }
 
 export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
@@ -64,6 +65,21 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
     let cancelled = false;
     (async () => {
       try {
+        // case 创建后，将内存中孤立的 session（caseId: undefined）关联到新 case
+        // 必须在 loadSessions 之前完成 IndexedDB 写入，否则 loadSessions 会用旧数据覆盖
+        const orphanedSessions = useChatStore.getState().sessions.filter((s) => !s.caseId);
+        if (orphanedSessions.length > 0) {
+          console.log("[ChatBox] Linking orphaned sessions to case", { caseId, count: orphanedSessions.length });
+          for (const s of orphanedSessions) {
+            const updated = { ...s, caseId, updatedAt: localIso() };
+            await repoUpdateSession(updated);  // 确保 IndexedDB 写入完成
+            // 同步更新 store（loadSessions 之前）
+            useChatStore.setState((prev) => ({
+              sessions: prev.sessions.map((x) => (x.id === s.id ? updated : x)),
+            }));
+          }
+        }
+
         console.log("[ChatBox] Fetching sessions for case", { caseId });
         const storedSessions = await getSessionsByCaseId(caseId);
         if (cancelled) return;
@@ -127,15 +143,18 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
   async function handleSend() {
     if (!input.trim() || loading) return;
 
+    // 在 setInput("") 之前捕获用户输入（用于后续 outline-request 事件和 fetch）
+    const userInput = input;
+
     let sessionId = effectiveSessionId;
-    console.log("[ChatBox] handleSend start", { sessionId, currentCaseId: currentCase?.id, input: input.slice(0, 50) });
+    console.log("[ChatBox] handleSend start", { sessionId, currentCaseId: currentCase?.id, input: userInput.slice(0, 50) });
 
     if (!sessionId) {
       const id = crypto.randomUUID();
       const now = localIso();
       const session: ChatSession = {
         id,
-        title: input.slice(0, 30),
+        title: userInput.slice(0, 30),
         caseId: currentCase?.id,
         createdAt: now,
         updatedAt: now,
@@ -150,7 +169,7 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
       id: crypto.randomUUID(),
       sessionId,
       role: "user",
-      content: input,
+      content: userInput,
       createdAt: localIso(),
     };
     console.log("[ChatBox] Adding user message", { messageId: userMessage.id, sessionId });
@@ -158,7 +177,7 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
 
     // 如果有 case，同步更新 userRequest
     if (currentCase && !currentCase.userRequest) {
-      useCaseStore.getState().updateUserRequest(input);
+      useCaseStore.getState().updateUserRequest(userInput);
     }
 
     setInput("");
@@ -174,7 +193,7 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message: input,
+          message: userInput,
           conversationHistory: sessionMessages.map((m) => ({ role: m.role, content: m.content })),
         }),
       });
@@ -195,7 +214,7 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
         addMessage(assistantMessage);
 
         if (sessionMessages.length === 0) {
-          const title = input.length > 30 ? input.slice(0, 30) + "..." : input;
+          const title = userInput.length > 30 ? userInput.slice(0, 30) + "..." : userInput;
           renameSession(sessionId, title);
           if (currentCase && !currentCase.title) {
             useCaseStore.getState().updateTitle(title);
@@ -206,11 +225,11 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
           console.log("[ChatBox] Outline request detected", { outlineLength: data.suggestedOutline.length, skipEdit: data.skipEdit, hasOnOutlineRequest: !!onOutlineRequest });
           if (onOutlineRequest) {
             console.log("[ChatBox] Calling onOutlineRequest callback");
-            onOutlineRequest(data.suggestedOutline, data.skipEdit);
+            onOutlineRequest(data.suggestedOutline, data.skipEdit, userInput);
           } else {
             // 跨组件通信：通过 window event，附带用户原始消息
-            console.log("[ChatBox] Dispatching outline-request event", { userRequest: input, skipEdit: data.skipEdit });
-            window.dispatchEvent(new CustomEvent("outline-request", { detail: { outline: data.suggestedOutline, userRequest: input, skipEdit: data.skipEdit } }));
+            console.log("[ChatBox] Dispatching outline-request event", { userRequest: userInput, skipEdit: data.skipEdit });
+            window.dispatchEvent(new CustomEvent("outline-request", { detail: { outline: data.suggestedOutline, userRequest: userInput, skipEdit: data.skipEdit } }));
           }
         }
       }

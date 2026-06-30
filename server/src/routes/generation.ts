@@ -5,7 +5,7 @@
  */
 import { Router } from "express";
 import crypto from "crypto";
-import { generateDocument, toHtml, type GenerateDocResult } from "../lib/docGenerator.js";
+import { generateDocument, toHtml, sanitizeCitationHtml, type GenerateDocResult } from "../lib/docGenerator.js";
 import { exportDocument, type ExportFormat, type ExportSection } from "../lib/docExporter.js";
 import { buildProvenanceTree, getProvenanceByRunId } from "../lib/provenanceTree.js";
 import { dbRun, dbGet, dbAll, dbTransaction } from "../lib/dbQuery.js";
@@ -246,11 +246,13 @@ generationRouter.post("/generate/stream", async (req, res) => {
     logger.info(`[Generation] 流式文档生成完成: ${docTitle}`);
 
     // ── 推送最终结果（done event） ──
+    // 注意：content 字段只传 runId，由客户端从 DB 拉取完整 HTML，
+    // 避免巨大的 HTML 字符串嵌入 JSON 导致 SSE 解析失败（裸换行符问题）
     const donePayload = {
       ok: true,
       runId,
       title: docTitle,
-      content: htmlContent,
+      content: "",  // 客户端通过 runId 从 DB 获取完整内容
       sections: result.sections.map((s) => ({ title: s.title, content: s.content, groundingScore: s.groundingScore })),
       trustScore: result.trustScore,
       documentStyle: result.documentStyle,
@@ -259,16 +261,12 @@ generationRouter.post("/generate/stream", async (req, res) => {
     const doneJson = JSON.stringify(donePayload);
     logger.info(`[Generation] done event JSON: jsonLen=${doneJson.length} contentLen=${htmlContent.length} sections=${result.sections.length} conflictRes=${!!result.conflictResolution}`);
 
-    // 诊断：检查 JSON 是否包含未转义的换行符（会破坏 SSE 协议）
-    const nlInJson = doneJson.split('\n').length - 1;
-    if (nlInJson > 0) {
-      logger.warn(`[Generation] done event JSON 包含 ${nlInJson} 个实际换行符（应为 0）— 会导致客户端 SSE 解析失败`);
-    }
-
     const write1Ok = res.write(`event: done\n`);
     const write2Ok = res.write(`data: ${doneJson}\n\n`);
-    if (!write1Ok) logger.warn(`[Generation] done event write1 返回 false（backpressure）`);
-    if (!write2Ok) logger.warn(`[Generation] done event write2 返回 false（backpressure）`);
+    if (!write1Ok || !write2Ok) {
+      logger.warn(`[Generation] done event backpressure, 等待 drain`);
+      await new Promise<void>((resolve) => res.once("drain", resolve));
+    }
     res.end();
     logger.info(`[Generation] done event sent & stream ended, total=${13 + doneJson.length + 2} bytes`);
 
@@ -557,6 +555,10 @@ generationRouter.get("/:id", (req, res) => {
     if (!run.document_style) {
       run.document_style = inferDocumentStyle(run.outline);
     }
+    // 清理 LLM 生成的破损 <sup><a> 标签，防止破损 HTML 损坏客户端 DOM
+    if (run.content) {
+      run.content = sanitizeCitationHtml(run.content);
+    }
     res.json({ ok: true, run });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -564,9 +566,29 @@ generationRouter.get("/:id", (req, res) => {
   }
 });
 
+/** 判断纯文本行是否为小节标题（用于导出时区分正文和子标题） */
+function isSubHeadingLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.length > 50) return false;
+  // 排除纯引用标记行（如 "[1]"）
+  if (/^\[\d+\]$/.test(trimmed)) return false;
+  // 排除含引用标记的行（子标题不应该有引用）
+  if (/\[\d+\]/.test(trimmed)) return false;
+  // 排除以标点或小写字母开头的续行
+  if (/^[，。、；：）\)\/\s<]/.test(trimmed)) return false;
+  // 中文字符占比高（≥50%且≥4个中文字符）且行较短 → 很可能是子标题
+  const cjkChars = (trimmed.match(/[一-鿿㐀-䶿]/g) || []).length;
+  if (cjkChars >= 4 && cjkChars / trimmed.length >= 0.5) return true;
+  // 英文标题：以大写字母开头，较短的句子
+  if (/^[A-Z]/.test(trimmed) && trimmed.length <= 60 && !/[。！？]$/.test(trimmed)) return true;
+  return false;
+}
+
 /** 从 HTML 内容中解析章节 */
 function parseHtmlSections(html: string, title: string): ExportSection[] {
   const sections: ExportSection[] = [];
+  // 子标题标记：导出器使用此前缀识别子标题行并应用加粗+大字号格式
+  const SUB_MARKER = "H";
 
   // 先将 citation 链接转换为 [N] 纯文本，避免 HTML 标签剥离不完整导致属性残留
   // 逐层清理：先处理完整 sup+link 结构，再处理残留
@@ -585,11 +607,52 @@ function parseHtmlSections(html: string, title: string): ExportSection[] {
   let match;
   while ((match = sectionRegex.exec(processedHtml)) !== null) {
     const sectionTitle = match[1].replace(/<[^>]+>/g, "").trim();
-    const content = match[2]
-      .replace(/<[^>]+>/g, "")  // 去 HTML 标签
-      .trim();
-    if (content) {
-      sections.push({ title: sectionTitle, content, level: 1 });
+    const rawContent = match[2];
+
+    // ── 子标题检测：在去 HTML 标签之前，按 <p> 边界分段 ──
+    // 将 section 内容按 <p>...</p> 或 <p>...</p（broken closing）分段落
+    const paraRegex = /<p\b[^>]*>([\s\S]*?)<\/p\b[^>]*>/gi;
+    const processedLines: string[] = [];
+    let paraMatch;
+    let prevEnd = 0;
+
+    while ((paraMatch = paraRegex.exec(rawContent)) !== null) {
+      // 捕获 </p> 和 <p> 之间的间隙文本（Post-filter 句子删除可能导致裸文本节点）
+      const gapRaw = rawContent.slice(prevEnd, paraMatch.index);
+      const gapText = gapRaw.replace(/<[^>]+>/g, "").trim();
+      if (gapText) {
+        const gapLines = gapText.split("\n").filter((l) => l.trim());
+        for (const line of gapLines) processedLines.push(line.trim());
+      }
+
+      const paraText = paraMatch[1].replace(/<[^>]+>/g, "").trim();
+      if (paraText) {
+        if (isSubHeadingLine(paraText)) {
+          processedLines.push(`${SUB_MARKER}${paraText}`);
+        } else {
+          processedLines.push(paraText);
+        }
+      }
+      prevEnd = paraMatch.index + paraMatch[0].length;
+    }
+
+    // 处理最后一个 <p> 之后未被包裹的残留文本（如 <ul>/<li>）
+    const remaining = rawContent.slice(prevEnd).replace(/<[^>]+>/g, "").trim();
+    if (remaining) {
+      const lines = remaining.split("\n").filter((l) => l.trim());
+      for (const line of lines) {
+        processedLines.push(line.trim());
+      }
+    }
+
+    if (processedLines.length > 0) {
+      sections.push({ title: sectionTitle, content: processedLines.join("\n"), level: 1 });
+    } else {
+      // 回退：整体去 HTML 标签
+      const text = rawContent.replace(/<[^>]+>/g, "").trim();
+      if (text) {
+        sections.push({ title: sectionTitle, content: text, level: 1 });
+      }
     }
   }
 

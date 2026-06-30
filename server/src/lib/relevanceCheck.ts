@@ -155,35 +155,33 @@ function splitIntoClaims(text: string): string[] {
  * 解析 JSON 响应
  */
 function parseJsonResponse<T>(content: string): T | null {
-  // 先剥离 markdown 代码块标记（如 ```json ... ```）
   let cleaned = content.trim();
+  // 先剥离 markdown 代码块标记（支持嵌套 fence：```` 包含 ``` 的场景）
   const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenceMatch) {
     cleaned = fenceMatch[1].trim();
   }
+  // 处理 LLM 在 JSON 前后附加解释文字的情况：提取首尾大括号之间的内容
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  }
+  // 策略 1：标准 JSON.parse
   try {
     const parsed = JSON.parse(cleaned);
     return parsed as T;
   } catch {
-    // 尝试提取 JSON 块（非贪婪匹配，防止跨多个 JSON 对象误匹配）
-    const jsonMatch = cleaned.match(/\{(?:[^{}]|\{[^{}]*\})*\}/);
-    if (jsonMatch) {
-      try {
-        return JSON.parse(jsonMatch[0]) as T;
-      } catch {
-        return null;
-      }
+    // 策略 2：修复常见 JSON 格式错误后重试（trailing commas、unquoted keys）
+    try {
+      let repaired = cleaned
+        .replace(/,(\s*[}\]])/g, "$1")
+        .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3');
+      const parsed = JSON.parse(repaired);
+      return parsed as T;
+    } catch {
+      return null;
     }
-    // 最后回退：贪婪匹配整个 JSON
-    const greedyMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (greedyMatch) {
-      try {
-        return JSON.parse(greedyMatch[0]) as T;
-      } catch {
-        return null;
-      }
-    }
-    return null;
   }
 }
 
@@ -305,7 +303,7 @@ async function callRelevanceJudge(
         irrelevantSentences: parsed.irrelevant_sentences ?? parsed.irrelevantSentences ?? [],
       };
     }
-    logger.warn(`[RelevanceCheck] 首次解析失败或 verdicts 为空，尝试重试`);
+    logger.info(`[RelevanceCheck] 首次解析失败或 verdicts 为空，尝试重试`);
   } catch (e) {
     logger.warn(`[RelevanceCheck] LLM judge 首次调用失败: ${e}`);
   }

@@ -140,36 +140,68 @@ const CONFLICT_DETECTOR_USER = `## 知识来源内容
  * 解析 JSON 响应
  */
 function parseJsonResponse<T>(content: string): T | null {
-  // 先剥离 markdown 代码块标记（如 ```json ... ```）
   let cleaned = content.trim();
-  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenceMatch) {
-    cleaned = fenceMatch[1].trim();
+  // 先剥离 markdown 代码块标记（如 ```json ... ```）
+  const fencePatterns = [
+    /```(?:json)?\s*\n?([\s\S]*?)\n?```/,
+    /```\w*\s*\n?([\s\S]*?)\n?```/,
+  ];
+  for (const pat of fencePatterns) {
+    const m = cleaned.match(pat);
+    if (m) {
+      cleaned = m[1].trim();
+      break;
+    }
   }
-  try {
-    const parsed = JSON.parse(cleaned);
-    return parsed as T;
-  } catch {
-    // 尝试提取 JSON 块（非贪婪匹配，防止跨多个 JSON 对象误匹配）
-    const jsonMatch = cleaned.match(/\{(?:[^{}]|\{[^{}]*\})*\}/);
-    if (jsonMatch) {
-      try {
-        return JSON.parse(jsonMatch[0]) as T;
-      } catch {
+
+  // 通用修复函数：trailing commas + unquoted keys
+  const repairJson = (s: string): string =>
+    s.replace(/,(\s*[}\]])/g, "$1")
+     .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3');
+
+  const tryParse = (s: string): T | null => {
+    try { return JSON.parse(s) as T; } catch {
+      try { return JSON.parse(repairJson(s)) as T; } catch {
         return null;
       }
     }
-    // 最后回退：贪婪匹配整个 JSON
-    const greedyMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (greedyMatch) {
-      try {
-        return JSON.parse(greedyMatch[0]) as T;
-      } catch {
-        return null;
-      }
-    }
-    return null;
+  };
+
+  // 策略 1：直接解析
+  const direct = tryParse(cleaned);
+  if (direct) return direct;
+
+  // 策略 2：提取 JSON 块（非贪婪匹配）
+  const jsonMatch = cleaned.match(/\{(?:[^{}]|\{[^{}]*\})*\}/);
+  if (jsonMatch) {
+    const parsed = tryParse(jsonMatch[0]);
+    if (parsed) return parsed;
   }
+
+  // 策略 3：贪婪匹配整个 JSON
+  const greedyMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (greedyMatch) {
+    const parsed = tryParse(greedyMatch[0]);
+    if (parsed) return parsed;
+  }
+
+  return null;
+}
+
+/** LLM 返回 snake_case JSON，统一转为 camelCase */
+function normalizeConflictItem(raw: any): ConflictItem {
+  return {
+    topic: raw.topic ?? "",
+    conflictType: raw.conflict_type ?? raw.conflictType ?? "other",
+    claims: (raw.claims ?? []).map((c: any) => ({
+      text: c.text ?? "",
+      source: c.source ?? "",
+      sourceAuthority: c.source_authority ?? c.sourceAuthority,
+      timestamp: c.timestamp,
+    })),
+    severity: raw.severity ?? "medium",
+    recommendation: raw.recommendation,
+  };
 }
 
 /**
@@ -284,7 +316,7 @@ async function callConflictDetector(
       const parsed = parseJsonResponse<any>(response.text);
       if (!parsed) continue;
 
-      const batchConflicts: ConflictItem[] = parsed.conflicts ?? [];
+      const batchConflicts: ConflictItem[] = (parsed.conflicts ?? []).map(normalizeConflictItem);
       const batchRate = parsed.conflict_rate ?? parsed.conflictRate ?? 0;
 
       allConflicts.push(...batchConflicts);
@@ -422,17 +454,30 @@ export function autoResolveConflicts(
   const normalizeSourceName = (s: string): string =>
     s.toLowerCase().replace(/[\s_\-./\\|:：,，;；()（）\[\]【】《》]+/g, "").replace(/\.(pdf|docx|txt|md|eml|pptx|json|csv|xlsx)$/i, "");
 
+  // 剥离 LLM 输出中常见的 (来源 N) 编号后缀
+  const stripSourceIndex = (s: string): string => s.replace(/\(来源\s*\d+\)/g, "").trim();
+
   const normKeyMap = new Map<string, string>();
   for (const key of sourceToChunkIds.keys()) {
     normKeyMap.set(normalizeSourceName(key), key);
   }
 
+  // 从 knownKey 中提取纯文件名（"章节标题 - 文件名.docx" → "文件名.docx"）
+  const extractFilename = (key: string): string | null => {
+    const idx = key.lastIndexOf(" - ");
+    if (idx === -1) return null;
+    return key.slice(idx + 3);
+  };
+
   const lookupChunkIds = (llmSource: string, topicForLog: string): string[] => {
+    // 0. 先剥离 LLM 可能附加的 (来源 N) 后缀
+    const cleanSource = stripSourceIndex(llmSource);
+
     // 1. 精确匹配
-    const exact = sourceToChunkIds.get(llmSource);
+    const exact = sourceToChunkIds.get(cleanSource);
     if (exact) return exact;
     // 2. 归一化精确匹配
-    const norm = normalizeSourceName(llmSource);
+    const norm = normalizeSourceName(cleanSource);
     const normKey = normKeyMap.get(norm);
     if (normKey) return sourceToChunkIds.get(normKey) ?? [];
     // 3. 最长归一化子串匹配
@@ -448,8 +493,17 @@ export function autoResolveConflicts(
       }
     }
     if (bestKey) return sourceToChunkIds.get(bestKey) ?? [];
-    // 4. 找不到 — 日志警告，避免静默失败
-    logger.warn(`[ConflictResolution] source-name lookup 失败（eval 会重新发现此冲突）: topic="${topicForLog}", llmSource="${llmSource}", knownKeys=${[...sourceToChunkIds.keys()].slice(0, 5).join(", ")}...`);
+    // 4. 提取 knownKey 中的纯文件名再做子串匹配
+    for (const key of sourceToChunkIds.keys()) {
+      const filename = extractFilename(key);
+      if (!filename) continue;
+      const filenameNorm = normalizeSourceName(filename);
+      if (norm.includes(filenameNorm) || filenameNorm.includes(norm)) {
+        return sourceToChunkIds.get(key) ?? [];
+      }
+    }
+    // 5. 找不到 — 降级为 debug，避免刷屏
+    logger.debug(`[ConflictResolution] source-name lookup 失败（eval 会重新发现此冲突）: topic="${topicForLog}", llmSource="${llmSource}", cleanSource="${cleanSource}", knownKeys=${[...sourceToChunkIds.keys()].slice(0, 5).join(", ")}...`);
     return [];
   };
 

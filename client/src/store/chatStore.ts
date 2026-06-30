@@ -31,6 +31,9 @@ export interface ChatStore {
 
   // Active session
   setActiveSessionId: (id: string | null) => void;
+
+  // 更新 session 的 caseId（case 创建后补关联）
+  updateSessionCaseId: (sessionId: string, caseId: string) => void;
 }
 
 export const useChatStore = create<ChatStore>((set) => ({
@@ -79,4 +82,16 @@ export const useChatStore = create<ChatStore>((set) => ({
   clearMessages: () => set({ messages: [] }),
 
   setActiveSessionId: (id) => set({ activeSessionId: id }),
+
+  updateSessionCaseId: (sessionId, caseId) => {
+    set((prev) => {
+      const session = prev.sessions.find((s) => s.id === sessionId);
+      if (!session || session.caseId === caseId) return {};
+      const updated = { ...session, caseId, updatedAt: localIso() };
+      repoUpdateSession(updated).catch(console.error);
+      return {
+        sessions: prev.sessions.map((s) => (s.id === sessionId ? updated : s)),
+      };
+    });
+  },
 }));

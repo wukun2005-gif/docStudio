@@ -5,7 +5,8 @@
  * 0. 剥离完整 HTML 文档外壳（<!DOCTYPE>/<html>/<head>/<body>），防止 CSS 泄漏
  * 1. 移除 LLM 元信息（"以下是基于参考文档..."等引导语）
  * 2. 移除 (无来源) 标记
- * 3. 处理 [N] citation 标记（邮件移除，其他格式转为可点击链接）
+ * 2.5. Strip LLM 私自输出的原始 <sup>/<a> HTML 标签（根因修复：让 convertCitationsToLinks 成为唯一来源）
+ * 3. 处理 [N] citation 标记（所有格式都转为可点击链接）
  * 4. Markdown → HTML 转换
  * 5. 清理多余空行和空段落
  */
@@ -41,6 +42,12 @@ export function cleanContent(
 
   // Step 2: 移除 (无来源) 标记
   text = text.replace(/（无来源）/g, "").replace(/\(无来源\)/g, "");
+
+  // Step 2.5: Strip LLM 私自输出的原始 <sup>/<a> HTML 标签
+  // LLM 有时在内容中直接生成 <sup><a> 标签，其 title 属性值包含未转义内容甚至嵌套标签，
+  // 形成"套娃式"破损 HTML。我们在此全部 strip，让 convertCitationsToLinks 成为 <sup><a> 的唯一起源。
+  // convertCitationsToLinks 用 escapeHtmlAttr 生成标签，从不出 bug。
+  text = text.replace(/<\/?(?:sup|a)\b[^>]*>/gi, '');
 
   // Step 3: 处理 [N] citation — 所有格式都转为可点击链接（包括邮件）
   text = convertCitationsToLinks(text, citations);
@@ -264,15 +271,16 @@ function inlineMarkdown(text: string): string {
   return result;
 }
 
-/**
- * 清理 HTML：移除空段落、多余换行
- */
 function cleanHtml(html: string): string {
   let result = html;
   // 移除空段落
   result = result.replace(/<p>\s*<\/p>/g, "");
   // 移除连续空行
   result = result.replace(/\n{3,}/g, "\n\n");
+  // 修复 LLM 生成的数字中的多余句号（如 5.。0 → 5.0，3.。8 → 3.8）
+  result = result.replace(/(\d)\.。(\d)/g, '$1.$2');
+  // 修复缺失 > 的闭合标签（</p → </p>，</li → </li>）
+  result = result.replace(/<\/(p|li)(?!>)/g, '</$1>');
   // 移除首尾空白
   result = result.trim();
   return result;

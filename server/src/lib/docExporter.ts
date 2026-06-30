@@ -9,6 +9,11 @@ import {
   Packer,
   Paragraph,
   TextRun,
+  Table,
+  TableRow,
+  TableCell,
+  WidthType,
+  BorderStyle,
   AlignmentType,
   convertInchesToTwip,
 } from "docx";
@@ -26,6 +31,9 @@ export interface ExportSection {
   level?: number;
 }
 
+// 子标题标记（由 parseHtmlSections 在导出路径中注入，与 generation.ts 保持同步）
+const SUB_MARKER = "\x01H\x01";
+
 // ── Word 生成 (#13) ──────────────────────────────────
 
 /**
@@ -33,7 +41,7 @@ export interface ExportSection {
  * 使用保守兼容的配置，确保 Word、Pages、WPS、Google Docs 等均可正常打开
  */
 export async function generateWord(title: string, sections: ExportSection[], citations?: CitationItem[]): Promise<Buffer> {
-  const children: Paragraph[] = [];
+  const children: (Paragraph | Table)[] = [];
 
   children.push(
     new Paragraph({
@@ -98,7 +106,88 @@ export async function generateWord(title: string, sections: ExportSection[], cit
     );
 
     const paragraphs = section.content.split("\n").filter((p) => p.trim());
+    // 表格检测：连续的"列对齐"段落 → 合并为 docx Table
+    const TABLE_COL_SEP = /\s{2,}/;  // 2+ 空格作为列分隔
+    let tableBuffer: string[][] = [];
+
+    const flushTable = () => {
+      if (tableBuffer.length < 2) {
+        // 不够成表格，按普通段落渲染
+        for (const row of tableBuffer) {
+          children.push(new Paragraph({
+            spacing: { after: 120, line: 360, lineRule: "auto" },
+            indent: { firstLine: 420 },
+            children: [new TextRun({ text: row.join("  "), size: 24, font: { ascii: "Times New Roman", eastAsia: "SimSun", hAnsi: "Times New Roman", cs: "Times New Roman" } })],
+          }));
+        }
+        tableBuffer = [];
+        return;
+      }
+      // 渲染为 docx Table
+      const colCount = Math.max(...tableBuffer.map(r => r.length));
+      const borderStyle = { style: BorderStyle.SINGLE, size: 1, color: "BFBFBF" };
+      const borders = { top: borderStyle, bottom: borderStyle, left: borderStyle, right: borderStyle };
+      const tableRows = tableBuffer.map((row, rowIdx) => {
+        const isHeader = rowIdx === 0;
+        const cells: TableCell[] = [];
+        for (let c = 0; c < colCount; c++) {
+          cells.push(new TableCell({
+            borders,
+            width: { size: Math.floor(9000 / colCount), type: WidthType.DXA },
+            children: [new Paragraph({
+              spacing: { before: 40, after: 40 },
+              children: [new TextRun({
+                text: row[c] ?? "",
+                bold: isHeader,
+                size: isHeader ? 22 : 21,
+                font: { ascii: "Times New Roman", eastAsia: "SimSun", hAnsi: "Times New Roman", cs: "Times New Roman" },
+              })],
+            })],
+          }));
+        }
+        return new TableRow({ children: cells });
+      });
+      children.push(new Table({ rows: tableRows, width: { size: 9000, type: WidthType.DXA } }));
+      children.push(new Paragraph({ spacing: { after: 120 }, children: [] })); // 表后空行
+      tableBuffer = [];
+    };
+
     for (const paraText of paragraphs) {
+      // 表格行检测：2+ 空格分隔的多列文本
+      const cols = paraText.split(TABLE_COL_SEP).map(c => c.trim()).filter(Boolean);
+      if (cols.length >= 2 && !paraText.startsWith(SUB_MARKER)) {
+        tableBuffer.push(cols);
+        continue;
+      }
+      // 非表格行 → 先 flush 已累积的表格
+      flushTable();
+
+      // 检测子标题标记：以 SUB_MARKER 开头的行作为加粗小标题
+      if (paraText.startsWith(SUB_MARKER)) {
+        const subTitle = paraText.slice(SUB_MARKER.length).trim();
+        if (subTitle) {
+          children.push(
+            new Paragraph({
+              spacing: { before: 240, after: 120 },
+              children: [
+                new TextRun({
+                  text: subTitle,
+                  bold: true,
+                  size: 26, // 介于正文(24)和主标题(32)之间
+                  font: {
+                    ascii: "Times New Roman",
+                    eastAsia: "SimSun",
+                    hAnsi: "Times New Roman",
+                    cs: "Times New Roman",
+                  },
+                }),
+              ],
+            }),
+          );
+        }
+        continue;
+      }
+
       const runs = buildInlineRuns(paraText, citations);
       children.push(
         new Paragraph({
@@ -108,6 +197,8 @@ export async function generateWord(title: string, sections: ExportSection[], cit
         }),
       );
     }
+    // section 结束，flush 剩余的表格
+    flushTable();
   }
 
   if (citations && citations.length > 0) {

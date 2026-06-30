@@ -6,9 +6,11 @@
  * 在 LLM 生成回答之后，检查回答是否忠实于检索到的文档，
  * 移除无支撑声明后再返回给用户。
  */
+import { jsonrepair } from "jsonrepair";
 import { logger } from "./logger.js";
 import { registry } from "../providers/registry.js";
 import { isReasoningModelStatic } from "../providers/openai.js";
+import { getModelCapabilities } from "../providers/model-capabilities-registry.js";
 import { getApiKey } from "../security/keyStore.js";
 import { readSettingsFromDb } from "./settingsReader.js";
 import { resolveEvalMaxTokens } from "./llmUtils.js";
@@ -17,10 +19,14 @@ import { resolveEvalMaxTokens } from "./llmUtils.js";
 //
 // groundedness check 是"事实匹配 + JSON 结构化输出"任务，
 // 不需要推理模型的推理深度。当且仅当用户启用了 model fallback 时，
-// 主动从 fallback 链中挑选第一个非推理模型。
+// 主动从 fallback 链中挑选非推理模型。
+//
+// 选模型优先级：
+//   1. 非推理 + supportsStructuredOutput（json_schema 保证结构正确，zero retry）
+//   2. 非推理 + 不支持 structured output（json_object，靠 extractJudgeJson 兜底）
+//   3. 都没有 → 回退主模型
 //
 // 原则：用户未启用 fallback 时，尊重用户的显式选择，不做替换。
-
 function selectBestEvalModel(
   primaryModel: string,
   providerPreference: string[],
@@ -34,18 +40,31 @@ function selectBestEvalModel(
   const fallbackEnabled = Object.values(fallbackMap).some(Boolean);
   if (!fallbackEnabled) return primaryModel;
 
-  // 从 fallback 链扫描，找第一个非推理模型
+  // 从 fallback 链扫描：优先选【非推理 + 支持结构化输出】，否则选第一个非推理
   const fallbackLists = dbSettings.modelFallbacks ?? {};
+  let firstNonReasoning: string | null = null;
   for (const pid of providerPreference) {
     if (!fallbackMap[pid]) continue; // 该 provider 未启用 fallback
     const list = fallbackLists[pid];
     if (!list || list.length === 0) continue;
     for (const m of list) {
       if (!isReasoningModelStatic(m)) {
-        logger.info(`[Groundedness] 任务感知选模型: ${primaryModel} → ${m} (非推理模型)`);
-        return m;
+        if (firstNonReasoning === null) {
+          firstNonReasoning = m;
+        }
+        // 优先选支持结构化输出的模型（json_schema strict 保证结构正确）
+        if (getModelCapabilities(m).supportsStructuredOutput) {
+          logger.info(`[Groundedness] 任务感知选模型: ${primaryModel} → ${m} (非推理, 支持结构化输出)`);
+          return m;
+        }
       }
     }
+  }
+
+  // 没有支持结构化输出的 → 退而求其次选第一个非推理（json_object，靠 extractJudgeJson 兜底）
+  if (firstNonReasoning !== null) {
+    logger.info(`[Groundedness] 任务感知选模型: ${primaryModel} → ${firstNonReasoning} (非推理, 无结构化输出)`);
+    return firstNonReasoning;
   }
 
   // fallback 链全是推理模型 → 回落到主模型
@@ -199,27 +218,70 @@ export function buildJudgePrompt(
 
 // ── JSON 解析 ──────────────────────────────────────
 
-export function extractJudgeJson(text: string): JudgeResult | null {
-  try {
-    const parsed = JSON.parse(text) as JudgeResult;
-    if (parsed.claims && Array.isArray(parsed.claims)) {
-      return parsed;
-    }
-  } catch {
-    // 尝试提取 JSON 块
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
-    if (start !== -1 && end > start) {
-      try {
-        const parsed = JSON.parse(text.substring(start, end + 1)) as JudgeResult;
-        if (parsed.claims && Array.isArray(parsed.claims)) {
-          return parsed;
-        }
-      } catch {
-        // ignore
-      }
+/**
+ * 尝试将任意对象中的 claims 适配为 ClaimVerdict 数组。
+ * 处理 LLM 偶尔输出 claims 为 object（按 S1/S2 索引）而非 array 的情况。
+ */
+function tryAdaptClaims(raw: Record<string, unknown>): ClaimVerdict[] | null {
+  const claims = raw.claims;
+  if (!claims) return null;
+
+  // 正常情况：claims 已经是数组
+  if (Array.isArray(claims)) {
+    return claims as ClaimVerdict[];
+  }
+
+  // 适配：claims 是 object（如 { "S1": {...}, "S2": {...} }）
+  if (typeof claims === "object" && claims !== null) {
+    const values = Object.values(claims as Record<string, unknown>);
+    if (values.length > 0 && values.every((c) => c && typeof c === "object" && typeof (c as Record<string, unknown>).verdict === "string")) {
+      return values as ClaimVerdict[];
     }
   }
+
+  return null;
+}
+
+export function extractJudgeJson(text: string): JudgeResult | null {
+  let cleaned = text.trim();
+
+  // 剥离 markdown 代码块标记
+  const fencePatterns = [
+    /```(?:json)?\s*\n?([\s\S]*?)\n?```/,
+    /```\w*\s*\n?([\s\S]*?)\n?```/,
+  ];
+  for (const pat of fencePatterns) {
+    const m = cleaned.match(pat);
+    if (m) {
+      cleaned = m[1].trim();
+      break;
+    }
+  }
+
+  // 提取首尾大括号
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start !== -1 && end > start) {
+    cleaned = cleaned.substring(start, end + 1);
+  }
+
+  try {
+    const repaired = jsonrepair(cleaned);
+    const raw: Record<string, unknown> = JSON.parse(repaired);
+    const claims = tryAdaptClaims(raw);
+    if (claims) {
+      return {
+        claims,
+        groundedRatio: typeof raw.groundedRatio === "number" ? raw.groundedRatio : 0.5,
+        overallVerdict: (["pass", "fail", "partial"].includes(raw.overallVerdict as string)
+          ? raw.overallVerdict
+          : "partial") as JudgeResult["overallVerdict"],
+      };
+    }
+  } catch {
+    // jsonrepair 修复后仍无法解析 → 放弃
+  }
+
   return null;
 }
 
@@ -306,6 +368,10 @@ async function callJudge(
     const parsed = extractJudgeJson(response.text);
     if (parsed) return parsed;
 
+    // 解析失败时记录响应原文（前500+后500），用于定位真实失败模式
+    const text = response.text;
+    const preview = text.length <= 1000 ? text : text.slice(0, 500) + "\n...\n" + text.slice(-500);
+    logger.warn(`[Groundedness] extractJudgeJson 失败，模型=${modelId}, textLen=${text.length}, 响应预览:\n${preview}`);
     throw new Error("JSON 解析失败");
   } catch (err) {
     logger.warn(`[Groundedness] Judge 调用失败: ${err instanceof Error ? err.message : String(err)}，重试一次...`);
@@ -325,6 +391,8 @@ async function callJudge(
         ? retryPrimaryModel
         : selectBestEvalModel(retryPrimaryModel, providers, dbSettings);
 
+      const retryMaxTokens = resolveEvalMaxTokens(retryModelId);
+
       const { response: retryResponse } = await registry.runWithFallback(
         providers,
         {
@@ -334,7 +402,7 @@ async function callJudge(
             { role: "user", content: buildJudgePrompt(sentences, groundingDocs).user },
           ],
           apiKey: "",
-          maxTokens: 2000,
+          maxTokens: retryMaxTokens,
           temperature: 0,
           timeoutMs: config.timeoutMs ?? 180_000,
           evalMode: true,

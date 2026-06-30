@@ -131,34 +131,50 @@ const COMPLETENESS_JUDGE_USER = `## 用户原始需求
 function parseJsonResponse<T>(content: string): T | null {
   // 先剥离 markdown 代码块标记（如 ```json ... ```）
   let cleaned = content.trim();
-  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenceMatch) {
-    cleaned = fenceMatch[1].trim();
+  const fencePatterns = [
+    /```(?:json)?\s*\n?([\s\S]*?)\n?```/,
+    /```\w*\s*\n?([\s\S]*?)\n?```/,
+  ];
+  for (const pat of fencePatterns) {
+    const m = cleaned.match(pat);
+    if (m) {
+      cleaned = m[1].trim();
+      break;
+    }
   }
-  try {
-    const parsed = JSON.parse(cleaned);
-    return parsed as T;
-  } catch {
-    // 尝试提取 JSON 块（非贪婪匹配，防止跨多个 JSON 对象误匹配）
-    const jsonMatch = cleaned.match(/\{(?:[^{}]|\{[^{}]*\})*\}/);
-    if (jsonMatch) {
-      try {
-        return JSON.parse(jsonMatch[0]) as T;
-      } catch {
+
+  // 通用修复函数：trailing commas + unquoted keys
+  const repairJson = (s: string): string =>
+    s.replace(/,(\s*[}\]])/g, "$1")
+     .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3');
+
+  const tryParse = (s: string): T | null => {
+    try { return JSON.parse(s) as T; } catch {
+      try { return JSON.parse(repairJson(s)) as T; } catch {
         return null;
       }
     }
-    // 最后回退：贪婪匹配整个 JSON
-    const greedyMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (greedyMatch) {
-      try {
-        return JSON.parse(greedyMatch[0]) as T;
-      } catch {
-        return null;
-      }
-    }
-    return null;
+  };
+
+  // 策略 1：直接解析
+  const direct = tryParse(cleaned);
+  if (direct) return direct;
+
+  // 策略 2：提取 JSON 块（非贪婪匹配，防止跨多个 JSON 对象误匹配）
+  const jsonMatch = cleaned.match(/\{(?:[^{}]|\{[^{}]*\})*\}/);
+  if (jsonMatch) {
+    const parsed = tryParse(jsonMatch[0]);
+    if (parsed) return parsed;
   }
+
+  // 策略 3：贪婪匹配整个 JSON
+  const greedyMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (greedyMatch) {
+    const parsed = tryParse(greedyMatch[0]);
+    if (parsed) return parsed;
+  }
+
+  return null;
 }
 
 /**
@@ -427,6 +443,8 @@ ${requirement}
 
     const effectiveModelId = selectBestEvalModel(modelId, [providerId], dbSettings);
 
+    const maxTokens = resolveEvalMaxTokens(effectiveModelId);
+
     const { response } = await registry.runWithFallback(
       providers,
       {
@@ -435,7 +453,7 @@ ${requirement}
           { role: "user", content: prompt },
         ],
         apiKey: "",
-        maxTokens: 2000,
+        maxTokens,
         temperature: 0,
         timeoutMs: 180_000,
         evalMode: true,

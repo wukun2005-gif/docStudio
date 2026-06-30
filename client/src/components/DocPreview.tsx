@@ -549,7 +549,7 @@ export default function DocPreview({
                                 {(conflict as any).severity === "high" ? "🔴" : (conflict as any).severity === "medium" ? "🟡" : "🟢"} {(conflict as any).topic}
                               </p>
                               <ul className="text-[10px] text-red-500 ml-3 space-y-0.5">
-                                {((conflict as any).claims ?? []).slice(0, 2).map((claim, j) => (
+                                {((conflict as any).claims ?? []).slice(0, 2).map((claim: any, j: number) => (
                                   <li key={j} className="cursor-pointer hover:underline" onClick={() => scrollToParagraph(claim.text)}>• {claim.source}: {String(claim.text).substring(0, 50)}...</li>
                                 ))}
                               </ul>

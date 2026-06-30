@@ -18,6 +18,7 @@ import { getAllPeople, getPersonById, getPersonContext, findPersonByTitle, type 
 import { detectStyle, detectFormat, detectAudience, getStyle, getFormat, getAudience } from "./promptTemplates.js";
 import { getRulesForContext } from "./writingRules.js";
 import { detectConflicts, autoResolveConflicts, type ConflictResolutionResult } from "./conflictDetection.js";
+import * as cheerio from "cheerio";
 import type { OutlineSection } from "./narrativeEngine.js";
 import type { ChatRequest, ToolDefinition, ToolCall } from "../providers/openai.js";
 import type { DocumentMetadata, StyleTemplate, FormatTemplate, AudienceProfile } from "../../../shared/src/types/generation.js";
@@ -1440,6 +1441,59 @@ async function filterConflictingContent(
     return out;
   };
 
+  /**
+   * 用 cheerio DOM parser 规范 HTML 片段结构
+   *
+   * 修复 splitSentences 按标点分割后删除句子导致的 HTML 残损：
+   * - 裸文本节点（不在任何 <p>/<h*>/<li> 标签内）自动用 <p> 包裹
+   * - 孤儿 </p>（cheerio HTML 模式下转为 <p></p>）自动清除
+   *
+   * 仅在 cheerio 的输出与输入不同时才替换，避免对干净 HTML 做不必要的重新序列化。
+   */
+  const normalizeHtmlFragment = (html: string): string => {
+    if (!html || !html.includes("<")) return html;
+
+    const sectionBefore = (html.match(/<section>/g) || []).length;
+
+    const $ = cheerio.load(html, {
+      xml: { decodeEntities: false, xmlMode: false },
+    });
+
+    let hasBareText = false;
+
+    // 遍历顶层节点：裸文本用 <p> 包裹
+    $.root().contents().each((_i, node) => {
+      if (node.type === "text" && node.data && node.data.trim().length > 0) {
+        $(node).wrap("<p>");
+        hasBareText = true;
+      }
+    });
+
+    let result = $.html();
+
+    // cheerio 在修改 DOM 后可能添加 <html><head></head><body> 包裹
+    const bodyMatch = result.match(/<body>([\s\S]*)<\/body>/i);
+    if (bodyMatch) {
+      result = bodyMatch[1]!;
+    }
+
+    const trimmed = result.trim();
+
+    // 仅在 cheerio 做了实际修复时才替换
+    if (hasBareText || trimmed !== html.trim()) {
+      // 保护：如果 cheerio 解析导致 section 丢失（旧数据有破损标签已将 section 吞入属性值、
+      // DOM parser 无法恢复），返回原始 HTML，避免二次损坏
+      const sectionAfter = (trimmed.match(/<section>/g) || []).length;
+      if (sectionAfter < sectionBefore) {
+        return html;
+      }
+      // 清除 cheerio 将孤儿 </p> 转为的 <p></p> 空段落
+      return trimmed.replace(/<p>\s*<\/p>/g, "");
+    }
+
+    return html;
+  };
+
   return rawSections.map((sec, secIdx) => {
     const secLosing = [...losingIndices].filter((idx) => sec.citationLinks.some((l) => l.index === idx));
     const hasLosingCitations = secLosing.length > 0;
@@ -1498,6 +1552,9 @@ async function filterConflictingContent(
       cleanedContent = cleanedContent.replace(new RegExp(`<sup class="cite-ref">\\[${idx}\\]</sup>`, "g"), "");
       cleanedContent = cleanedContent.replace(new RegExp(`\\[${idx}\\]`, "g"), "");
     }
+
+    // ── 规范 HTML 结构：修复因删除句子产生的残损 HTML 标签 ──
+    cleanedContent = normalizeHtmlFragment(cleanedContent);
 
     // ── 清理因删除句子产生的空行
     cleanedContent = cleanedContent
@@ -1654,6 +1711,62 @@ export async function generateDocument(
 
 // ── 格式转换 ──────────────────────────────────────────
 
+/**
+ * 清理 HTML 中的破损 <sup><a> 引用标签（防线 2：cheerio DOM 安全网）
+ *
+ * 使用真正的 DOM parser 而非正则来识别破损标签。
+ * 合法 title 中的 < > 已在 escapeHtmlAttr 中转义为 &lt; &gt;，
+ * 因此 title 值中包含原始 < 的标签一定是破损的。
+ *
+ * 关键设计：仅当检测到破损标签时才调用 $.html() 重新序列化，
+ * 避免 cheerio 对干净 HTML 做不必要的"修复"（自动补全标签、重排属性等）。
+ */
+export function sanitizeCitationHtml(html: string): string {
+  const sectionBefore = (html.match(/<section>/g) || []).length;
+
+  const $ = cheerio.load(html, {
+    xml: { decodeEntities: false, xmlMode: false },
+  });
+
+  let fixed = 0;
+
+  $("sup a[title]").each((_i, el) => {
+    const $el = $(el);
+    const title = $el.attr("title") || "";
+
+    // 检测破损标记：title 值中包含原始 HTML 标签
+    // 合法 title 中的 < > 已在 escapeHtmlAttr 中转义
+    if (/<[a-zA-Z/]/.test(title)) {
+      fixed++;
+      const text = $el.text();
+      const refs = text.match(/\[\d+\]/g) || [];
+      $el.replaceWith(refs.join(""));
+    }
+  });
+
+  if (fixed > 0) {
+    const result = $.html();
+    const sectionAfter = (result.match(/<section>/g) || []).length;
+
+    // 保护：如果 cheerio 修复导致 section 丢失（破损标签已将 section 吞入属性值、
+    // DOM parser 无法恢复），则返回原始 HTML，避免二次损坏。
+    // 这种情况只发生在旧 DB 数据中 — Layer 1（strip）已从源头预防新数据的产生。
+    if (sectionAfter < sectionBefore) {
+      console.log(
+        `[sanitizeCitationHtml] cheerio 检测到 ${fixed} 个破损标签但无法安全修复 ` +
+        `(sections ${sectionBefore}→${sectionAfter})，返回原始 HTML。` +
+        `建议重新生成此文档。`
+      );
+      return html;
+    }
+
+    console.log(`[sanitizeCitationHtml] cheerio 修复 ${fixed} 个破损引用标签`);
+    return result;
+  }
+
+  return html;
+}
+
 export function toHtml(result: GenerateDocResult, baseUrl?: string): string {
   const isEmail = result.documentStyle === "email";
 
@@ -1787,12 +1900,12 @@ export function toHtml(result: GenerateDocResult, baseUrl?: string): string {
 
   // 注意：不要输出 <html>/<head>/<body>，因为内容通过 dangerouslySetInnerHTML 注入到 app 的 div 中
   // 如果输出 <body>，CSS 的 body { max-width } 会泄露到整个页面
-  const html = `<div class="doc-content">
+  let html = `<div class="doc-content">
 ${isEmail ? "" : `<h1>${escapeHtml(title)}</h1>`}
 ${sections.join(isEmail ? "\n\n" : "\n<hr>\n")}
 ${footnotes}
 </div>`;
-  console.log(`[DocGenerator] toHtml — style=${result.documentStyle}, isEmail=${isEmail}, html length=${html.length}`);
+  console.log(`[DocGenerator] toHtml — style=${result.documentStyle}, isEmail=${isEmail}, html length=${html.length}, sections=${sections.length}`);
   // 输出正文引用的编号和参考来源列表，便于调试
   const citedInText = [...new Set(html.match(/\[(\d+)\]/g) ?? [])].sort((a, b) => parseInt(a.slice(1, -1)) - parseInt(b.slice(1, -1)));
   const citedInList = [...new Set(html.match(/citation-num">\[(\d+)\]/g) ?? [])].map(m => m.match(/\[(\d+)\]/)?.[0] ?? '').sort((a, b) => parseInt(a.slice(1, -1)) - parseInt(b.slice(1, -1)));
@@ -1804,7 +1917,13 @@ ${footnotes}
     console.log(`[DocGenerator] 参考来源列表 HTML:\n${footerMatch[0]}`);
   }
   // 清理连续中文句号（。。 → 。）— LLM 生成 citation 标记后可能产生标点堆积
-  return html.replace(/。。+/g, "。");
+  html = html.replace(/。。+/g, "。");
+
+  // Bug fix: 清理 LLM 直接生成的破损 <sup><a> 标签
+  html = sanitizeCitationHtml(html);
+  console.log(`[DocGenerator] toHtml after sanitize — html length=${html.length}, sections=${(html.match(/<section>/g) || []).length}`);
+
+  return html;
 }
 
 function escapeHtml(text: string): string {

@@ -242,6 +242,46 @@ export default function GenerationPage() {
     // 累积流式章节内容
     let receivedSections: Array<{ title: string; content: string; groundingScore: number; sources: any[]; webCitations: any[] }> = [];
 
+    // 辅助函数：从 DB 获取完整文档内容（toHtml 输出，含引用处理和 footer）
+    const fetchFullContentFromDB = async (targetRunId: string | null, base: string): Promise<string | null> => {
+      if (!targetRunId) return null;
+      try {
+        const res = await fetch(`${base}/api/generation/${targetRunId}`);
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data?.ok && data?.run?.content ? data.run.content : null;
+      } catch (e) {
+        console.warn("[GenerationPage] fetchFullContentFromDB failed:", e);
+        return null;
+      }
+    };
+
+    // 辅助函数：降级到流式收到的 sections 重建内容（丢失引用处理、footer 等）
+    const fallbackToReceivedSections = () => {
+      if (receivedSections.length > 0) {
+        console.log("[GenerationPage] falling back to receivedSections, count:", receivedSections.length);
+        const sectionsHtml = receivedSections.map((s) => `<section><h2>${escapeHtml(s.title)}</h2>${s.content}</section>`).join("\n");
+        setDocument(sectionsHtml);
+        const groundingScores = receivedSections.map((s) => s.groundingScore).filter((s) => s > 0);
+        const avgTrust = groundingScores.length > 0
+          ? groundingScores.reduce((a, b) => a + b, 0) / groundingScores.length
+          : null;
+        setTrustScore(avgTrust);
+        setSections(receivedSections as any);
+        setDirtySections(new Set());
+        updateGeneratedContent(sectionsHtml, avgTrust ?? undefined);
+        updateWorkflowState("evaluating");
+        setGenerating(false);
+        if (runId) {
+          evaluateWithSSE(runId);
+        }
+      } else {
+        setDocument(`<p style="color:red">生成失败: 未收到内容</p>`);
+        updateWorkflowState("error", "未收到内容");
+        setGenerating(false);
+      }
+    };
+
     try {
       // 使用 SSE 流式接口（POST 请求，手动解析 SSE 流）
       // 开发环境绕过 Vite 代理直连后端，避免代理层 buffering SSE 响应
@@ -362,11 +402,21 @@ export default function GenerationPage() {
       // ── 流结束后：检查 buffer 中是否还有残留数据 ──
       console.log(`[SSE gen] after stream: bufferRest=${buffer.length} eventName="${eventName}" eventData=${eventData.length}`);
 
-      // 处理最终结果
+      // ── 流结束后：从 DB 获取完整文档作为最终结果 ──
+      // 流式内容只用于实时预览；DB 中的 toHtml() 输出才是权威数据（含引用去重、编号修正、footer）
       if (finalData && finalData.ok) {
-        console.log("[GenerationPage] stream generate success, content length:", finalData.content?.length);
-        setDocument(finalData.content);
-        setTrustScore(finalData.trustScore);
+        // done event 成功 → 使用 runId 从 DB 拉取完整内容
+        const targetRunId = finalData.runId || runId;
+        if (finalData.runId) {
+          runId = finalData.runId;
+          setRunId(finalData.runId);
+          updateLastRunId(finalData.runId);
+        }
+        if (finalData.title) {
+          updateTitle(finalData.title);
+        }
+        setDocumentStyle(finalData.documentStyle);
+
         // 合并 done event 数据和流式收到的 source 数据（done event 的 sections 不含 sources/webCitations）
         const doneSections = finalData.sections ?? [];
         const finalSections = doneSections.map((s: any, i: number) => ({
@@ -376,48 +426,61 @@ export default function GenerationPage() {
         }));
         setSections(finalSections.length > 0 ? finalSections : receivedSections as any);
         setDirtySections(new Set());
-        setDocumentStyle(finalData.documentStyle);
-        if (finalData.runId) {
-          runId = finalData.runId;
-          setRunId(finalData.runId);
-          updateLastRunId(finalData.runId);
+
+        // 从 DB 拉取完整 HTML（toHtml 输出，含引用处理和 footer）
+        const dbContent = await fetchFullContentFromDB(targetRunId, apiBase);
+        if (dbContent) {
+          const sectionCount = (dbContent.match(/<section>/g) || []).length;
+          const supCount = (dbContent.match(/<sup><a/g) || []).length;
+          console.log(`[GenerationPage] loaded full content from DB, length: ${dbContent.length}, sections: ${sectionCount}, sup<a: ${supCount}`);
+          setDocument(dbContent);
+          updateGeneratedContent(dbContent, finalData.trustScore);
+        } else {
+          // DB 拉取失败 → 降级到 done event 的 content（可能为空或不完整）
+          console.warn("[GenerationPage] DB fetch failed, falling back to done event content");
+          setDocument(finalData.content || "<p>文档生成完成，但内容加载失败</p>");
+          updateGeneratedContent(finalData.content || "", finalData.trustScore);
         }
-        if (finalData.title) {
-          updateTitle(finalData.title);
-        }
-        updateGeneratedContent(finalData.content, finalData.trustScore);
+        setTrustScore(finalData.trustScore);
         updateWorkflowState("evaluating");
         setGenerating(false);
 
         // 生成完成后自动触发评估（SSE 流式）
-        if (finalData.runId) {
-          evaluateWithSSE(finalData.runId);
+        if (targetRunId) {
+          evaluateWithSSE(targetRunId);
         }
       } else if (finalData) {
         const safeError = escapeHtml(finalData.error ?? "未知错误");
         setDocument(`<p style="color:red">生成失败: ${safeError}</p>`);
         updateWorkflowState("error", finalData.error);
       } else {
-        // 流结束但没有 done 事件（SSE event 数据跨 TCP chunk 解析失败时的 fallback）
-        if (receivedSections.length > 0) {
-          console.log("[GenerationPage] no done event, reconstructing from receivedSections, count:", receivedSections.length);
-          const sectionsHtml = receivedSections.map((s) => `<section><h2>${escapeHtml(s.title)}</h2>${s.content}</section>`).join("\n");
-          setDocument(sectionsHtml);
-          // 计算 trustScore
-          const groundingScores = receivedSections.map((s) => s.groundingScore).filter((s) => s > 0);
-          const avgTrust = groundingScores.length > 0
-            ? groundingScores.reduce((a, b) => a + b, 0) / groundingScores.length
-            : null;
-          setTrustScore(avgTrust);
-          setSections(receivedSections as any);
-          setDirtySections(new Set());
-          updateGeneratedContent(sectionsHtml, avgTrust ?? undefined);
-          updateWorkflowState("evaluating");
-          setGenerating(false);
-          // 触发评估
-          if (runId) {
+        // 流结束但没有 done 事件 → 尝试从 DB 拉取完整内容
+        if (runId) {
+          console.log("[GenerationPage] no done event, fetching full content from DB, runId:", runId);
+          const dbContent = await fetchFullContentFromDB(runId, apiBase);
+          if (dbContent) {
+            const sectionCount = (dbContent.match(/<section>/g) || []).length;
+            const supCount = (dbContent.match(/<sup><a/g) || []).length;
+            console.log(`[GenerationPage] loaded full content from DB (no done event), length: ${dbContent.length}, sections: ${sectionCount}, sup<a: ${supCount}`);
+            setDocument(dbContent);
+            // 计算 trustScore
+            const groundingScores = receivedSections.map((s) => s.groundingScore).filter((s) => s > 0);
+            const avgTrust = groundingScores.length > 0
+              ? groundingScores.reduce((a, b) => a + b, 0) / groundingScores.length
+              : null;
+            setTrustScore(avgTrust);
+            setSections(receivedSections as any);
+            setDirtySections(new Set());
+            updateGeneratedContent(dbContent, avgTrust ?? undefined);
+            updateWorkflowState("evaluating");
+            setGenerating(false);
             evaluateWithSSE(runId);
+          } else {
+            // DB 也拉不到 → 用流式收到的 sections 重建
+            fallbackToReceivedSections();
           }
+        } else if (receivedSections.length > 0) {
+          fallbackToReceivedSections();
         } else {
           setDocument(`<p style="color:red">生成失败: 未收到内容</p>`);
           updateWorkflowState("error", "未收到内容");
