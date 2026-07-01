@@ -49,11 +49,11 @@ export function cleanContent(
   // convertCitationsToLinks 用 escapeHtmlAttr 生成标签，从不出 bug。
   text = text.replace(/<\/?(?:sup|a)\b[^>]*>/gi, '');
 
-  // Step 3: 处理 [N] citation — 所有格式都转为可点击链接（包括邮件）
-  text = convertCitationsToLinks(text, citations);
-
-  // Step 4: Markdown → HTML
+  // Step 3: Markdown → HTML（先处理 inline Markdown，[N] 此时还是纯文本，不会被破坏）
   text = markdownToHtml(text);
+
+  // Step 4: 处理 [N] citation — 在 Markdown 转 HTML 后生成链接，不再被后续正则处理
+  text = convertCitationsToLinks(text, citations);
 
   // Step 5: 清理
   text = cleanHtml(text);
@@ -147,7 +147,8 @@ function convertCitationsToLinks(text: string, citations: CitationLink[]): strin
   return text.replace(/\[(\d+)\]/g, (match, numStr) => {
     const num = parseInt(numStr, 10);
     const cite = citations.find((c) => c.index === num);
-    if (!cite) return `<sup class="cite-ref">[${num}]</sup>`;
+    // 无效引用直接 strip，不包裹成 HTML（否则下游正则清理更困难）
+    if (!cite) return "";
 
     const displayTitle = formatSourceTitle(cite.title);
 
@@ -304,6 +305,7 @@ function escapeHtml(text: string): string {
  */
 function escapeHtmlAttr(text: string): string {
   return text
+    .replace(/&/g, "&amp;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;")
     .replace(/</g, "&lt;")

@@ -18,6 +18,7 @@ import type {
   EmbeddingRequest,
   EmbeddingResponse,
 } from "./openai.js";
+import { getModelCapabilities } from "./model-capabilities-registry.js";
 import { readSettingsFromDb } from "../lib/settingsReader.js";
 import {
   OpenAICompatibleAdapter,
@@ -38,6 +39,35 @@ const TIMEOUT_MS = 240_000;
 // 本 session 内后续 fallback chain 遍历时直接跳过，不再重试。
 
 const quotaExhaustedModels = new Set<string>();
+
+/** 检查模型是否在会话级冷却名单中 */
+export function isModelQuotaExhausted(modelId: string): boolean {
+  return quotaExhaustedModels.has(modelId);
+}
+
+// ── 会话级超时冷却 ──────────────────────────────────────────
+// 当模型在 fallback chain 中连续超时，将其加入此 Set，
+// 本 session 内后续 fallback chain 遍历时直接跳过，不再浪费时间等待。
+// 阈值：同一模型连续超时 2 次后触发冷却。
+
+const timeoutCooldownModels = new Set<string>();
+const modelTimeoutCount = new Map<string, number>();
+const TIMEOUT_COOLDOWN_THRESHOLD = 2;
+
+/** 检查模型是否在会话级超时冷却名单中 */
+export function isModelTimeoutCooldown(modelId: string): boolean {
+  return timeoutCooldownModels.has(modelId);
+}
+
+/** 记录模型超时，超过阈值后加入冷却 */
+function recordModelTimeout(modelId: string): void {
+  const count = (modelTimeoutCount.get(modelId) ?? 0) + 1;
+  modelTimeoutCount.set(modelId, count);
+  if (count >= TIMEOUT_COOLDOWN_THRESHOLD) {
+    timeoutCooldownModels.add(modelId);
+    logger.warn(`[Registry] 模型 ${modelId} 连续超时 ${count} 次，加入会话级超时冷却（跳过后续重试）`);
+  }
+}
 
 export interface AttemptRecord {
   providerId: string;
@@ -148,12 +178,22 @@ export class ProviderRegistry {
 
         // 评估模式：fallback 链中的推理模型容易因长 thinking 超时，
         // 但用户主动选择的首选模型保留（resolveEvalMaxTokens 已 cap 到 4096 防止超时）
+        // 同时过滤容量不足的模型（避免 qwen-math-turbo 等反复 400 错误）
+        // 注意：不过滤不支持 structured output 的模型 — fidelity/groundedness
+        // 内部已处理 SO 降级（不发送 response_format，纯文本 + parse 兜底）
         if (req.evalMode) {
           const primary = req.modelId ? models.filter((m) => m === req.modelId) : [];
-          const fallbacks = models.filter((m) => m !== req.modelId && !isReasoningModelStatic(m));
+          const minEvalTokens = req.maxTokens ?? 4096;
+          const fallbacks = models.filter((m) => {
+            if (m === req.modelId) return false;
+            if (isReasoningModelStatic(m)) return false;
+            const caps = getModelCapabilities(m);
+            if (caps.maxOutputTokens < Math.min(minEvalTokens, 4096)) return false;
+            return true;
+          });
           const filtered = [...primary, ...fallbacks];
           if (filtered.length < models.length) {
-            logger.info(`[Registry] evalMode: 从 fallback 链过滤推理模型（保留首选 ${req.modelId}）, ${models.length} → ${filtered.length}`);
+            logger.info(`[Registry] evalMode: 过滤推理/低容量模型, ${models.length} → ${filtered.length} (保留首选 ${req.modelId})`);
             models = filtered;
           }
         }
@@ -167,6 +207,16 @@ export class ProviderRegistry {
           logger.warn(`[Registry] 跳过 ${skipped} 个配额耗尽的模型: ${Array.from(quotaExhaustedModels).join(", ")}`);
         }
 
+        // 过滤超时冷却的模型（会话级冷却）
+        // 保留用户主动选择的首选模型
+        const preTimeoutCount = models.length;
+        models = models.filter((m) => m === req.modelId || !timeoutCooldownModels.has(m));
+        if (models.length < preTimeoutCount) {
+          const skipped = preTimeoutCount - models.length;
+          const cooledModels = Array.from(timeoutCooldownModels);
+          logger.warn(`[Registry] 跳过 ${skipped} 个超时冷却的模型: ${cooledModels.join(", ")}`);
+        }
+
         logger.info(`[Registry] ${pid} fallback chain: initialModel=${req.modelId ?? "default"}, models=[${models.slice(0, 5).join(", ")}${models.length > 5 ? `, ...+${models.length - 5}` : ""}]`);
 
         for (const modelId of models) {
@@ -175,26 +225,25 @@ export class ProviderRegistry {
             return { response: buildMaxAttemptsError(attempts), attempts };
           }
 
+          // 动态冷却检查：长调用（如 5 分钟超时）期间可能有其他调用已冷却此模型
+          if (modelId !== req.modelId && (quotaExhaustedModels.has(modelId) || timeoutCooldownModels.has(modelId))) {
+            logger.warn(`[Registry] 动态跳过冷却模型: ${modelId}（loop 内置检查）`);
+            continue;
+          }
+
           try {
             const result = await this.executeWithRetry(adapter, buildReq(req, { modelId }));
             attempts.push(...result.attempts);
 
-            // L3 截断检测
+            // L3 截断检测：使用 API 返回的 finish_reason，不靠正则猜测
+            // finish_reason === "length" 表示模型因 max_tokens 限制被截断
             const resp = result.response;
-            // 排除 tool-call 响应：text 为空但有 toolCalls 是正常行为，不是截断
-            const hasToolCalls = !!(resp.toolCalls && resp.toolCalls.length > 0);
-            const isTruncated = resp.text.length < 50 &&
+            const isTruncated = resp.finishReason === "length" &&
               !resp.error &&
-              !hasToolCalls &&
-              !isReasoningModel(modelId) &&
-              resp.tokenUsage != null &&
-              resp.tokenUsage.output < 100;
+              !isReasoningModel(modelId);
 
             if (isTruncated) {
-              logger.warn(`[ModelAdapt] Possible truncation for ${modelId}, retrying with 4x maxTokens`);
-              // 注意：不再调用 learnThinkingCapability(modelId, 1) — 那是 hack，
-              // 会把非推理模型错误地缓存为推理模型，导致后续请求的 maxTokens 越界。
-              // 真正的 thinking tokens 由 openai adapter 从 API 响应中学习。
+              logger.warn(`[ModelAdapt] Truncation detected for ${modelId} (finish_reason=length), retrying with 4x maxTokens`);
               const retryReq = buildReq(req, { modelId, maxTokens: resolveMaxTokens(modelId, req.maxTokens) });
               try {
                 const retryResult = await this.executeWithRetry(adapter, retryReq);
@@ -218,6 +267,11 @@ export class ProviderRegistry {
               logger.warn(`[Registry] 模型 ${modelId} 配额耗尽，加入会话级冷却（跳过后续重试）`);
             }
 
+            // 会话级超时冷却：连续超时的模型加入黑名单，避免反复浪费时间
+            if (errInfo.code === "timeout") {
+              recordModelTimeout(modelId);
+            }
+
             if (errInfo.code === "auth-failed") {
               return { response: buildErrorResponse(errInfo), attempts };
             }
@@ -238,18 +292,15 @@ export class ProviderRegistry {
         const result = await this.executeWithRetry(adapter, buildReq(req, {}));
         attempts.push(...result.attempts);
 
-        // L3 截断检测
+        // L3 截断检测：使用 API 返回的 finish_reason，不靠正则猜测
+        // finish_reason === "length" 表示模型因 max_tokens 限制被截断
         const resp = result.response;
-        const hasToolCalls = !!(resp.toolCalls && resp.toolCalls.length > 0);
-        const isTruncated = resp.text.length < 50 &&
+        const isTruncated = resp.finishReason === "length" &&
           !resp.error &&
-          !hasToolCalls &&
-          !isReasoningModel(req.modelId) &&
-          resp.tokenUsage != null &&
-          resp.tokenUsage.output < 100;
+          !isReasoningModel(req.modelId);
 
         if (isTruncated) {
-          logger.warn(`[ModelAdapt] Possible truncation for ${req.modelId}, retrying with 4x maxTokens`);
+          logger.warn(`[ModelAdapt] Truncation detected for ${req.modelId} (finish_reason=length), retrying with 4x maxTokens`);
           const retryReq = buildReq(req, { maxTokens: resolveMaxTokens(req.modelId, req.maxTokens) });
           try {
             const retryResult = await this.executeWithRetry(adapter, retryReq);
@@ -271,6 +322,11 @@ export class ProviderRegistry {
         if (errInfo.code === "quota-exceeded" && req.modelId) {
           quotaExhaustedModels.add(req.modelId);
           logger.warn(`[Registry] 模型 ${req.modelId} 配额耗尽，加入会话级冷却（跳过后续重试）`);
+        }
+
+        // 会话级超时冷却：连续超时的模型加入黑名单
+        if (errInfo.code === "timeout" && req.modelId) {
+          recordModelTimeout(req.modelId);
         }
 
         if (errInfo.code === "auth-failed") {
@@ -388,17 +444,32 @@ export class ProviderRegistry {
 
         // 401/400: 不重试
         if (lastErrInfo.code === "auth-failed" || lastErrInfo.code === "bad-request") {
-          throw Object.assign(new Error(lastErrInfo.message), { attempts: [...attempts] });
+          // 自适应 max_tokens：API 返回范围不匹配时，钳制后重试
+          if (lastErrInfo.code === "bad-request" && /max_tokens/i.test(lastErrInfo.message)) {
+            const rangeMatch = lastErrInfo.message.match(/\[(\d+),\s*(\d+)\]/);
+            if (rangeMatch) {
+              const apiMax = parseInt(rangeMatch[2], 10);
+              const currentMax = req.maxTokens ?? 4096;
+              if (currentMax > apiMax) {
+                logger.warn(`[Registry] max_tokens 不兼容：请求 ${currentMax} → 钳制到 API 上限 ${apiMax}`);
+                req = { ...req, maxTokens: apiMax };
+                clearTimeout(timeout);
+                clientSignal?.removeEventListener("abort", onClientAbort);
+                continue;
+              }
+            }
+          }
+          throw Object.assign(new Error(lastErrInfo.message), { attempts: [...attempts], status: lastErrInfo.code === "bad-request" ? 400 : 401, __errorCode: lastErrInfo.code });
         }
 
         // 429: 不重试，直接 fallback
         if (lastErrInfo.code === "quota-exceeded") {
-          throw Object.assign(new Error(lastErrInfo.message), { attempts: [...attempts] });
+          throw Object.assign(new Error(lastErrInfo.message), { attempts: [...attempts], status: 429, __errorCode: "quota-exceeded" });
         }
 
-        // 不可重试的错误
+        // 不可重试的错误（保留 errorCode 以穿过 throw/catch 边界）
         if (!lastErrInfo.retryable) {
-          throw Object.assign(new Error(lastErrInfo.message), { attempts: [...attempts] });
+          throw Object.assign(new Error(lastErrInfo.message), { attempts: [...attempts], __errorCode: lastErrInfo.code });
         }
       } catch (error) {
         lastError = error;
@@ -413,8 +484,8 @@ export class ProviderRegistry {
           throw error;
         }
 
-        // 超时、401、429、400: 不重试，直接 fallback
-        if (lastErrInfo.code === "timeout" || lastErrInfo.code === "auth-failed" || lastErrInfo.code === "quota-exceeded" || lastErrInfo.code === "bad-request") {
+        // 超时、401、429、400、空响应: 不重试，直接 fallback
+        if (lastErrInfo.code === "timeout" || lastErrInfo.code === "auth-failed" || lastErrInfo.code === "quota-exceeded" || lastErrInfo.code === "bad-request" || lastErrInfo.code === "empty-response") {
           (error as Error & { attempts: AttemptRecord[] }).attempts = [...attempts];
           throw error;
         }
@@ -444,7 +515,14 @@ interface ErrorInfo {
 
 function classifyError(error: unknown): ErrorInfo {
   if (error instanceof Error) {
-    const status = (error as Error & { status?: number }).status;
+    const errWithMeta = error as Error & { status?: number; __errorCode?: string };
+    const status = errWithMeta.status;
+    // 优先使用 propagate 的 __errorCode（跨 throw/catch 边界传递）
+    if (errWithMeta.__errorCode === "empty-response") return { code: "empty-response", message: error.message, retryable: false };
+    if (errWithMeta.__errorCode === "quota-exceeded") return { code: "quota-exceeded", message: error.message, retryable: false };
+    if (errWithMeta.__errorCode === "auth-failed") return { code: "auth-failed", message: error.message, retryable: false };
+    if (errWithMeta.__errorCode === "bad-request") return { code: "bad-request", message: error.message, retryable: false };
+    if (errWithMeta.__errorCode === "timeout") return { code: "timeout", message: error.message, retryable: false };
     if (status === 401) return { code: "auth-failed", message: error.message, retryable: false };
     if (status === 400) return { code: "bad-request", message: error.message, retryable: false };
     if (status === 429) return { code: "quota-exceeded", message: error.message, retryable: true };
@@ -453,6 +531,8 @@ function classifyError(error: unknown): ErrorInfo {
     }
     if (status === 403) return { code: "auth-failed", message: error.message, retryable: false };
     if (status && status >= 500) return { code: "server-error", message: error.message, retryable: true };
+    // 兜底：消息中含有 quota 关键词但没有 status（跨 throw/catch 边界丢失 status）
+    if (/quota|insufficient/i.test(error.message)) return { code: "quota-exceeded", message: error.message, retryable: false };
     // 超时直接 fallback 到下一个 model，不重试（照搬 patentExaminator）
     if (error.name === "AbortError") return { code: "timeout", message: "Request timed out", retryable: false };
     // 检测超时相关的错误消息（fetch abort 时 error.name 可能不是 AbortError）
@@ -466,6 +546,7 @@ function classifyError(error: unknown): ErrorInfo {
     const resp = error as ChatResponse;
     if (resp.error) {
       const code = resp.error.code;
+      if (code === "400") return { code: "bad-request", message: resp.error.message, retryable: false };
       if (code === "401" || (code === "403" && !/quota|insufficient/i.test(resp.error.message))) return { code: "auth-failed", message: resp.error.message, retryable: false };
       if (code === "403") return { code: "quota-exceeded", message: resp.error.message, retryable: false };
       if (code === "429") return { code: "quota-exceeded", message: resp.error.message, retryable: true };

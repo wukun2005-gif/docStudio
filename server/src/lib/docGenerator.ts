@@ -11,6 +11,7 @@ import { getValidAccessToken } from "./connectors/msGraphOAuth.js";
 import { readSettingsFromDb, readSenderProfile } from "./settingsReader.js";
 import { executeWithTools } from "./toolExecutor.js";
 import { checkGroundedness, type GroundingDoc } from "./groundednessCheck.js";
+import { checkFidelity } from "./fidelityCheck.js";
 import { cleanContent, type CitationLink } from "./contentCleaner.js";
 import { logger } from "./logger.js";
 import { dbGet, dbAll } from "./dbQuery.js";
@@ -306,23 +307,31 @@ async function batchRetrieveForOutline(
     logger.warn("[DocGenerator] 批量检索: MS Graph token 获取异常，OneDrive 远程检索已跳过");
   }
 
-  const allSourceIds = new Set<string>();
-  const rawResults: Array<{ sectionTitle: string; results: CrossSourceSearchResult[] }> = [];
-
-  for (let i = 0; i < flatSections.length; i++) {
-    const section = flatSections[i]!;
+  // 并行检索所有章节（仅本地混合搜索，不做远程下载），大幅缩短 pre-filter 耗时
+  // pre-filter 只需要检测 KB 中已有数据的冲突，不需要为此下载 OneDrive 文件
+  const searchTasks = flatSections.map(async (section, i) => {
     const batchSearchCfg: Parameters<typeof hybridSearchWithRemote>[1] = {
       limit: 5,
       useQueryExpansion: false,
       queryEmbedding: embeddings[i],
-      ...(batchMsToken ? { msAccessToken: batchMsToken } : {}),
+      enableRemote: false, // pre-filter: 仅本地检索，避免大量并行远程调用
       ...(embConfig ? { embedding: embConfig } : {}),
     };
-    const results: CrossSourceSearchResult[] = await hybridSearchWithRemote(queries[i]!, batchSearchCfg);
+    try {
+      const results = await hybridSearchWithRemote(queries[i]!, batchSearchCfg);
+      return { sectionTitle: section.title, results };
+    } catch (err) {
+      logger.warn(`[DocGenerator] 批量检索章节失败: "${section.title}": ${err}`);
+      return { sectionTitle: section.title, results: [] as CrossSourceSearchResult[] };
+    }
+  });
+
+  const rawResults = await Promise.all(searchTasks);
+  const allSourceIds = new Set<string>();
+  for (const { results } of rawResults) {
     for (const r of results) {
       allSourceIds.add(r.sourceId);
     }
-    rawResults.push({ sectionTitle: section.title, results });
   }
 
   const sourceMetaMap = new Map<string, { name: string; url?: string; indexedAt?: string }>();
@@ -412,7 +421,7 @@ async function preFilterConflictingSources(
     return null;
   }
 
-  const sectionsForDetection = [{ title: "pre-filter", content: "", sources: allSources.map((s) => ({ chunkId: s.chunkId, content: s.content, score: 1, sourceName: s.name })) }];
+  const sectionsForDetection = [{ title: "pre-filter", content: "", sources: allSources.map((s) => ({ chunkId: s.chunkId, content: s.content, score: 1, sourceName: s.name, timestamp: s.timestamp })) }];
 
   logger.info(`[DocGenerator] 冲突前置过滤: ${allSources.length} 个来源送检`);
   const detectionResult = await detectConflicts(sectionsForDetection, apiKey, providers[0] ?? "mimo", modelId);
@@ -479,6 +488,36 @@ async function generateSection(
     const sourceLabel = s.sourceName ? `《${s.sourceName}》` : '';
     return `${sourceLabel}（相似度: ${s.score.toFixed(2)}）\n${s.content}`;
   }).join("\n\n");
+
+  // ── Fidelity 门控：LLM-as-Judge 判断 RAG 文档是否包含实质性信息 ──
+  // 替代原来的 RRF 门控（avgScore >= 0.4）：RRF 分数不反映绝对相关性。
+  let skipToolCalling = false;
+  let forceToolUse = false;
+  if (sources.length >= 3) {
+    try {
+      const fidelityResult = await checkFidelity(
+        sources.map(s => ({ content: s.content, score: s.score, sourceName: s.sourceName })),
+        section.title,
+        section.description,
+        {
+          apiKey: config.apiKey,
+          providerPreference: config.providerPreference,
+          modelId: config.modelId,
+          providerBaseUrls: config.providerBaseUrls,
+          signal: config.signal,
+        },
+      );
+      // fidelity >= 0.5：过半文档相关 → 跳过调用①（tool calling），直接 re-inject
+      skipToolCalling = fidelityResult.fidelityScore >= 0.5;
+      // fidelity < 0.2：LLM 判定文档全部不相关 → 强制 web_search
+      forceToolUse = fidelityResult.fidelityScore < 0.2;
+      logger.info(`[DocGenerator] Fidelity 门控: "${section.title}" fidelity=${fidelityResult.fidelityScore.toFixed(2)} (${sources.length} docs) → ${skipToolCalling ? "跳过调用①" : "保留调用①"}${forceToolUse ? " (强制搜索)" : " (LLM 自主决定)"}`);
+    } catch (err) {
+      logger.warn(`[DocGenerator] Fidelity check 异常: ${err}，LLM 自主决定`);
+    }
+  } else {
+    logger.info(`[DocGenerator] Fidelity 门控: "${section.title}" RAG 来源较少 (${sources.length} docs)，LLM 自主决定`);
+  }
 
   // ── Composable Prompt Layers: 获取各层模板 ──
   const effectiveStyleId = documentStyle ?? config.metadata?.styleId ?? detectStyle(userRequest).id;
@@ -610,7 +649,8 @@ ${sourceText || "（无参考信息）"}
 5. 内容要与前文自然衔接，承上启下，不要重复前文已写过的内容
 6. 如果需要补充最新的行业动态、市场信息或外部数据，必须调用 web_search 工具搜索网络
 7. 【重要】引用参考信息时，必须用 [N] 标记来源编号。系统会自动提供带编号的参考文档，请直接复用这些编号。
-8. 【禁止】只允许引用系统提供的参考文档中的编号，绝对不要引用不存在的编号。如果某句话没有对应的参考来源，直接写出该句，不要添加任何引用标记。${toneRule}`;
+8. 【禁止】只允许引用系统提供的参考文档中的编号，绝对不要引用不存在的编号。如果某句话没有对应的参考来源，直接写出该句，不要添加任何引用标记。
+9. 【最重要】这是最终输出阶段。禁止输出"让我分析..."、"我需要搜索..."、"用户要求..."、"前文已经涵盖..."、"参考信息："、"现在需要写..."等任何思考过程或规划性文字。只能输出章节正文。${toneRule}`;
 
   const userPrompt = `请为"${section.title}"章节撰写内容。${section.description ? `该章节要写：${section.description}` : ""}`;
 
@@ -625,8 +665,9 @@ ${sourceText || "（无参考信息）"}
     if (key) providerApiKeys[pid] = key;
   }
 
-  // 照搬 patentExaminator: 章节生成需要较长超时（reasoning tokens + 长文本生成耗时）
-  const SECTION_TIMEOUT_MS = 180_000;
+  // 章节生成超时：平衡速度与质量。过长的超时会导致用户体验极差（多个 section × 超时 × fallback 叠加）。
+  // 90s 足以完成普通章节（通常 30-60s），超过则 fallback 到下一 model。
+  const SECTION_TIMEOUT_MS = 90_000;
 
   const buildLLMCall = (overrides?: {
     messages?: Array<{ role: string; content: string; tool_call_id?: string; name?: string }>;
@@ -671,6 +712,8 @@ ${sourceText || "（无参考信息）"}
     documentFormat: config.format,
     documentStyle: effectiveStyleId,
     globalCitationOffset,
+    skipToolCalling,
+    forceToolUse,
     ...(rerankerConfig ? { rerankerConfig } : {}),
   });
 
@@ -697,6 +740,21 @@ ${sourceText || "（无参考信息）"}
       }
     } catch (err) {
       logger.warn(`[DocGenerator] Groundedness check 失败: ${err}`);
+    }
+  }
+
+  // 校验：移除 LLM 生成的超出有效范围的 [N] 引用标记（防止幻觉编号）
+  // 在 cleanContent 之前做（纯文本阶段 regex 最可靠）
+  const validMax = globalCitationOffset + result.mergedCitations.length;
+  const validMin = globalCitationOffset + 1;
+  if (result.mergedCitations.length > 0) {
+    const beforeLen = finalContent.length;
+    finalContent = finalContent.replace(/\[(\d+)\]/g, (_match, numStr) => {
+      const n = parseInt(numStr, 10);
+      return (n >= validMin && n <= validMax) ? _match : "";
+    });
+    if (finalContent.length !== beforeLen) {
+      logger.info(`[DocGenerator] 移除超出范围 [${validMin}-${validMax}] 的引用标记, text长度 ${beforeLen} → ${finalContent.length}`);
     }
   }
 
@@ -744,6 +802,33 @@ async function generateMergedSection(
     const sourceLabel = s.sourceName ? `《${s.sourceName}》` : '';
     return `${sourceLabel}（相似度: ${s.score.toFixed(2)}）\n${s.content}`;
   }).join("\n\n");
+
+  // ── Fidelity 门控：同 generateSection 逻辑 ──
+  let skipToolCalling = false;
+  let forceToolUse = false;
+  if (sources.length >= 3) {
+    try {
+      const fidelityResult = await checkFidelity(
+        sources.map(s => ({ content: s.content, score: s.score, sourceName: s.sourceName })),
+        allTitles,
+        allDescriptions || undefined,
+        {
+          apiKey: config.apiKey,
+          providerPreference: config.providerPreference,
+          modelId: config.modelId,
+          providerBaseUrls: config.providerBaseUrls,
+          signal: config.signal,
+        },
+      );
+      skipToolCalling = fidelityResult.fidelityScore >= 0.5;
+      forceToolUse = fidelityResult.fidelityScore < 0.2;
+      logger.info(`[DocGenerator] Fidelity 门控: 合并章节 "${parentSection.title}" fidelity=${fidelityResult.fidelityScore.toFixed(2)} (${sources.length} docs) → ${skipToolCalling ? "跳过调用①" : "保留调用①"}${forceToolUse ? " (强制搜索)" : " (LLM 自主决定)"}`);
+    } catch (err) {
+      logger.warn(`[DocGenerator] Fidelity check 异常: ${err}，LLM 自主决定`);
+    }
+  } else {
+    logger.info(`[DocGenerator] Fidelity 门控: 合并章节 "${parentSection.title}" RAG 来源较少 (${sources.length} docs)，LLM 自主决定`);
+  }
 
   // ── 2. Composable Prompt Layers ───────────────────────────────
   const effectiveStyleId = documentStyle ?? config.metadata?.styleId ?? detectStyle(userRequest ?? "").id;
@@ -892,7 +977,7 @@ ${subSectionPrompt}
     if (key) providerApiKeys[pid] = key;
   }
 
-  const SECTION_TIMEOUT_MS = 240_000; // 合并调用需要更长超时
+  const SECTION_TIMEOUT_MS = 180_000; // 合并调用：一次生成父+子章节，需要更多时间但比分别生成快
 
   const buildLLMCall = (overrides?: {
     messages?: Array<{ role: string; content: string; tool_call_id?: string; name?: string }>;
@@ -934,6 +1019,8 @@ ${subSectionPrompt}
     documentFormat: config.format ?? "html",
     documentStyle: effectiveStyleId,
     globalCitationOffset,
+    skipToolCalling,
+    forceToolUse,
     ...(rerankerConfig ? { rerankerConfig } : {}),
   });
 
@@ -1622,7 +1709,21 @@ export async function generateDocument(
   const shouldPreFilter = config.preFilter !== false; // 默认 true，显式 false 才关闭
   if (shouldPreFilter) {
     try {
-      conflictResolution = await preFilterConflictingSources(config.outline, config);
+      // pre-filter 超时保护：超过 45s 降级到 post-filter 兜底，不阻塞章节生成
+      const PRE_FILTER_TIMEOUT_MS = 45_000;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<null>((resolve) => {
+        timeoutId = setTimeout(() => {
+          logger.warn(`[DocGenerator] Pre-filter 超时 (${PRE_FILTER_TIMEOUT_MS / 1000}s)，降级为 post-filter 兜底`);
+          resolve(null);
+        }, PRE_FILTER_TIMEOUT_MS);
+      });
+      conflictResolution = await Promise.race([
+        preFilterConflictingSources(config.outline, config),
+        timeoutPromise,
+      ]);
+      // 清除 timer：pre-filter 已完成（成功或超时），不再需要 timer
+      clearTimeout(timeoutId);
       if (conflictResolution && conflictResolution.excludedChunkIds.length > 0) {
         excludeChunkIds = new Set(conflictResolution.excludedChunkIds);
         logger.info(`[DocGenerator] 冲突前置过滤: 排除 ${excludeChunkIds.size} 个 chunk（第一道防线）`);
@@ -1738,6 +1839,8 @@ export function sanitizeCitationHtml(html: string): string {
     // 合法 title 中的 < > 已在 escapeHtmlAttr 中转义
     if (/<[a-zA-Z/]/.test(title)) {
       fixed++;
+      const outerHtml = $.html(el).substring(0, 300);
+      console.log(`[sanitizeCitationHtml] broken tag #${fixed}: title="${title.substring(0, 200)}" html="${outerHtml}"`);
       const text = $el.text();
       const refs = text.match(/\[\d+\]/g) || [];
       $el.replaceWith(refs.join(""));
@@ -1874,8 +1977,38 @@ export function toHtml(result: GenerateDocResult, baseUrl?: string): string {
     .filter((c) => citedIndices.has(c.index))
     .sort((a, b) => a.index - b.index);
 
-  // 照搬 patentExaminator：参考来源列表使用 [N] 编号，与正文 citation 对应
-  // 注意：不使用 <ol> 自动编号，因为 citedSources 的 index 可能不连续（如 [1] 和 [3]）
+  // 重新编号：将 citation 编号从头顺序排列（1, 2, 3, ...）
+  // post-filter 和 dedup 可能导致编号不连续（如 [1], [2], [5], [7]），
+  // 重新编号确保用户看到的是从 1 开始的顺序编号。
+  const oldToNew = new Map<number, number>();
+  citedSources.forEach((s, i) => {
+    oldToNew.set(s.index, i + 1);
+  });
+  if (oldToNew.size > 0) {
+    const hasGaps = [...oldToNew.entries()].some(([oldIdx, newIdx]) => oldIdx !== newIdx);
+    if (hasGaps) {
+      logger.info(`[DocGenerator] Citation 重新编号: ${[...oldToNew.entries()].map(([o, n]) => `${o}→${n}`).join(", ")}`);
+      // 按从大到小替换，避免 [11] 被 [1] 部分匹配
+      const sortedRemap = [...oldToNew.entries()].sort((a, b) => b[0] - a[0]);
+      for (let i = 0; i < sections.length; i++) {
+        let content = sections[i]!;
+        for (const [oldIdx, newIdx] of sortedRemap) {
+          content = content.replace(new RegExp(`<sup><a([^>]*)>\\[${oldIdx}\\]</a></sup>`, "g"), `<sup><a$1>[${newIdx}]</a></sup>`);
+          content = content.replace(new RegExp(`<sup><span([^>]*)>\\[${oldIdx}\\]</span></sup>`, "g"), `<sup><span$1>[${newIdx}]</span></sup>`);
+          content = content.replace(new RegExp(`<sup class="cite-ref">\\[${oldIdx}\\]</sup>`, "g"), `<sup class="cite-ref">[${newIdx}]</sup>`);
+          content = content.replace(new RegExp(`\\[${oldIdx}\\]`, "g"), `[${newIdx}]`);
+        }
+        sections[i] = content;
+      }
+      // 更新 citedSources 的 index
+      for (const s of citedSources) {
+        const newIdx = oldToNew.get(s.index);
+        if (newIdx != null) s.index = newIdx;
+      }
+    }
+  }
+
+  // 参考来源列表使用重新编号后的 [N] 编号，与正文 citation 对应
   const footnotes = citedSources.length > 0
     ? `<footer class="citations"><h3>参考来源</h3><div class="citation-list">${citedSources.map((s) => {
         // 知识库来源：优先链接到原始文件 URL（GitHub/OneDrive），否则用 API 端点

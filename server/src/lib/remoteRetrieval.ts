@@ -8,9 +8,9 @@
  */
 
 import { logger } from "./logger.js";
-import { searchFiles, downloadFile, type GraphSearchResult } from "./connectors/msGraphSearch.js";
+import { searchFiles, downloadFile, listRootFiles, type GraphSearchResult } from "./connectors/msGraphSearch.js";
 import { ingestFile, type EmbeddingConfig } from "./ingestion.js";
-import { getAllChunks, getAllVectors } from "./knowledgeDb.js";
+import { getAllChunks, getAllVectors, getAllSources, deleteSource } from "./knowledgeDb.js";
 import crypto from "crypto";
 
 // ── 会话级缓存 ────────────────────────────────────────────
@@ -118,10 +118,12 @@ export async function twoStageRetrieve(
       );
 
       // ★ 复用统一分块 pipeline：extractText → preprocess → smartChunk → 去噪 → 存储 → embedding
+      const stableSourceId = `onedrive-${candidate.id}`;
       const result = await ingestFile({
         content,
         fileName: candidate.name,
         sourceType: "onedrive_file",
+        sourceId: stableSourceId,
         url: candidate.webUrl,
         filePath: `onedrive/${candidate.id}/${candidate.name}`,
         embedding: config.embedding,
@@ -144,6 +146,41 @@ export async function twoStageRetrieve(
 
   if (ingestedSourceIds.length === 0) {
     return [];
+  }
+
+  // ── 清理已从远程删除的过期 OneDrive 源 ──────────────────
+  try {
+    const allRemoteFiles = await listRootFiles(
+      { accessToken: config.msAccessToken },
+      { top: 200 },
+    );
+    const remoteFileIds = new Set(allRemoteFiles.map(f => f.id));
+    const localOneDriveSources = getAllSources().filter(s => s.type === "onedrive_file");
+
+    let cleanedCount = 0;
+    for (const source of localOneDriveSources) {
+      // 从 source.id 中提取 OneDrive fileId（稳定格式：onedrive-{fileId}）
+      // 也兼容旧格式（随机 UUID，通过 filePath 提取 fileId）
+      let fileId: string | null = null;
+      const stableMatch = source.id.match(/^onedrive-(.+)$/);
+      if (stableMatch) {
+        fileId = stableMatch[1];
+      } else if (source.filePath) {
+        const pathMatch = source.filePath.match(/^onedrive\/([^/]+)\//);
+        if (pathMatch) fileId = pathMatch[1];
+      }
+
+      if (fileId && !remoteFileIds.has(fileId)) {
+        deleteSource(source.id);
+        cleanedCount++;
+        logger.info(`[RemoteRetrieve] 清理过期 OneDrive 源: ${source.name} (fileId=${fileId.slice(0, 12)}...)`);
+      }
+    }
+    if (cleanedCount > 0) {
+      logger.info(`[RemoteRetrieve] 清理完成: ${cleanedCount} 个过期 OneDrive 源（共 ${localOneDriveSources.length} 个本地源, ${allRemoteFiles.length} 个远程文件）`);
+    }
+  } catch (err) {
+    logger.warn(`[RemoteRetrieve] 清理过期源失败（非致命）: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // ── 在本地知识库中做检索（刚入库的 chunks 已在库中） ────

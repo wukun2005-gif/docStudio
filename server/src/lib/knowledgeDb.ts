@@ -55,7 +55,42 @@ export function getSourceById(id: string): {
   filePath?: string; url?: string; contentHash?: string;
   chunkCount: number; status: string; createdAt: string; updatedAt: string;
 } | undefined {
-  return dbGet<any>("SELECT * FROM kb_sources WHERE id = ?", [id]);
+  const row = dbGet<any>("SELECT * FROM kb_sources WHERE id = ?", [id]);
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    filePath: row.file_path,
+    url: row.url,
+    contentHash: row.content_hash,
+    chunkCount: row.chunk_count,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** 按 file_path 查找所有 source（用于 OneDrive 稳定 sourceId 过渡期清理旧 UUID 重复） */
+export function findSourcesByFilePath(filePath: string): Array<{
+  id: string; name: string; type: string;
+  filePath?: string; url?: string; contentHash?: string;
+  chunkCount: number; status: string;
+}> {
+  const rows = dbAll<any>(
+    "SELECT * FROM kb_sources WHERE file_path = ?",
+    [filePath],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    type: r.type,
+    filePath: r.file_path,
+    url: r.url,
+    contentHash: r.content_hash,
+    chunkCount: r.chunk_count,
+    status: r.status,
+  }));
 }
 
 export function deleteSource(id: string): void {

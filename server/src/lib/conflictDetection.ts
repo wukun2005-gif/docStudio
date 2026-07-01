@@ -16,11 +16,13 @@
  */
 
 import { logger } from "./logger.js";
-import { registry } from "../providers/registry.js";
+import { registry, isModelQuotaExhausted, isModelTimeoutCooldown } from "../providers/registry.js";
 import { isReasoningModelStatic } from "../providers/openai.js";
+import { jsonrepair } from "jsonrepair";
 import { getApiKey } from "../security/keyStore.js";
 import { readSettingsFromDb } from "./settingsReader.js";
 import { resolveEvalMaxTokens, estimateTokens } from "./llmUtils.js";
+import { getModelCapabilities } from "../providers/model-capabilities-registry.js";
 
 // ── 任务感知的模型选择 ──────────────────────────────────
 //
@@ -39,6 +41,7 @@ function selectBestEvalModel(
   const fallbackEnabled = Object.values(fallbackMap).some(Boolean);
   if (!fallbackEnabled) return primaryModel;
 
+  // 只选【非推理 + 支持 structured output + 容量足够 + 不在冷却】的模型
   const fallbackLists = dbSettings.modelFallbacks ?? {};
   for (const pid of providerPreference) {
     if (!fallbackMap[pid]) continue;
@@ -46,7 +49,12 @@ function selectBestEvalModel(
     if (!list || list.length === 0) continue;
     for (const m of list) {
       if (!isReasoningModelStatic(m)) {
-        logger.info(`[ConflictDetection] 任务感知选模型: ${primaryModel} → ${m} (非推理模型)`);
+        if (isModelQuotaExhausted(m)) continue;
+        if (isModelTimeoutCooldown(m)) continue;
+        const caps = getModelCapabilities(m);
+        if (caps.maxOutputTokens < 4096) continue;
+        if (!caps.supportsStructuredOutput) continue;
+        logger.info(`[ConflictDetection] 任务感知选模型: ${primaryModel} → ${m} (非推理, 支持结构化输出)`);
         return m;
       }
     }
@@ -66,7 +74,9 @@ export interface ConflictItem {
     timestamp?: string;             // 信息时间戳
   }>;
   severity: "high" | "medium" | "low";  // 冲突严重程度
-  recommendation?: string;          // 处理建议
+  recommendation?: string;          // 处理建议（自由文本，保留兼容）
+  winnerSource?: string;            // LLM 判定的可信来源名（结构化裁决）
+  winnerReason?: string;            // 裁决理由
 }
 
 export interface ConflictDetectionResult {
@@ -79,7 +89,7 @@ export interface ConflictDetectionResult {
 
 const CONFLICT_DETECTOR_SYSTEM = `You are a conflict detection expert for knowledge-grounded document generation.
 
-Your task: Analyze claims from different knowledge sources and identify contradictions or conflicts.
+Your task: Analyze claims from different knowledge sources and identify contradictions or conflicts. For each conflict, also determine which source is more credible and should be used in the final document.
 
 CONFLICT TYPES:
 - temporal: Information from different time periods that contradict (e.g., "launch in 1 week" vs "launch in 1 month")
@@ -93,6 +103,14 @@ SEVERITY LEVELS:
 - medium: Important information discrepancy, should address in document
 - low: Minor difference or nuance, can note but not critical
 
+WINNER SELECTION RULES:
+- Prefer sources with higher authority (e.g., VP > intern)
+- Prefer more recently indexed/modified sources — check the "(时间: ...)" in source headers. Newer timestamps generally indicate fresher, more current information.
+- When multiple sources appear to be different versions of the same document (similar filenames), prefer the one with the most recent timestamp.
+- Prefer sources with concrete data/evidence over vague claims
+- When uncertain, prefer the source whose claim is more specific and detailed
+- Set winner_source to the exact source name from the claim
+
 OUTPUT FORMAT (strict JSON):
 {
   "conflicts": [
@@ -104,7 +122,8 @@ OUTPUT FORMAT (strict JSON):
         {"text": "研发说要1个月后才能上线产品", "source": "研发部会议纪要", "source_authority": 0.8, "timestamp": "2024-01-20"}
       ],
       "severity": "high",
-      "recommendation": "建议以研发部说法为准，因为技术实现时间更可靠"
+      "winner_source": "研发部会议纪要",
+      "reason": "技术实现时间比销售承诺更可靠，且研发部来源权威度更高"
     }
   ],
   "conflict_rate": 0.15,
@@ -115,7 +134,7 @@ const CONFLICT_DETECTOR_USER = `## 知识来源内容
 
 {{SOURCES}}
 
-请分析这些知识来源中的声明，找出所有矛盾或冲突的地方。
+请分析这些知识来源中的声明，找出所有矛盾或冲突的地方。对每个冲突，判断哪个来源更可信，设置 winner_source。
 
 输出 JSON：
 {
@@ -127,7 +146,8 @@ const CONFLICT_DETECTOR_USER = `## 知识来源内容
         {"text": "声明内容", "source": "来源名称", "source_authority": 0.8, "timestamp": "2024-01-15"}
       ],
       "severity": "high/medium/low",
-      "recommendation": "处理建议"
+      "winner_source": "更可信的来源名称",
+      "reason": "判断理由"
     }
   ],
   "conflict_rate": 0.15,
@@ -137,11 +157,14 @@ const CONFLICT_DETECTOR_USER = `## 知识来源内容
 // ============ Core Logic ============
 
 /**
- * 解析 JSON 响应
+ * 解析 LLM JSON 响应（使用 jsonrepair 处理 LLM 输出不确定性）
+ * 照搬 groundednessCheck.ts 的同名函数
  */
 function parseJsonResponse<T>(content: string): T | null {
+  const rawLen = content.length;
   let cleaned = content.trim();
-  // 先剥离 markdown 代码块标记（如 ```json ... ```）
+
+  // 步骤 1: 剥离 markdown 代码块标记
   const fencePatterns = [
     /```(?:json)?\s*\n?([\s\S]*?)\n?```/,
     /```\w*\s*\n?([\s\S]*?)\n?```/,
@@ -149,43 +172,34 @@ function parseJsonResponse<T>(content: string): T | null {
   for (const pat of fencePatterns) {
     const m = cleaned.match(pat);
     if (m) {
-      cleaned = m[1].trim();
+      cleaned = m[1]!.trim();
       break;
     }
   }
 
-  // 通用修复函数：trailing commas + unquoted keys
-  const repairJson = (s: string): string =>
-    s.replace(/,(\s*[}\]])/g, "$1")
-     .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3');
-
-  const tryParse = (s: string): T | null => {
-    try { return JSON.parse(s) as T; } catch {
-      try { return JSON.parse(repairJson(s)) as T; } catch {
-        return null;
-      }
-    }
-  };
-
-  // 策略 1：直接解析
-  const direct = tryParse(cleaned);
-  if (direct) return direct;
-
-  // 策略 2：提取 JSON 块（非贪婪匹配）
-  const jsonMatch = cleaned.match(/\{(?:[^{}]|\{[^{}]*\})*\}/);
-  if (jsonMatch) {
-    const parsed = tryParse(jsonMatch[0]);
-    if (parsed) return parsed;
+  // 步骤 2: 提取首尾大括号之间的内容
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
   }
 
-  // 策略 3：贪婪匹配整个 JSON
-  const greedyMatch = cleaned.match(/\{[\s\S]*\}/);
-  if (greedyMatch) {
-    const parsed = tryParse(greedyMatch[0]);
-    if (parsed) return parsed;
+  // 步骤 2.5: 折叠连续逗号
+  cleaned = cleaned.replace(/,(\s*,)+/g, ",");
+
+  // 步骤 3: jsonrepair 修复 + JSON.parse
+  let repaired: string;
+  try {
+    repaired = jsonrepair(cleaned);
+  } catch {
+    return null;
   }
 
-  return null;
+  try {
+    return JSON.parse(repaired) as T;
+  } catch {
+    return null;
+  }
 }
 
 /** LLM 返回 snake_case JSON，统一转为 camelCase */
@@ -201,6 +215,8 @@ function normalizeConflictItem(raw: any): ConflictItem {
     })),
     severity: raw.severity ?? "medium",
     recommendation: raw.recommendation,
+    winnerSource: raw.winner_source ?? raw.winnerSource,
+    winnerReason: raw.reason ?? raw.winner_reason,
   };
 }
 
@@ -305,7 +321,7 @@ async function callConflictDetector(
           apiKey: "",
           maxTokens,
           temperature: 0,
-          timeoutMs: 300_000,
+          timeoutMs: 60_000,
           evalMode: true,
         },
         undefined,
@@ -339,7 +355,7 @@ async function callConflictDetector(
  * 检测文档中的冲突
  */
 export async function detectConflicts(
-  sections: Array<{ title: string; content: string; sources: Array<{ chunkId: string; content: string; score: number; sourceName?: string }> }>,
+  sections: Array<{ title: string; content: string; sources: Array<{ chunkId: string; content: string; score: number; sourceName?: string; timestamp?: string }> }>,
   apiKey: string,
   providerId: string,
   modelId: string,
@@ -360,6 +376,7 @@ export async function detectConflicts(
         name: `${section.title} - ${name}`,
         content: source.content,
         authority,
+        timestamp: source.timestamp,
       });
     }
   }
@@ -373,7 +390,7 @@ export async function detectConflicts(
     return result;
   } catch (e) {
     logger.warn(`[ConflictDetection] Conflict detection failed: ${e}`);
-    return { conflicts: [], conflictRate: 0, hasConflicts: false };
+    throw e;
   }
 }
 
@@ -420,7 +437,7 @@ export interface ConflictResolutionItem {
   topic: string;
   conflictType: ConflictItem["conflictType"];
   severity: ConflictItem["severity"];
-  resolution: "authority" | "temporal" | "unresolvable";
+  resolution: "authority" | "temporal" | "llm_verdict" | "unresolvable";
   winningSource: string;
   losingSources: string[];
   reason: string;
@@ -507,11 +524,16 @@ export function autoResolveConflicts(
     return [];
   };
 
-  // 把某个 conflict 的所有 sides 的 chunks 全部排除（forceResolveAll 兜底）
+  // 排除指定 source 的 chunks（去重写入 excludedSet）
+  const excludeSource = (source: string, topic: string) => {
+    const ids = lookupChunkIds(source, topic);
+    for (const id of ids) { if (!excludedSet.has(id)) { excludedSet.add(id); excludedChunkIds.push(id); } }
+  };
+
+  // 把某个 conflict 的所有 sides 的 chunks 全部排除（最后兜底）
   const excludeAllSides = (conflict: ConflictItem): ConflictResolutionItem => {
     for (const claim of conflict.claims) {
-      const ids = lookupChunkIds(claim.source, conflict.topic);
-      for (const id of ids) { if (!excludedSet.has(id)) { excludedSet.add(id); excludedChunkIds.push(id); } }
+      excludeSource(claim.source, conflict.topic);
     }
     return {
       topic: conflict.topic,
@@ -529,36 +551,65 @@ export function autoResolveConflicts(
 
     let resolution: ConflictResolutionItem | null = null;
 
-    const withAuth = conflict.claims.filter((c) => c.sourceAuthority != null);
-
-    if (withAuth.length >= 2) {
-      const sorted = [...conflict.claims].sort(
-        (a, b) => (b.sourceAuthority ?? 0) - (a.sourceAuthority ?? 0),
+    // ── 优先级 1：LLM winner_source（检测阶段已裁决，零额外延迟）──
+    if (conflict.winnerSource) {
+      const winnerClaim = conflict.claims.find(
+        (c) => c.source === conflict.winnerSource,
       );
-      const winner = sorted[0]!;
-      const losers = sorted.slice(1);
-      const winnerTime = safeParseTimestamp(winner.timestamp, 0);
-      const newerLosers = losers.filter(
-        (l) => safeParseTimestamp(l.timestamp, 0) > winnerTime,
-      );
-
-      if (newerLosers.length === 0 || winnerTime === 0) {
+      if (winnerClaim) {
+        const losers = conflict.claims.filter((c) => c.source !== conflict.winnerSource);
         resolution = {
           topic: conflict.topic,
           conflictType: conflict.conflictType,
           severity: conflict.severity,
-          resolution: "authority",
-          winningSource: winner.source,
+          resolution: "llm_verdict",
+          winningSource: conflict.winnerSource,
           losingSources: losers.map((l) => l.source),
-          reason: `以权威度更高的来源「${winner.source}」(权威度 ${(winner.sourceAuthority ?? 0).toFixed(1)}) 为准`,
+          reason: conflict.winnerReason ?? `LLM 判定「${conflict.winnerSource}」更可信`,
         };
         for (const loser of losers) {
-          const ids = lookupChunkIds(loser.source, conflict.topic);
-          for (const id of ids) { if (!excludedSet.has(id)) { excludedSet.add(id); excludedChunkIds.push(id); } }
+          excludeSource(loser.source, conflict.topic);
+        }
+        logger.info(`[ConflictResolution] LLM 裁决: topic="${conflict.topic}", winner="${conflict.winnerSource}"`);
+      } else {
+        // winnerSource 不匹配任何 claim → 降级到规则
+        logger.warn(`[ConflictResolution] winnerSource 不匹配: topic="${conflict.topic}", winnerSource="${conflict.winnerSource}", claims=${conflict.claims.map(c => c.source).join(", ")}`);
+      }
+    }
+
+    // ── 优先级 2：权威度规则 ──
+    if (!resolution) {
+      const withAuth = conflict.claims.filter((c) => c.sourceAuthority != null);
+      // 只要至少有一方有权威度分数就尝试，单方有权威时自动胜出
+      if (withAuth.length >= 1) {
+        const sorted = [...conflict.claims].sort(
+          (a, b) => (b.sourceAuthority ?? 0) - (a.sourceAuthority ?? 0),
+        );
+        const winner = sorted[0]!;
+        const losers = sorted.slice(1);
+        const winnerTime = safeParseTimestamp(winner.timestamp, 0);
+        const newerLosers = losers.filter(
+          (l) => safeParseTimestamp(l.timestamp, 0) > winnerTime,
+        );
+
+        if (newerLosers.length === 0 || winnerTime === 0) {
+          resolution = {
+            topic: conflict.topic,
+            conflictType: conflict.conflictType,
+            severity: conflict.severity,
+            resolution: "authority",
+            winningSource: winner.source,
+            losingSources: losers.map((l) => l.source),
+            reason: `以权威度更高的来源「${winner.source}」(权威度 ${(winner.sourceAuthority ?? 0).toFixed(1)}) 为准`,
+          };
+          for (const loser of losers) {
+            excludeSource(loser.source, conflict.topic);
+          }
         }
       }
     }
 
+    // ── 优先级 3：时间规则（仅 temporal 类型）──
     if (!resolution && conflict.conflictType === "temporal") {
       const withTs = conflict.claims.filter((c) => c.timestamp && !isNaN(Date.parse(c.timestamp)));
       if (withTs.length >= 2) {
@@ -577,8 +628,7 @@ export function autoResolveConflicts(
           reason: `以时间更新的来源「${winner.source}」(${winner.timestamp}) 为准`,
         };
         for (const loser of losers) {
-          const ids = lookupChunkIds(loser.source, conflict.topic);
-          for (const id of ids) { if (!excludedSet.has(id)) { excludedSet.add(id); excludedChunkIds.push(id); } }
+          excludeSource(loser.source, conflict.topic);
         }
       }
     }
@@ -586,7 +636,7 @@ export function autoResolveConflicts(
     if (resolution) {
       resolved.push(resolution);
     } else if (forceResolveAll) {
-      // 强制解决：无法判定胜负时，移除所有 sides 的 chunks，确保文档无矛盾
+      // 最后兜底：LLM 裁决和规则都无法解决 → 移除所有 sides
       const forced = excludeAllSides(conflict);
       resolved.push(forced);
       logger.warn(`[ConflictResolution] 强制解决冲突（移除所有 sides）: topic="${conflict.topic}", type=${conflict.conflictType}, sides=${conflict.claims.map(c => c.source).join(", ")}`);

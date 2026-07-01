@@ -479,7 +479,23 @@ export async function hybridSearchWithRemote(
     };
   }).sort((a, b) => b.score - a.score);
 
-  logger.info(`[HybridSearch] 跨源融合: local=${localMapped.length}, remote=${allRemote.length}, fused=${fused.length}`);
+  // 归一化 RRF 分数到 0-1 范围（与纯本地路径保持一致）
+  if (fused.length > 0) {
+    const maxRRF = fused[0].score;
+    const minRRF = fused[fused.length - 1].score;
+    const range = maxRRF - minRRF;
+    if (range > 0) {
+      for (const item of fused) {
+        item.score = (item.score - minRRF) / range;
+      }
+    } else {
+      for (const item of fused) {
+        item.score = 1;
+      }
+    }
+  }
+
+  logger.info(`[HybridSearch] 跨源融合: local=${localMapped.length}, remote=${allRemote.length}, fused=${fused.length} (normalized)`);
 
   return fused.slice(0, limit);
 }

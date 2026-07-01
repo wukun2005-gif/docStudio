@@ -111,6 +111,8 @@ dataRouter.get("/:store", (req, res) => {
             }
           }
         }
+        // 兜底：run 被删了、状态异常等无法判断的情况，标记为 error 防止永久卡在"正在生成文档"
+        if (!newState) newState = "error";
         if (newState) {
           record.workflowState = newState;
           const fullData = { ...record };

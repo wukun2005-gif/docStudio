@@ -15,11 +15,13 @@
  */
 
 import { logger } from "./logger.js";
-import { registry } from "../providers/registry.js";
+import { registry, isModelQuotaExhausted, isModelTimeoutCooldown } from "../providers/registry.js";
 import { isReasoningModelStatic } from "../providers/openai.js";
 import { getApiKey } from "../security/keyStore.js";
+import { jsonrepair } from "jsonrepair";
 import { readSettingsFromDb } from "./settingsReader.js";
 import { resolveEvalMaxTokens, estimateTokens, getModelContextInfo, calculateAvailableInputTokens } from "./llmUtils.js";
+import { getModelCapabilities } from "../providers/model-capabilities-registry.js";
 
 // ── 任务感知的模型选择 ──────────────────────────────────
 //
@@ -38,6 +40,7 @@ function selectBestEvalModel(
   const fallbackEnabled = Object.values(fallbackMap).some(Boolean);
   if (!fallbackEnabled) return primaryModel;
 
+  // 只选【非推理 + 支持 structured output + 容量足够 + 不在冷却】的模型
   const fallbackLists = dbSettings.modelFallbacks ?? {};
   for (const pid of providerPreference) {
     if (!fallbackMap[pid]) continue;
@@ -45,7 +48,12 @@ function selectBestEvalModel(
     if (!list || list.length === 0) continue;
     for (const m of list) {
       if (!isReasoningModelStatic(m)) {
-        logger.info(`[RelevanceCheck] 任务感知选模型: ${primaryModel} → ${m} (非推理模型)`);
+        if (isModelQuotaExhausted(m)) continue;
+        if (isModelTimeoutCooldown(m)) continue;
+        const caps = getModelCapabilities(m);
+        if (caps.maxOutputTokens < 4096) continue;
+        if (!caps.supportsStructuredOutput) continue;
+        logger.info(`[RelevanceCheck] 任务感知选模型: ${primaryModel} → ${m} (非推理, 支持结构化输出)`);
         return m;
       }
     }
@@ -152,36 +160,54 @@ function splitIntoClaims(text: string): string[] {
 }
 
 /**
- * 解析 JSON 响应
+ * 解析 LLM JSON 响应（使用 jsonrepair 处理 LLM 输出不确定性）
+ * 照搬 groundednessCheck.ts 的同名函数
  */
 function parseJsonResponse<T>(content: string): T | null {
+  const rawLen = content.length;
   let cleaned = content.trim();
-  // 先剥离 markdown 代码块标记（支持嵌套 fence：```` 包含 ``` 的场景）
-  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenceMatch) {
-    cleaned = fenceMatch[1].trim();
+
+  // 步骤 1: 剥离 markdown 代码块标记
+  const fencePatterns = [
+    /```(?:json)?\s*\n?([\s\S]*?)\n?```/,
+    /```\w*\s*\n?([\s\S]*?)\n?```/,
+  ];
+  for (const pat of fencePatterns) {
+    const m = cleaned.match(pat);
+    if (m) {
+      cleaned = m[1]!.trim();
+      break;
+    }
   }
-  // 处理 LLM 在 JSON 前后附加解释文字的情况：提取首尾大括号之间的内容
+
+  // 步骤 2: 提取首尾大括号之间的内容
   const firstBrace = cleaned.indexOf("{");
   const lastBrace = cleaned.lastIndexOf("}");
   if (firstBrace !== -1 && lastBrace > firstBrace) {
     cleaned = cleaned.slice(firstBrace, lastBrace + 1);
   }
-  // 策略 1：标准 JSON.parse
+
+  // 步骤 2.5: 折叠连续逗号（LLM 偶发输出 ",,," 导致 jsonrepair 异常）
+  cleaned = cleaned.replace(/,(\s*,)+/g, ",");
+
+  // 步骤 3: jsonrepair 修复 + JSON.parse
+  let repaired: string;
   try {
-    const parsed = JSON.parse(cleaned);
-    return parsed as T;
+    repaired = jsonrepair(cleaned);
   } catch {
-    // 策略 2：修复常见 JSON 格式错误后重试（trailing commas、unquoted keys）
-    try {
-      let repaired = cleaned
-        .replace(/,(\s*[}\]])/g, "$1")
-        .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3');
-      const parsed = JSON.parse(repaired);
-      return parsed as T;
-    } catch {
-      return null;
-    }
+    logger.warn(`[RelevanceCheck] jsonrepair 异常, textLen=${rawLen}`);
+    return null;
+  }
+
+  try {
+    return JSON.parse(repaired) as T;
+  } catch (parseErr) {
+    logger.warn(
+      `[RelevanceCheck] jsonrepair 后 JSON.parse 仍失败, ` +
+      `parseError=${parseErr instanceof Error ? parseErr.message : String(parseErr)}, ` +
+      `textLen=${rawLen}`,
+    );
+    return null;
   }
 }
 

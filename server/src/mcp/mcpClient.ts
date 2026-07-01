@@ -89,8 +89,24 @@ class McpClientManager {
     });
 
     this.client = new Client({ name: "i-write", version: "1.0.0" }, { capabilities: {} });
-    await this.client.connect(this.transport);
-    logger.info("[MCP Client] Connected to MCP server");
+
+    // 连接超时保护：MCP 子进程初始化应在 15s 内完成
+    const CONNECT_TIMEOUT_MS = 15_000;
+    try {
+      await Promise.race([
+        this.client.connect(this.transport),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`MCP 连接超时 (${CONNECT_TIMEOUT_MS / 1000}s)`)), CONNECT_TIMEOUT_MS)
+        ),
+      ]);
+      logger.info("[MCP Client] Connected to MCP server");
+    } catch (err) {
+      // 连接失败时清理资源
+      this.client = null;
+      try { await this.transport.close(); } catch { /* */ }
+      this.transport = null;
+      throw err;
+    }
   }
 }
 

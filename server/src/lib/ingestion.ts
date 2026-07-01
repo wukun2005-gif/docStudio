@@ -18,6 +18,9 @@ import {
   updateSourceStatus,
   markChunksEmbedded,
   findEmbeddedHashes,
+  getSourceById,
+  deleteSource,
+  findSourcesByFilePath,
 } from "./knowledgeDb.js";
 import { preprocessText } from "./textPreprocess.js";
 import { chunkText as smartChunk, isNoise, isGarbled } from "./textChunker.js";
@@ -373,11 +376,35 @@ export async function ingestFile(options: IngestOptions): Promise<IngestResult> 
   const buffer = typeof content === "string" ? Buffer.from(content, "utf-8") : content;
   const rawHash = customHash ?? computeTextHash(buffer.toString("utf-8"));
 
-  // 重复检查
-  if (!skipDuplicateCheck) {
+  // 重复检查（非稳定 sourceId 时用 content hash 去重）
+  if (!skipDuplicateCheck && !customSourceId) {
     const existingId = findDuplicateByHash(rawHash);
     if (existingId) {
       return { sourceId: existingId, status: "duplicate", chunkCount: 0, embeddedCount: 0 };
+    }
+  }
+
+  // 稳定 sourceId：同一标识符的旧数据先清理（CASCADE 自动删 chunks + vectors）
+  if (customSourceId) {
+    const existing = getSourceById(customSourceId);
+    if (existing) {
+      if (existing.contentHash === rawHash) {
+        // 内容未变，无需重新入库
+        return { sourceId: customSourceId, status: "duplicate", chunkCount: 0, embeddedCount: 0 };
+      }
+      // 内容变化：删除旧记录（CASCADE DELETE 自动清理关联 chunks 和 vectors）
+      deleteSource(customSourceId);
+      logger.info(`[Ingest] 清理旧版本: ${existing.name} (${customSourceId.slice(0, 12)}...), 内容已变化`);
+    }
+    // 过渡期清理：删除同一 filePath 下的旧 UUID 格式重复源
+    if (filePath) {
+      const oldDupes = findSourcesByFilePath(filePath);
+      for (const dupe of oldDupes) {
+        if (dupe.id !== customSourceId) {
+          deleteSource(dupe.id);
+          logger.info(`[Ingest] 清理旧重复源: ${dupe.name} (${dupe.id.slice(0, 12)}...) → 统一为 ${customSourceId.slice(0, 12)}...`);
+        }
+      }
     }
   }
 

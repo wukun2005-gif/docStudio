@@ -179,6 +179,8 @@ generationRouter.post("/generate/stream", async (req, res) => {
 
     // 先推送 runId，让客户端知道请求已被接受
     writeSSE("start", { ok: true, runId });
+    // 通知客户端即将开始知识库检索和冲突检测
+    writeSSE("progress", { phase: "retrieving", message: "正在检索知识库并检测冲突..." });
     logger.info(`[Generation] 流式生成开始: ${title}, runId=${runId}, 章节数=${outline.length}`);
 
     const protocol = req.protocol || "http";

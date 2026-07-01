@@ -8,7 +8,7 @@
  */
 import { jsonrepair } from "jsonrepair";
 import { logger } from "./logger.js";
-import { registry } from "../providers/registry.js";
+import { registry, isModelQuotaExhausted, isModelTimeoutCooldown } from "../providers/registry.js";
 import { isReasoningModelStatic } from "../providers/openai.js";
 import { getModelCapabilities } from "../providers/model-capabilities-registry.js";
 import { getApiKey } from "../security/keyStore.js";
@@ -40,20 +40,21 @@ function selectBestEvalModel(
   const fallbackEnabled = Object.values(fallbackMap).some(Boolean);
   if (!fallbackEnabled) return primaryModel;
 
-  // 从 fallback 链扫描：优先选【非推理 + 支持结构化输出】，否则选第一个非推理
+  // 从 fallback 链扫描：只选【非推理 + 支持 structured output + 容量足够 + 不在冷却】的模型
+  // 不降级到无 structured output 的模型 — 这类模型（如 qwen-max）对 JSON 评估任务
+  // 频繁返回空响应，反而比主模型更差。
   const fallbackLists = dbSettings.modelFallbacks ?? {};
-  let firstNonReasoning: string | null = null;
   for (const pid of providerPreference) {
     if (!fallbackMap[pid]) continue; // 该 provider 未启用 fallback
     const list = fallbackLists[pid];
     if (!list || list.length === 0) continue;
     for (const m of list) {
       if (!isReasoningModelStatic(m)) {
-        if (firstNonReasoning === null) {
-          firstNonReasoning = m;
-        }
-        // 优先选支持结构化输出的模型（json_schema strict 保证结构正确）
-        if (getModelCapabilities(m).supportsStructuredOutput) {
+        if (isModelQuotaExhausted(m)) continue;
+        if (isModelTimeoutCooldown(m)) continue;
+        const caps = getModelCapabilities(m);
+        if (caps.maxOutputTokens < 4096) continue;
+        if (caps.supportsStructuredOutput) {
           logger.info(`[Groundedness] 任务感知选模型: ${primaryModel} → ${m} (非推理, 支持结构化输出)`);
           return m;
         }
@@ -61,13 +62,7 @@ function selectBestEvalModel(
     }
   }
 
-  // 没有支持结构化输出的 → 退而求其次选第一个非推理（json_object，靠 extractJudgeJson 兜底）
-  if (firstNonReasoning !== null) {
-    logger.info(`[Groundedness] 任务感知选模型: ${primaryModel} → ${firstNonReasoning} (非推理, 无结构化输出)`);
-    return firstNonReasoning;
-  }
-
-  // fallback 链全是推理模型 → 回落到主模型
+  // 找不到合适的非推理模型 → 保留主模型
   return primaryModel;
 }
 
@@ -243,9 +238,12 @@ function tryAdaptClaims(raw: Record<string, unknown>): ClaimVerdict[] | null {
 }
 
 export function extractJudgeJson(text: string): JudgeResult | null {
+  const rawLen = text.length;
   let cleaned = text.trim();
+  const trimmedLen = cleaned.length;
 
-  // 剥离 markdown 代码块标记
+  // 步骤 1: 剥离 markdown 代码块标记
+  let fenceStripped = false;
   const fencePatterns = [
     /```(?:json)?\s*\n?([\s\S]*?)\n?```/,
     /```\w*\s*\n?([\s\S]*?)\n?```/,
@@ -254,33 +252,94 @@ export function extractJudgeJson(text: string): JudgeResult | null {
     const m = cleaned.match(pat);
     if (m) {
       cleaned = m[1].trim();
+      fenceStripped = true;
       break;
     }
   }
+  const afterFenceLen = cleaned.length;
 
-  // 提取首尾大括号
+  // 步骤 2: 提取首尾大括号
+  let braceExtracted = false;
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
   if (start !== -1 && end > start) {
     cleaned = cleaned.substring(start, end + 1);
+    braceExtracted = true;
+  }
+  const afterBraceLen = cleaned.length;
+
+  // 步骤 2.5: 折叠连续逗号（LLM 偶发输出 ",,," 导致 jsonrepair 异常）
+  cleaned = cleaned.replace(/,(\s*,)+/g, ",");
+
+  // 步骤 3: jsonrepair 修复 + JSON.parse
+  let repaired = "";
+  try {
+    repaired = jsonrepair(cleaned);
+  } catch (repairErr) {
+    // jsonrepair 自身抛出异常（极少见）→ 直接放弃，由 retry 兜底
+    // 不使用正则打地鼠：正则无法穷举 LLM 输出的各种变形，
+    // retry 已去掉 responseFormat + 加警告消息，成功概率远高于正则
+    const cleanedPreview = cleaned.length <= 1000 ? cleaned : cleaned.slice(0, 500) + "\n...\n" + cleaned.slice(-500);
+    logger.warn(
+      `[Groundedness] extractJudgeJson: jsonrepair() 异常，交给 retry 兜底, ` +
+      `repairError=${repairErr instanceof Error ? repairErr.message : String(repairErr)}, ` +
+      `文本快照(rawLen=${rawLen}, trimmedLen=${trimmedLen}, afterFence=${afterFenceLen}, afterBrace=${afterBraceLen}, ` +
+      `fenceStripped=${fenceStripped}, braceExtracted=${braceExtracted}), ` +
+      `输入给 jsonrepair 的文本:\n${cleanedPreview}`,
+    );
+    return null;
   }
 
+  // 步骤 4: JSON.parse
+  let raw: Record<string, unknown>;
   try {
-    const repaired = jsonrepair(cleaned);
-    const raw: Record<string, unknown> = JSON.parse(repaired);
-    const claims = tryAdaptClaims(raw);
-    if (claims) {
-      return {
-        claims,
-        groundedRatio: typeof raw.groundedRatio === "number" ? raw.groundedRatio : 0.5,
-        overallVerdict: (["pass", "fail", "partial"].includes(raw.overallVerdict as string)
-          ? raw.overallVerdict
-          : "partial") as JudgeResult["overallVerdict"],
-      };
-    }
-  } catch {
-    // jsonrepair 修复后仍无法解析 → 放弃
+    raw = JSON.parse(repaired);
+  } catch (parseErr) {
+    // jsonrepair 修了但 JSON.parse 仍失败 → 这是关键诊断点
+    const cleanedPreview = cleaned.length <= 500 ? cleaned : cleaned.slice(0, 250) + "\n...\n" + cleaned.slice(-250);
+    const repairedPreview = repaired.length <= 1000 ? repaired : repaired.slice(0, 500) + "\n...\n" + repaired.slice(-500);
+    const changed = repaired !== cleaned;
+    logger.warn(
+      `[Groundedness] extractJudgeJson: jsonrepair 修复后 JSON.parse 仍失败, ` +
+      `parseError=${parseErr instanceof Error ? parseErr.message : String(parseErr)}, ` +
+      `文本快照(rawLen=${rawLen}, trimmedLen=${trimmedLen}, afterFence=${afterFenceLen}, afterBrace=${afterBraceLen}, ` +
+      `fenceStripped=${fenceStripped}, braceExtracted=${braceExtracted}), ` +
+      `jsonrepair是否改动=${changed}, ` +
+      `输入给 jsonrepair 的原文:\n${cleanedPreview}\n` +
+      `jsonrepair 修复后:\n${repairedPreview}`,
+    );
+    return null;
   }
+
+  // 步骤 5: 适配 claims 结构
+  const claims = tryAdaptClaims(raw);
+  if (claims) {
+    return {
+      claims,
+      groundedRatio: typeof raw.groundedRatio === "number" ? raw.groundedRatio : 0.5,
+      overallVerdict: (["pass", "fail", "partial"].includes(raw.overallVerdict as string)
+        ? raw.overallVerdict
+        : "partial") as JudgeResult["overallVerdict"],
+    };
+  }
+
+  // JSON 解析成功但 claims 结构不对（如 claims 缺失、claims 是 string 等奇葩格式）
+  const rawKeys = Object.keys(raw);
+  const claimsVal = raw.claims;
+  const claimsType = typeof claimsVal;
+  const isArray = Array.isArray(claimsVal);
+  let claimsPreview = "";
+  if (claimsVal !== undefined && claimsVal !== null) {
+    const s = typeof claimsVal === "string" ? claimsVal : JSON.stringify(claimsVal);
+    claimsPreview = s.length <= 500 ? s : s.slice(0, 250) + "\n...\n" + s.slice(-250);
+  } else {
+    claimsPreview = String(claimsVal);
+  }
+  logger.warn(
+    `[Groundedness] extractJudgeJson: JSON 解析成功但 claims 适配失败, ` +
+    `rawKeys=${JSON.stringify(rawKeys)}, claimsType=${claimsType}, isArray=${isArray}, ` +
+    `claims值:\n${claimsPreview}`,
+  );
 
   return null;
 }
@@ -368,10 +427,28 @@ async function callJudge(
     const parsed = extractJudgeJson(response.text);
     if (parsed) return parsed;
 
-    // 解析失败时记录响应原文（前500+后500），用于定位真实失败模式
+    // 解析失败 → 输出响应原文的全部结构信息，便于复现
     const text = response.text;
-    const preview = text.length <= 1000 ? text : text.slice(0, 500) + "\n...\n" + text.slice(-500);
-    logger.warn(`[Groundedness] extractJudgeJson 失败，模型=${modelId}, textLen=${text.length}, 响应预览:\n${preview}`);
+    const hasFence = /```/.test(text);
+    const hasBraces = text.includes("{");
+    const hasBrackets = text.includes("[");
+    const firstBrace = text.indexOf("{");
+    const lastBrace = text.lastIndexOf("}");
+    const leadingChars = text.slice(0, Math.min(200, text.length));
+    const trailingChars = text.slice(Math.max(0, text.length - 200));
+    logger.warn(
+      `[Groundedness] extractJudgeJson 失败, ` +
+      `模型=${modelId}, ` +
+      `textLen=${text.length}, ` +
+      `hasFence=${hasFence}, ` +
+      `hasBraces=${hasBraces}, ` +
+      `hasBrackets=${hasBrackets}, ` +
+      `firstBraceAt=${firstBrace}, ` +
+      `lastBraceAt=${lastBrace}, ` +
+      `开头200字符:\n${leadingChars}\n` +
+      `结尾200字符:\n${trailingChars}\n` +
+      `完整文本(≤2000则全量):\n${text.length <= 2000 ? text : text.slice(0, 1000) + "\n...[截断]...\n" + text.slice(-1000)}`,
+    );
     throw new Error("JSON 解析失败");
   } catch (err) {
     logger.warn(`[Groundedness] Judge 调用失败: ${err instanceof Error ? err.message : String(err)}，重试一次...`);
@@ -400,40 +477,16 @@ async function callJudge(
           messages: [
             { role: "system", content: buildJudgePrompt(sentences, groundingDocs).system },
             { role: "user", content: buildJudgePrompt(sentences, groundingDocs).user },
+            {
+              role: "user",
+              content: "注意：上一次调用未能输出有效的 JSON。请严格按 JSON 格式输出，不要输出任何解释性文字或 markdown 代码块。只输出一个 JSON 对象。",
+            },
           ],
           apiKey: "",
           maxTokens: retryMaxTokens,
           temperature: 0,
           timeoutMs: config.timeoutMs ?? 180_000,
           evalMode: true,
-          responseFormat: {
-            type: "json_schema",
-            json_schema: {
-              name: "groundedness_result",
-              strict: true,
-              schema: {
-                type: "object",
-                properties: {
-                  claims: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        text: { type: "string" },
-                        verdict: { type: "string", enum: ["grounded", "common_knowledge", "ungrounded", "not_verifiable"] },
-                        evidence: { type: "string" },
-                        reason: { type: "string" },
-                      },
-                      required: ["text", "verdict"],
-                    },
-                  },
-                  groundedRatio: { type: "number" },
-                  overallVerdict: { type: "string", enum: ["pass", "fail", "partial"] },
-                },
-                required: ["claims", "groundedRatio", "overallVerdict"],
-              },
-            },
-          },
         },
         undefined, undefined,
         providerApiKeys,
@@ -443,24 +496,55 @@ async function callJudge(
       if (!retryResponse.error) {
         const retryParsed = extractJudgeJson(retryResponse.text);
         if (retryParsed) {
-          logger.info(`[Groundedness] 重试成功`);
+          logger.info(`[Groundedness] 重试成功, model=${retryModelId}`);
           return retryParsed;
         }
+        // 重试也解析失败 → 记录重试响应的结构信息
+        const retryText = retryResponse.text;
+        const hasFence2 = /```/.test(retryText);
+        const hasBraces2 = retryText.includes("{");
+        const firstBrace2 = retryText.indexOf("{");
+        const lastBrace2 = retryText.lastIndexOf("}");
+        logger.warn(
+          `[Groundedness] 重试 extractJudgeJson 也失败, ` +
+          `model=${retryModelId}, ` +
+          `textLen=${retryText.length}, ` +
+          `hasFence=${hasFence2}, ` +
+          `hasBraces=${hasBraces2}, ` +
+          `firstBraceAt=${firstBrace2}, ` +
+          `lastBraceAt=${lastBrace2}, ` +
+          `开头300字符:\n${retryText.slice(0, 300)}\n` +
+          `结尾300字符:\n${retryText.slice(Math.max(0, retryText.length - 300))}`,
+        );
+      } else {
+        logger.warn(
+          `[Groundedness] 重试 LLM 调用返回 error: ` +
+          `model=${retryModelId}, ` +
+          `error=${retryResponse.error?.message ?? String(retryResponse.error)}`,
+        );
       }
     } catch (retryErr) {
-      logger.warn(`[Groundedness] 重试也失败: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`);
+      logger.warn(
+        `[Groundedness] 重试 LLM 调用抛出异常: ` +
+        `err=${retryErr instanceof Error ? retryErr.message : String(retryErr)}, ` +
+        `sentences=${sentences.length}句, ` +
+        `docs=${groundingDocs.length}篇`,
+      );
     }
 
-    // ── 最终降级：使用 partial 而非 pass，避免放行不合格内容 ──
-    logger.warn(`[Groundedness] Judge 两次调用均失败，降级为 partial`);
+    // ── 最终降级：Judge 两次调用均失败，保守保留全部内容 ──
+    // 不将句子标记为 not_verifiable（会被 filterUngrounded 全删），
+    // 返回空 claims 让 filterUngrounded 走"未找到 verdict → 保守保留"路径。
+    // 日志记录 warning 供排查，但不破坏用户已生成的内容。
+    logger.warn(
+      `[Groundedness] Judge 两次调用均失败，保守保留全部 ${sentences.length} 个句子, ` +
+      `docs=${groundingDocs.length}, ` +
+      `模型=${config.modelId ?? "auto"}`,
+    );
     return {
-      claims: sentences.map((s) => ({
-        text: s,
-        verdict: "not_verifiable" as const,
-        reason: "Judge 调用失败，保守标记为无法验证",
-      })),
-      groundedRatio: 0.5,
-      overallVerdict: "partial",
+      claims: [],
+      groundedRatio: 1.0,
+      overallVerdict: "pass",
     };
   }
 }

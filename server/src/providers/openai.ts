@@ -121,6 +121,8 @@ export interface ChatResponse {
   error?: { code: string; message: string; retryable: boolean };
   /** Tool calls returned by the model */
   toolCalls?: ToolCall[];
+  /** finish_reason from API: "stop" | "length" | "tool_calls" | "content_filter" */
+  finishReason?: string;
 }
 
 export interface StreamChunk {
@@ -265,7 +267,7 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
       }
 
       const data = (await res.json()) as {
-        choices: Array<{ message: { content: string; tool_calls?: ToolCall[]; reasoning_content?: string; thinking?: string; reasoning?: string } }>;
+        choices: Array<{ message: { content: string; tool_calls?: ToolCall[]; reasoning_content?: string; thinking?: string; reasoning?: string }; finish_reason?: string }>;
         usage?: {
           prompt_tokens: number;
           completion_tokens: number;
@@ -293,7 +295,18 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
         learnThinkingCapability(req.modelId, thinkingTokens);
       }
 
-      console.log(`[OpenAI] LLM 响应成功: ${this.id}, text长度=${contentText.length}, thinkingTokens=${thinkingTokens}`);
+      // 空响应检测：content 为空、无 reasoning 回退、且无 tool_calls 时，
+      // 视为失败让 registry 继续 fallback，避免空文本被当作"成功"停止整个 fallback 链。
+      if (!contentText && (!msg?.tool_calls || msg.tool_calls.length === 0)) {
+        console.warn(`[OpenAI] ${this.id}/${req.modelId} 返回空文本（content 为空且无 reasoning/tool_calls），标记为失败以触发 fallback, usage=${JSON.stringify(data.usage)}`);
+        return {
+          text: "",
+          rawResponse: data,
+          error: { code: "empty-response", message: "模型返回空文本，可能被内容过滤或输出截断", retryable: false },
+        };
+      }
+
+      console.log(`[OpenAI] LLM 响应成功: ${this.id}, text长度=${contentText.length}, thinkingTokens=${thinkingTokens}, finishReason=${data.choices?.[0]?.finish_reason}`);
       return {
         text: contentText,
         tokenUsage: data.usage
@@ -302,6 +315,7 @@ export abstract class OpenAICompatibleAdapter implements ProviderAdapter {
         thinkingTokens: thinkingTokens > 0 ? thinkingTokens : undefined,
         rawResponse: data,
         toolCalls: msg?.tool_calls,
+        finishReason: data.choices?.[0]?.finish_reason,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

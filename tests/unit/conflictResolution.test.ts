@@ -102,7 +102,7 @@ describe("autoResolveConflicts", () => {
 
     const result = autoResolveConflicts([conflict], sourceToChunkIds);
 
-    // 高权威但旧 vs 低权威但新 → 不自动解决
+    // 高权威但旧 vs 低权威但新 → 不自动解决（冲突类型非 temporal，不走时间规则）
     expect(result.resolved).toHaveLength(0);
     expect(result.unresolved).toHaveLength(1);
   });
@@ -256,5 +256,53 @@ describe("autoResolveConflicts", () => {
     expect(result.excludedChunkIds).toContain("chunk-x");
     expect(result.excludedChunkIds).toContain("chunk-y");
     expect(result.excludedChunkIds).not.toContain("chunk-ceo");
+  });
+
+  it("winnerSource 存在时优先以 LLM 裁决为准", () => {
+    const conflict = makeConflict({
+      conflictType: "data",
+      winnerSource: "来源B",
+      winnerReason: "来源B 包含具体数据，更可信",
+      claims: [
+        { text: "模糊说法", source: "来源A", sourceAuthority: 0.9 },
+        { text: "具体数据", source: "来源B", sourceAuthority: 0.3 },
+      ],
+    });
+
+    const sourceToChunkIds = new Map<string, string[]>([
+      ["来源A", ["chunk-a"]],
+      ["来源B", ["chunk-b"]],
+    ]);
+
+    const result = autoResolveConflicts([conflict], sourceToChunkIds);
+
+    // winnerSource 优先 — 即使来源A权威更高，LLM 判定来源B更可信
+    expect(result.resolved).toHaveLength(1);
+    expect(result.resolved[0]!.resolution).toBe("llm_verdict");
+    expect(result.resolved[0]!.winningSource).toBe("来源B");
+    expect(result.excludedChunkIds).toContain("chunk-a");
+    expect(result.excludedChunkIds).not.toContain("chunk-b");
+  });
+
+  it("winnerSource 不存在时降级到规则（权威/时间）", () => {
+    const conflict = makeConflict({
+      conflictType: "temporal",
+      // winnerSource 未设置 — LLM 没给裁决，走规则
+      claims: [
+        { text: "旧", source: "旧来源", timestamp: "2024-01-01" },
+        { text: "新", source: "新来源", timestamp: "2024-06-15" },
+      ],
+    });
+
+    const sourceToChunkIds = new Map<string, string[]>([
+      ["旧来源", ["chunk-old"]],
+      ["新来源", ["chunk-new"]],
+    ]);
+
+    const result = autoResolveConflicts([conflict], sourceToChunkIds);
+
+    expect(result.resolved).toHaveLength(1);
+    expect(result.resolved[0]!.resolution).toBe("temporal");
+    expect(result.resolved[0]!.winningSource).toBe("新来源");
   });
 });

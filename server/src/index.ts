@@ -3,7 +3,9 @@
  */
 import dotenv from "dotenv";
 import express from "express";
+import fs from "node:fs";
 import path from "path";
+import crypto from "node:crypto";
 import { fileURLToPath } from "url";
 import { healthRouter } from "./routes/health.js";
 import { settingsRouter } from "./routes/settings.js";
@@ -18,7 +20,8 @@ import { workflowsRouter } from "./routes/workflows.js";
 import { dataRouter } from "./routes/data.js";
 import { promptTemplatesRouter } from "./routes/promptTemplates.js";
 import { getDb, closeDb } from "./lib/db.js";
-import { logger } from "./lib/logger.js";
+import { logger, initFileLogging } from "./lib/logger.js";
+import { localShort } from "../../shared/src/datetime.js";
 
 // 加载 .env
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -129,6 +132,64 @@ app.get("*", (req, res, next) => {
   });
 });
 
+// ---- 日志文件（同一 dev session 内复用） ----
+const LOG_DIR = "/Users/wukun/Downloads";
+const SESSION_MARKER = "/tmp/iwrite-server-session.json";
+
+interface SessionMarker {
+  logFile: string;
+  startedAt: string;
+}
+
+function resolveLogFile(): string {
+  // 检查是否有存活的 session marker（最近 30 秒内）
+  try {
+    const raw = fs.readFileSync(SESSION_MARKER, "utf-8");
+    const prev: SessionMarker = JSON.parse(raw);
+    const prevTime = new Date(prev.startedAt).getTime();
+    if (Date.now() - prevTime < 30_000) {
+      // tsx watch 重启，复用上一个文件
+      return prev.logFile;
+    }
+  } catch {
+    // marker 不存在或损坏，新建
+  }
+
+  // 新 session，生成带 datetime 的文件名
+  const ts = localShort().replace(/[-: ]/g, "").slice(0, 14);
+  const logFile = path.join(LOG_DIR, `iwrite-server-${ts}.log`);
+
+  // 写入 marker
+  const marker: SessionMarker = { logFile, startedAt: localShort() };
+  fs.writeFileSync(SESSION_MARKER, JSON.stringify(marker), "utf-8");
+
+  return logFile;
+}
+
+function clearSessionMarker(): void {
+  try { fs.unlinkSync(SESSION_MARKER); } catch { /* ignore */ }
+}
+
+const logFile = resolveLogFile();
+
+// ---- 生成 Server Run ID ----
+const runId = (() => {
+  const ts = localShort().replace(/[-: ]/g, "").slice(0, 14);
+  const rand = crypto.randomBytes(2).toString("hex");
+  return `${ts}-${rand}`;
+})();
+
+initFileLogging(runId, logFile);
+
+// 在终端显式打印日志文件名（crash 时用户也能找到）
+console.log("");
+console.log("╔══════════════════════════════════════════════════════════════╗");
+console.log("║  📋 i-Write Server Log                                      ║");
+console.log(`║  Server Run ID: ${runId}                              ║`);
+console.log(`║  Log File    : ${logFile} ║`);
+console.log("╚══════════════════════════════════════════════════════════════╝");
+console.log("");
+
 // 启动
 function start() {
   // 初始化 DB
@@ -158,6 +219,8 @@ function start() {
 start();
 
 // 优雅关闭
+// 注意：不在这里 clearSessionMarker()！因为 tsx watch 重启时也会发 SIGTERM，
+// 如果清理了 marker，新进程就会生成新文件。marker 靠 30 秒超时自动过期。
 process.on("SIGINT", () => {
   logger.info("[Server] Shutting down...");
   closeDb();
