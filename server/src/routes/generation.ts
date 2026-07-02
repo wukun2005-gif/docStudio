@@ -6,7 +6,8 @@
 import { Router } from "express";
 import crypto from "crypto";
 import { generateDocument, toHtml, sanitizeCitationHtml, type GenerateDocResult } from "../lib/docGenerator.js";
-import { exportDocument, type ExportFormat, type ExportSection } from "../lib/docExporter.js";
+import { exportDocument, type ExportFormat, type ExportSection, type ChartSpec } from "../lib/docExporter.js";
+import { extractChartSpecs } from "../lib/chartSpecParser.js";
 import { buildProvenanceTree, getProvenanceByRunId } from "../lib/provenanceTree.js";
 import { dbRun, dbGet, dbAll, dbTransaction } from "../lib/dbQuery.js";
 import { logger } from "../lib/logger.js";
@@ -215,6 +216,8 @@ generationRouter.post("/generate/stream", async (req, res) => {
             groundingScore: doneSection.groundingScore,
             sources: doneSection.sources.map((s) => ({ chunkId: s.chunkId, score: s.score, sourceName: s.sourceName, sourceUrl: s.sourceUrl })),
             webCitations: doneSection.webCitations,
+            pythonScript: (doneSection as any).pythonScript,
+            chartSpecsRaw: (doneSection as any).chartSpecsRaw,
           },
         });
         logger.info(`[Generation] SSE 推送: section [${sectionIndex + 1}/${totalSections}] ${doneSection.title} (content=${doneSection.content?.length || 0} chars)`);
@@ -536,9 +539,12 @@ function inferDocumentStyle(outline: string | null): string | undefined {
   try {
     const sections = JSON.parse(outline);
     const text = sections.map((s: any) => `${s.title ?? ""} ${s.description ?? ""}`).join(" ").toLowerCase();
+    // ── 优先级修复：强格式信号优先（与 detectStyle 保持一致）──
+    if (/xlsx|\.xlsx|excel/i.test(text)) return "table";
+    if (/pptx|\.pptx?|演示|slides|幻灯片/i.test(text)) return "ppt";
+    if (/markdown|\.md/i.test(text)) return "code";
     if (/邮件|email|mail|写信|致函/.test(text)) return "email";
-    if (/ppt|演示|slides|幻灯片/.test(text)) return "ppt";
-    if (/表格|table|excel/.test(text)) return "table";
+    if (/表格|table|数据表/i.test(text)) return "table";
     if (/报告|report/.test(text)) return "report";
     if (/代码|code|api|技术文档/.test(text)) return "code";
   } catch {}
@@ -604,12 +610,70 @@ function parseHtmlSections(html: string, title: string): ExportSection[] {
     // 残留裸 span：[N] → [N]
     .replace(/<span[^>]*?>\s*\[(\d+)\]\s*<\/span>/gi, '[$1]');
 
+  // ── 辅助：从 rawContent 中提取 <script> 标签（pythonScript & chartSpec） ──
+  function extractScriptTags(rawContent: string): {
+    cleanedContent: string;
+    pythonScript?: string;
+    chartSpecs?: ChartSpec[];
+  } {
+    let cleaned = rawContent;
+    let pythonScript: string | undefined;
+    let chartSpecs: ChartSpec[] | undefined;
+
+    // 提取 xlsx-script
+    const pyRegex = /<script\s+type="application\/x-python"\s+class="xlsx-script">([\s\S]*?)<\/script>/gi;
+    const pyMatch = pyRegex.exec(cleaned);
+    if (pyMatch?.[1]) {
+      pythonScript = pyMatch[1].trim();
+      cleaned = cleaned.replace(pyRegex, "");
+    }
+
+    // 提取 chart-spec（存储格式：JSON.stringify(chartSpecsRaw) → JSON 字符串数组）
+    const chartRegex = /<script\s+type="application\/json"\s+class="chart-spec">([\s\S]*?)<\/script>/gi;
+    const chartMatch = chartRegex.exec(cleaned);
+    if (chartMatch?.[1]) {
+      const raw = chartMatch[1].trim();
+      if (raw) {
+        try {
+          // chartSpecsRaw 是 string[]（每个元素是一个 chart spec 的 JSON 字符串 或 JSON 数组字符串）
+          const rawSpecs: string[] = JSON.parse(raw);
+          if (Array.isArray(rawSpecs)) {
+            const parsed: ChartSpec[] = [];
+            for (const s of rawSpecs) {
+              try {
+                const obj = JSON.parse(s);
+                // LLM 可能输出单个对象或对象数组（如 [{"type":"column",...}, {"type":"pie",...}]）
+                const items = Array.isArray(obj) ? obj : [obj];
+                for (const item of items) {
+                  if (item && typeof item === "object" && item.type && item.categories && item.series) {
+                    parsed.push(item as ChartSpec);
+                  }
+                }
+              } catch { /* skip malformed JSON */ }
+            }
+            if (parsed.length > 0) chartSpecs = parsed;
+          }
+        } catch {
+          // 如果解析失败，尝试用 extractChartSpecs 作为 fallback
+          chartSpecs = extractChartSpecs(cleaned);
+        }
+      }
+      cleaned = cleaned.replace(chartRegex, "");
+    }
+
+    return { cleanedContent: cleaned, pythonScript, chartSpecs };
+  }
+
   // 尝试从 <section><h2>...</h2>...</section> 结构提取
   const sectionRegex = /<section>\s*<h2>(.*?)<\/h2>([\s\S]*?)<\/section>/gi;
   let match;
   while ((match = sectionRegex.exec(processedHtml)) !== null) {
     const sectionTitle = match[1].replace(/<[^>]+>/g, "").trim();
-    const rawContent = match[2];
+    let rawContent = match[2];
+
+    // ── 提取 script 标签（pythonScript & chartSpec） ──
+    const { cleanedContent, pythonScript, chartSpecs } = extractScriptTags(rawContent);
+    rawContent = cleanedContent;
 
     // ── 子标题检测：在去 HTML 标签之前，按 <p> 边界分段 ──
     // 将 section 内容按 <p>...</p> 或 <p>...</p（broken closing）分段落
@@ -648,24 +712,39 @@ function parseHtmlSections(html: string, title: string): ExportSection[] {
     }
 
     if (processedLines.length > 0) {
-      sections.push({ title: sectionTitle, content: processedLines.join("\n"), level: 1 });
+      sections.push({
+        title: sectionTitle, content: processedLines.join("\n"), level: 1,
+        ...(pythonScript && { pythonScript }),
+        ...(chartSpecs && chartSpecs.length > 0 && { chartSpecs }),
+      });
     } else {
       // 回退：整体去 HTML 标签
       const text = rawContent.replace(/<[^>]+>/g, "").trim();
       if (text) {
-        sections.push({ title: sectionTitle, content: text, level: 1 });
+        sections.push({
+          title: sectionTitle, content: text, level: 1,
+          ...(pythonScript && { pythonScript }),
+          ...(chartSpecs && chartSpecs.length > 0 && { chartSpecs }),
+        });
       }
     }
   }
 
   // 如果没有 section 标签（如邮件格式），整体作为一个章节
   if (sections.length === 0) {
-    const text = processedHtml
+    // 先提取 script 标签
+    const { cleanedContent, pythonScript, chartSpecs } = extractScriptTags(processedHtml);
+
+    const text = cleanedContent
       .replace(/<footer[\s\S]*?<\/footer>/gi, "")  // 去 footer（参考来源列表单独处理）
       .replace(/<[^>]+>/g, "")  // 去 HTML 标签
       .trim();
     if (text) {
-      sections.push({ title, content: text, level: 1 });
+      sections.push({
+        title, content: text, level: 1,
+        ...(pythonScript && { pythonScript }),
+        ...(chartSpecs && chartSpecs.length > 0 && { chartSpecs }),
+      });
     }
   }
 

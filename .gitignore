@@ -17,5 +17,6 @@ docs/llm-parallel-optimization.md
 .marscode/
 .trae/
 .qoder/
+.codeartsdoer/
 samples_old/
 server/repos/

@@ -23,6 +23,8 @@ import * as cheerio from "cheerio";
 import type { OutlineSection } from "./narrativeEngine.js";
 import type { ChatRequest, ToolDefinition, ToolCall } from "../providers/openai.js";
 import type { DocumentMetadata, StyleTemplate, FormatTemplate, AudienceProfile } from "../../../shared/src/types/generation.js";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
 
 // ── 文档生成 ──────────────────────────────────────────
 
@@ -146,6 +148,10 @@ export interface GenerateDocResult {
     groundingScore: number;
     /** 照搬 patentExaminator：citation 编号→来源映射，确保正文 [N] 与参考来源列表一一对应 */
     citationLinks: CitationLink[];
+    /** LLM 生成的 xlsxwriter Python 脚本（Code Interpreter Pattern） */
+    pythonScript?: string;
+    /** 从 LLM 输出中提取的 chart spec JSON 字符串数组（未经解析，原样存储） */
+    chartSpecsRaw?: string[];
   }>;
   trustScore: number;
   /** 文档风格 ID（从 userRequest 动态识别或用户指定） */
@@ -432,6 +438,118 @@ async function preFilterConflictingSources(
   const resolution = autoResolveConflicts(detectionResult.conflicts, sourceToChunkIds, { forceResolveAll: true });
   logger.info(`[DocGenerator] 冲突前置过滤: 已解决 ${resolution.resolved.length} 个, 未解决 ${resolution.unresolved.length} 个, 排除 ${resolution.excludedChunkIds.length} 个 chunk`);
   return resolution;
+}
+
+// ── 辅助：提取 LLM 输出中的代码块 ────────────────────────
+
+/**
+ * 从原始 LLM 输出中提取 ```python 和 ```chart 代码块，
+ * 并从文本中移除这些代码块（避免渲染为正文）。
+ * chart JSON 在这里仅做原样存储，解析留给 chartSpecParser。
+ */
+/** 从 chart spec JSON 字符串数组生成兜底文本描述 */
+function chartSpecsToDescription(rawSpecs: string[], sectionTitle: string): string {
+  const lines: string[] = [];
+  for (const raw of rawSpecs) {
+    try {
+      const spec = JSON.parse(raw);
+      if (spec.categories && spec.series) {
+        lines.push(`**${spec.title || sectionTitle}**`);
+        for (const ser of spec.series) {
+          lines.push(`${ser.name}: ${spec.categories.map((c: string, i: number) => `${c} ${ser.values[i]}`).join(", ")}`);
+        }
+      }
+    } catch { /* skip malformed */ }
+  }
+  return lines.length > 0 ? lines.join("\n\n") : "";
+}
+
+function extractCodeBlocksFromText(rawText: string): {
+  cleanedText: string;
+  pythonScript?: string;
+  chartSpecsRaw?: string[];
+} {
+  if (!rawText) return { cleanedText: rawText };
+
+  const pythonScripts: string[] = [];
+  const chartSpecsRaw: string[] = [];
+  // 标记哪些 token index 需要从输出中移除
+  const removeTokenIndices = new Set<number>();
+
+  // ═══════════════════════════════════════════════════
+  // 使用 marked AST（lexer）解析，收敛所有 code fence 变体：
+  // ```python, ``` (裸), ~~~python, ~~~, 缩进, 等等
+  // ═══════════════════════════════════════════════════
+  try {
+    const { marked } = require("marked") as typeof import("marked");
+    const tokens = marked.lexer(rawText);
+
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i] as { type: string; lang?: string; text?: string; raw?: string; tokens?: any[] };
+
+      if (token.type === "code") {
+        const code = (token.text || "").trim();
+        if (!code) continue;
+
+        // 分类：xlsxwriter Python 脚本 vs chart JSON
+        if (/xlsxwriter/i.test(code)) {
+          pythonScripts.push(code);
+          removeTokenIndices.add(i);
+        } else if (/^\s*\[\s*\{\s*"type"\s*:/i.test(code)) {
+          // JSON 数组（chart spec），以 [{"type": 开头
+          chartSpecsRaw.push(code);
+          removeTokenIndices.add(i);
+        }
+      }
+
+      // 处理 /chart ... /chart 非标准标记（当前 prompt 模板中定义的格式）
+      // marked 将 /chart \n JSON \n /chart 合并为单个 paragraph token
+      if (token.type === "paragraph" && token.tokens && !removeTokenIndices.has(i)) {
+        const paraText = token.tokens.map((t: any) => t.text || "").join("");
+
+        // 匹配 /chart \n [...] \n /chart （同一 paragraph 内）
+        const chartBlockMatch = paraText.match(/^\/chart\s*\n([\s\S]*?)\n\/chart$/i);
+        if (chartBlockMatch) {
+          const json = chartBlockMatch[1]!.trim();
+          if (json.startsWith("[") && json.includes('"type"')) {
+            chartSpecsRaw.push(json);
+            removeTokenIndices.add(i);
+          }
+        } else if (/^\/chart$/i.test(paraText.trim())) {
+          // 孤立的 /chart 行（无 JSON）→ 仅移除标记
+          removeTokenIndices.add(i);
+        }
+      }
+    }
+
+    // ── 重建 cleanedText：移除 code blocks 和 chart markers ──
+    const keptTokens = tokens.filter((_t, idx) => !removeTokenIndices.has(idx));
+    // 每个 token 的 raw 包含原始 markdown 文本，拼接后得到去除代码块的干净文本
+    let cleanedText = keptTokens.map((t: any) => t.raw || "").join("");
+    // 清理多余空行
+    cleanedText = cleanedText.replace(/\n{3,}/g, "\n\n").trim();
+
+    const pythonScript = pythonScripts.length > 0
+      ? pythonScripts.join("\n\n# ═══ Next Section ═══\n\n")
+      : undefined;
+
+    if (pythonScript) {
+      logger.info(`[DocGenerator] AST 提取 Python 脚本: ${pythonScript.length} chars (${pythonScripts.length} 块)`);
+    }
+    if (chartSpecsRaw.length > 0) {
+      logger.info(`[DocGenerator] AST 提取 chart specs: ${chartSpecsRaw.length} 个`);
+    }
+
+    return {
+      cleanedText,
+      pythonScript,
+      chartSpecsRaw: chartSpecsRaw.length > 0 ? chartSpecsRaw : undefined,
+    };
+  } catch (err) {
+    // marked lexer 异常时记录并返回原始文本
+    logger.warn(`[DocGenerator] marked.lexer() 异常: ${err}，跳过代码块提取`);
+    return { cleanedText: rawText };
+  }
 }
 
 // ── 章节生成（带 tool calling + groundedness check） ────────
@@ -733,6 +851,32 @@ ${sourceText || "（无参考信息）"}
   ];
 
   let finalContent = result.answer || `[生成失败: ${section.title}]`;
+
+  // ── 提取 LLM 输出中的 Python 脚本和 chart spec ──
+  // 提取后必须用 cleanedText：Python 代码块不能显示给用户。
+  // 代码块保存在 section meta 中供导出（Excel Tier 1），不进入页面展示。
+  const codeBlocks = extractCodeBlocksFromText(finalContent);
+  if (codeBlocks.pythonScript || codeBlocks.chartSpecsRaw) {
+    const meaningfulChars = codeBlocks.cleanedText.replace(/<[^>]+>/g, "").replace(/\s/g, "").length;
+    if (meaningfulChars >= 30) {
+      finalContent = codeBlocks.cleanedText;
+    } else if (codeBlocks.cleanedText.trim().length > 0) {
+      finalContent = codeBlocks.cleanedText;
+      logger.warn(`[DocGenerator] 章节 "${section.title}" 代码块提取后内容稀少 (${meaningfulChars} 有效字符)，已移除代码块`);
+    } else {
+      // cleanedText 完全为空：LLM 将整个章节输出为代码（无叙事文本）
+      // 从 chartSpecsRaw 生成兜底文本描述，确保页面和 Excel 都有内容
+      finalContent = codeBlocks.cleanedText; // 空字符串，不显示代码块
+      if (codeBlocks.chartSpecsRaw && codeBlocks.chartSpecsRaw.length > 0) {
+        try {
+          const desc = chartSpecsToDescription(codeBlocks.chartSpecsRaw, section.title);
+          if (desc) finalContent = desc;
+        } catch { /* keep empty */ }
+      }
+      logger.warn(`[DocGenerator] 章节 "${section.title}" 全部为代码输出 (${finalContent.length} chars 兜底), pythonScript=${codeBlocks.pythonScript?.length || 0} chars`);
+    }
+  }
+
   let groundingScore = 0.5; // 默认值
 
   if (groundingDocs.length > 0 && finalContent.length > 50) {
@@ -783,6 +927,8 @@ ${sourceText || "（无参考信息）"}
     webCitations: result.webSearchCitations,
     groundingScore,
     citationLinks,
+    ...(codeBlocks.pythonScript && { pythonScript: codeBlocks.pythonScript }),
+    ...(codeBlocks.chartSpecsRaw && { chartSpecsRaw: codeBlocks.chartSpecsRaw }),
   };
 }
 
@@ -1055,7 +1201,32 @@ ${subSectionPrompt}
     ...result.webSearchCitations.map((c) => ({ source: `Web Search: ${c.title}`, excerpt: c.snippet })),
   ];
 
+  // ── 注意：generateMergedSection 中的 `let finalContent` 是第二次出现（第一次在 generateSection）──
   let finalContent = result.answer || `[生成失败: ${parentSection.title}]`;
+
+  // ── 提取 LLM 输出中的 Python 脚本和 chart spec ──
+  // 提取后必须用 cleanedText：Python 代码块不能显示给用户。
+  // 代码块保存在 section meta 中供导出（Excel Tier 1），不进入页面展示。
+  const codeBlocks = extractCodeBlocksFromText(finalContent);
+  if (codeBlocks.pythonScript || codeBlocks.chartSpecsRaw) {
+    const meaningfulChars = codeBlocks.cleanedText.replace(/<[^>]+>/g, "").replace(/\s/g, "").length;
+    if (meaningfulChars >= 30) {
+      finalContent = codeBlocks.cleanedText;
+    } else if (codeBlocks.cleanedText.trim().length > 0) {
+      finalContent = codeBlocks.cleanedText;
+      logger.warn(`[DocGenerator] 合并章节 "${parentSection.title}" 代码块提取后内容稀少 (${meaningfulChars} 有效字符)，已移除代码块`);
+    } else {
+      finalContent = codeBlocks.cleanedText;
+      if (codeBlocks.chartSpecsRaw && codeBlocks.chartSpecsRaw.length > 0) {
+        try {
+          const desc = chartSpecsToDescription(codeBlocks.chartSpecsRaw, parentSection.title);
+          if (desc) finalContent = desc;
+        } catch { /* keep empty */ }
+      }
+      logger.warn(`[DocGenerator] 合并章节 "${parentSection.title}" 全部为代码输出 (${finalContent.length} chars 兜底), pythonScript=${codeBlocks.pythonScript?.length || 0} chars`);
+    }
+  }
+
   let groundingScore = 0.5;
 
   if (groundingDocs.length > 0 && finalContent.length > 50) {
@@ -1164,7 +1335,7 @@ ${subSectionPrompt}
   const output: GenerateDocResult["sections"] = [];
 
   if (splitSections.length >= 1) {
-    // 第一段 → 父章节
+    // 第一段 → 父章节（附带 pythonScript 和 chartSpecsRaw）
     output.push({
       title: parentSection.title,
       content: splitSections[0].content,
@@ -1172,6 +1343,8 @@ ${subSectionPrompt}
       webCitations: result.webSearchCitations,
       groundingScore,
       citationLinks,
+      ...(codeBlocks.pythonScript && { pythonScript: codeBlocks.pythonScript }),
+      ...(codeBlocks.chartSpecsRaw && { chartSpecsRaw: codeBlocks.chartSpecsRaw }),
     });
 
     // 其余段 → 子章节
@@ -1183,6 +1356,8 @@ ${subSectionPrompt}
         webCitations: result.webSearchCitations,
         groundingScore,
         citationLinks,
+        ...(codeBlocks.pythonScript && i === 1 ? {} : {}), // 仅父章节带 pythonScript
+        ...(codeBlocks.chartSpecsRaw && i === 1 ? {} : {}), // 仅父章节带 chartSpecsRaw
       });
     }
 
@@ -1302,10 +1477,10 @@ async function generateSections(
       const isLastSection = isLastInCurrentLevel && lastSectionIsDocEnd;
       // 章节开始 — 推送进度事件
       if (onSection) onSection({ title: section.title }, "start");
-      const { content, sources, webCitations, groundingScore, citationLinks } = await generateSection(
+      const { content, sources, webCitations, groundingScore, citationLinks, pythonScript, chartSpecsRaw } = await generateSection(
         section, rollingSummary, config, userRequest, fullOutline, documentStyle, globalIndex, currentCitationOffset, isLastSection, excludeChunkIds
       );
-      const newSection = { title: section.title, content, sources, webCitations, groundingScore, citationLinks };
+      const newSection = { title: section.title, content, sources, webCitations, groundingScore, citationLinks, ...(pythonScript && { pythonScript }), ...(chartSpecsRaw && { chartSpecsRaw }) };
       sections.push(newSection);
       // 流式回调：章节生成后立即推送
       if (onSection) onSection(newSection, "done");
@@ -2036,16 +2211,161 @@ export function sanitizeCitationHtml(html: string): string {
   return html;
 }
 
+// ── Chart Spec → SVG 渲染（用于页面展示）────────────────────
+
+const CHART_COLORS = ["#2563EB","#F59E0B","#10B981","#EF4444","#8B5CF6","#EC4899","#06B6D4","#F97316","#6366F1","#14B8A6"];
+
+/** 将 ChartSpec 渲染为内联 SVG（不含外部依赖） */
+function renderChartSpecsToSvg(rawSpecs: string[] | undefined, _sectionTitle: string): string {
+  if (!rawSpecs || rawSpecs.length === 0) return "";
+  const parts: string[] = [];
+  for (const raw of rawSpecs) {
+    try {
+      const parsed = JSON.parse(raw);
+      // chartSpecsRaw 元素可能是单个对象或对象数组
+      const specs = Array.isArray(parsed) ? parsed : [parsed];
+      for (const item of specs) {
+        if (!item || typeof item !== "object") continue;
+        const spec = item as { type: string; title: string; categories: string[]; series: Array<{ name: string; values: number[] }> };
+        if (!spec.categories?.length || !spec.series?.length) continue;
+        const svg = renderSingleChart(spec);
+        if (svg) parts.push(svg);
+      }
+    } catch { /* skip */ }
+  }
+  return parts.length > 0 ? `<div class="charts">${parts.join("")}</div>` : "";
+}
+
+function renderSingleChart(spec: { type: string; title: string; categories: string[]; series: Array<{ name: string; values: number[] }> }): string {
+  switch (spec.type) {
+    case "pie":
+    case "doughnut":
+      return renderPieChart(spec);
+    case "bar":
+    case "column":
+    default:
+      return renderColumnChart(spec);
+  }
+}
+
+function renderColumnChart(spec: { title: string; categories: string[]; series: Array<{ name: string; values: number[] }> }): string {
+  const W = 600, H = 280, PAD = { top: 30, right: 20, bottom: 60, left: 50 };
+  const plotW = W - PAD.left - PAD.right, plotH = H - PAD.top - PAD.bottom;
+  // Merge all values across series to find max
+  const allVals = spec.series.flatMap((s) => s.values);
+  const maxVal = Math.max(...allVals, 1);
+  const catCount = spec.categories.length;
+  const serCount = spec.series.length;
+  const groupW = plotW / catCount;
+  const barW = Math.max(8, Math.min(30, (groupW * 0.7) / serCount));
+
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" style="max-width:100%;height:auto;font-family:-apple-system,BlinkMacSystemFont,sans-serif">`;
+  svg += `<text x="${W/2}" y="20" text-anchor="middle" font-size="13" font-weight="bold" fill="#1F2937">${escapeXml(spec.title)}</text>`;
+
+  // Y-axis grid lines
+  const gridLines = 5;
+  for (let i = 0; i <= gridLines; i++) {
+    const y = PAD.top + (plotH * i) / gridLines;
+    const val = maxVal - (maxVal * i) / gridLines;
+    svg += `<line x1="${PAD.left}" y1="${y}" x2="${W-PAD.right}" y2="${y}" stroke="#E5E7EB" stroke-width="1"/>`;
+    svg += `<text x="${PAD.left-6}" y="${y+4}" text-anchor="end" font-size="10" fill="#6B7280">${Math.round(val)}</text>`;
+  }
+
+  // Bars
+  for (let ci = 0; ci < catCount; ci++) {
+    const catX = PAD.left + ci * groupW + groupW / 2;
+    for (let si = 0; si < serCount; si++) {
+      const val = spec.series[si]!.values[ci] ?? 0;
+      const barH = (val / maxVal) * plotH;
+      const x = catX - (serCount * barW) / 2 + si * barW;
+      const y = PAD.top + plotH - barH;
+      const color = CHART_COLORS[si % CHART_COLORS.length]!;
+      svg += `<rect x="${x}" y="${y}" width="${barW-1}" height="${barH}" fill="${color}" rx="2"><title>${escapeXml(spec.series[si]!.name)}: ${val}</title></rect>`;
+    }
+    // X-axis label
+    const label = spec.categories[ci]!.length > 6 ? spec.categories[ci]!.slice(0,6)+"…" : spec.categories[ci]!;
+    svg += `<text x="${catX}" y="${H-PAD.bottom+16}" text-anchor="middle" font-size="10" fill="#374151">${escapeXml(label)}</text>`;
+  }
+
+  // Legend
+  if (serCount > 1) {
+    let legendX = W - PAD.right - 10;
+    for (let si = serCount - 1; si >= 0; si--) {
+      const name = spec.series[si]!.name.length > 12 ? spec.series[si]!.name.slice(0,12)+"…" : spec.series[si]!.name;
+      const textW = name.length * 8 + 20;
+      legendX -= textW;
+      svg += `<rect x="${legendX}" y="4" width="10" height="10" fill="${CHART_COLORS[si]}" rx="2"/>`;
+      svg += `<text x="${legendX+14}" y="13" font-size="10" fill="#6B7280">${escapeXml(name)}</text>`;
+    }
+  }
+
+  svg += `</svg>`;
+  return svg;
+}
+
+function renderPieChart(spec: { title: string; categories: string[]; series: Array<{ name: string; values: number[] }> }): string {
+  const vals = spec.series[0]?.values ?? [];
+  if (vals.length === 0) return "";
+  const total = vals.reduce((a, b) => a + b, 0);
+  if (total === 0) return "";
+  const W = 420, H = 300, cx = 160, cy = 150, r = 110;
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" style="max-width:100%;height:auto;font-family:-apple-system,BlinkMacSystemFont,sans-serif">`;
+  svg += `<text x="${W/2}" y="20" text-anchor="middle" font-size="13" font-weight="bold" fill="#1F2937">${escapeXml(spec.title)}</text>`;
+
+  let angle = -Math.PI / 2; // start from top
+  for (let i = 0; i < vals.length; i++) {
+    const sliceAngle = (vals[i]! / total) * 2 * Math.PI;
+    const x1 = cx + r * Math.cos(angle);
+    const y1 = cy + r * Math.sin(angle);
+    const x2 = cx + r * Math.cos(angle + sliceAngle);
+    const y2 = cy + r * Math.sin(angle + sliceAngle);
+    const large = sliceAngle > Math.PI ? 1 : 0;
+    const color = CHART_COLORS[i % CHART_COLORS.length]!;
+    svg += `<path d="M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${large},1 ${x2},${y2} Z" fill="${color}" stroke="#fff" stroke-width="1.5"><title>${escapeXml(spec.categories[i]!)}: ${vals[i]} (${Math.round(vals[i]!/total*100)}%)</title></path>`;
+    angle += sliceAngle;
+  }
+
+  // Legend
+  let ly = 40;
+  for (let i = 0; i < vals.length; i++) {
+    const name = spec.categories[i]!.length > 14 ? spec.categories[i]!.slice(0,14)+"…" : spec.categories[i]!;
+    const pct = Math.round(vals[i]! / total * 100);
+    svg += `<rect x="280" y="${ly}" width="10" height="10" fill="${CHART_COLORS[i]}" rx="2"/>`;
+    svg += `<text x="295" y="${ly+10}" font-size="10" fill="#374151">${escapeXml(name)} (${pct}%)</text>`;
+    ly += 18;
+  }
+
+  svg += `</svg>`;
+  return svg;
+}
+
+function escapeXml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// ═══════════════════════════════════════════════════════════
+
 export function toHtml(result: GenerateDocResult, baseUrl?: string): string {
   const isEmail = result.documentStyle === "email";
 
   // 照搬 patentExaminator：编号已经是全局的，不需要重编号
-  // 直接使用章节内容
+  // 直接使用章节内容。嵌入 pythonScript 和 chartSpecsRaw 为 <script> 标签
   const sections = result.sections.map((s, idx) => {
-    if (isEmail) {
-      return s.content;
+    const scriptTags: string[] = [];
+    if (s.pythonScript) {
+      scriptTags.push(`<script type="application/x-python" class="xlsx-script">\n${s.pythonScript}\n</script>`);
     }
-    return `<section>\n<h2>${escapeHtml(s.title)}</h2>\n${s.content}\n</section>`;
+    if (s.chartSpecsRaw && s.chartSpecsRaw.length > 0) {
+      scriptTags.push(`<script type="application/json" class="chart-spec">\n${JSON.stringify(s.chartSpecsRaw)}\n</script>`);
+    }
+
+    // 渲染 chart specs 为内联 SVG（页面展示用）
+    const chartHtml = renderChartSpecsToSvg(s.chartSpecsRaw, s.title);
+
+    if (isEmail) {
+      return scriptTags.length > 0 ? `${scriptTags.join("\n")}\n${s.content}${chartHtml}` : s.content + chartHtml;
+    }
+    return `<section>\n<h2>${escapeHtml(s.title)}</h2>\n${scriptTags.join("\n")}${s.content}\n${chartHtml}\n</section>`;
   });
 
   // 照搬 patentExaminator：从各章节的 citationLinks 构建全局 citation 映射
@@ -2200,6 +2520,10 @@ export function toHtml(result: GenerateDocResult, baseUrl?: string): string {
   // 注意：不要输出 <html>/<head>/<body>，因为内容通过 dangerouslySetInnerHTML 注入到 app 的 div 中
   // 如果输出 <body>，CSS 的 body { max-width } 会泄露到整个页面
   let html = `<div class="doc-content">
+<style>
+  .charts { display:flex; flex-wrap:wrap; gap:20px; margin:20px 0; justify-content:center; }
+  .charts svg { background:#FAFBFC; border:1px solid #E5E7EB; border-radius:8px; padding:12px; }
+</style>
 ${isEmail ? "" : `<h1>${escapeHtml(title)}</h1>`}
 ${sections.join(isEmail ? "\n\n" : "\n<hr>\n")}
 ${footnotes}

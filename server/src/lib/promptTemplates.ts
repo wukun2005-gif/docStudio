@@ -124,12 +124,16 @@ const BUILTIN_FORMATS: FormatTemplate[] = [
   {
     id: "excel",
     name: "Excel 表格",
-    constraints: `输出格式要求（Excel 表格）：
-- 数据必须用 markdown 表格格式
-- 表头清晰，列名简洁明确
-- 每列数据类型一致
-- 数值右对齐，文本左对齐
-- 必要时加汇总行`,
+    constraints: `输出格式要求（Excel 工作簿）：
+- 每个章节包含说明文字+具体数据
+- 表格用 markdown 格式（| 列1 | 列2 | ... |）
+- 数据要具体（数字、百分比、日期），基于知识库的真实信息
+- 图表需求先写文字描述，再在 \`\`\`chart 代码块中附 JSON 数据：
+\`\`\`chart
+[{"type": "column", "title": "图表标题", "categories": ["类别1", "类别2"], "series": [{"name": "系列名", "values": [10, 20]}]}]
+\`\`\`
+- chart type 支持: bar / column / pie / doughnut / line / scatter
+- 不要输出 Python 脚本——只需输出 JSON chart spec`,
   },
   {
     id: "markdown",
@@ -215,11 +219,26 @@ const BUILTIN_AUDIENCES: AudienceProfile[] = [
 export function detectStyle(userRequest: string): StyleTemplate {
   const req = userRequest.toLowerCase();
 
+  // ── 优先级修复：强格式信号优先 ──
+  // "邮件"/"email" 可能出现在用户描述的内容需求中（如"列出邮件主题"），
+  // 而不一定表示用户想要邮件格式。因此提升 xlsx/ppt/md 等强格式信号的优先级。
+
+  // 强格式信号：xlsx/excel/sheet → 用户明确要电子表格
+  if (/\bxlsx\b|\.xlsx|excel/.test(req)) return getStyle("table");
+  // 强格式信号：pptx/ppt → 用户明确要演示文稿
+  if (/\.pptx?\b|演示|slides|幻灯片|presentation/.test(req)) return getStyle("presentation");
+  // markdown → 用户明确要 markdown
+  if (/\bmarkdown\b|\.md\b/.test(req)) return getStyle("technical");
+
+  // 内容语义信号：邮件
   if (/邮件|email|mail|写信|致函/.test(req)) return getStyle("email");
-  if (/ppt|演示|slides|幻灯片|presentation/.test(req)) return getStyle("presentation");
-  if (/表格|excel|sheet|数据表|报表|清单/.test(req)) return getStyle("table");
+  // 内容语义信号：表格/报表
+  if (/表格|数据表|报表|清单|\bsheet\b/i.test(req)) return getStyle("table");
+  // 代码/技术文档
   if (/代码|code|api|sdk|技术文档|readme|接口/.test(req)) return getStyle("technical");
+  // 备忘录/会议记录
   if (/备忘录|memo|纪要|会议记录/.test(req)) return getStyle("memo");
+  // 报告/汇报
   if (/报告|汇报|report|总结|分析|评估/.test(req)) return getStyle("report");
 
   return getStyle("general");

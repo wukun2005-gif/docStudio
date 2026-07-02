@@ -177,12 +177,68 @@ function markdownToHtml(text: string): string {
   const htmlLines: string[] = [];
   let inCodeBlock = false;
   let inList = false;
+  let tableBuffer: string[] = [];
+
+  /** flush tableBuffer as HTML <table> */
+  const flushTable = () => {
+    if (tableBuffer.length < 2) {
+      // not a valid table — render as paragraphs
+      for (const row of tableBuffer) {
+        htmlLines.push(`<p>${inlineMarkdown(row)}</p>`);
+      }
+      tableBuffer = [];
+      return;
+    }
+    // Find separator row (e.g. |---|:---:|---|)
+    const sepIdx = tableBuffer.findIndex((r) => /^\|[\s\-:|]+\|$/.test(r.trim()));
+    if (sepIdx < 0) {
+      for (const row of tableBuffer) {
+        htmlLines.push(`<p>${inlineMarkdown(row)}</p>`);
+      }
+      tableBuffer = [];
+      return;
+    }
+    const headerRows = tableBuffer.slice(0, sepIdx);
+    const dataRows = tableBuffer.slice(sepIdx + 1);
+    const alignments: ("left" | "center" | "right" | "")[] = [];
+    const sepCells = tableBuffer[sepIdx].split("|").map((c) => c.trim()).filter(Boolean);
+    for (const cell of sepCells) {
+      if (cell.startsWith(":") && cell.endsWith(":")) alignments.push("center");
+      else if (cell.endsWith(":")) alignments.push("right");
+      else if (cell.startsWith(":")) alignments.push("left");
+      else alignments.push("");
+    }
+
+    const parseRow = (row: string) => row.split("|").map((c) => c.trim()).filter(Boolean);
+
+    let html = "<table>\n";
+    for (const hr of headerRows) {
+      const cells = parseRow(hr);
+      html += "<thead><tr>" + cells.map((c, ci) => {
+        const align = alignments[ci] ? ` style="text-align:${alignments[ci]}"` : "";
+        return `<th${align}>${inlineMarkdown(c)}</th>`;
+      }).join("") + "</tr></thead>\n";
+    }
+    html += "<tbody>\n";
+    for (const dr of dataRows) {
+      const cells = parseRow(dr);
+      html += "<tr>" + cells.map((c, ci) => {
+        const align = alignments[ci] ? ` style="text-align:${alignments[ci]}"` : "";
+        return `<td${align}>${inlineMarkdown(c)}</td>`;
+      }).join("") + "</tr>\n";
+    }
+    html += "</tbody></table>";
+    htmlLines.push(html);
+    tableBuffer = [];
+  };
 
   for (let i = 0; i < lines.length; i++) {
     let line = lines[i];
 
     // 代码块
     if (line.trim().startsWith("```")) {
+      flushTable();
+      if (inList) { htmlLines.push("</ul>"); inList = false; }
       if (inCodeBlock) {
         htmlLines.push("</code></pre>");
         inCodeBlock = false;
@@ -197,8 +253,9 @@ function markdownToHtml(text: string): string {
       continue;
     }
 
-    // 空行
+    // 空行 — flush table/lists
     if (line.trim() === "") {
+      flushTable();
       if (inList) {
         htmlLines.push("</ul>");
         inList = false;
@@ -210,13 +267,23 @@ function markdownToHtml(text: string): string {
     // 标题 (# ## ###)
     const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
     if (headingMatch) {
+      flushTable();
+      if (inList) { htmlLines.push("</ul>"); inList = false; }
       const level = headingMatch[1].length;
       htmlLines.push(`<h${level}>${inlineMarkdown(headingMatch[2])}</h${level}>`);
       continue;
     }
 
+    // Markdown table row (starts with | and contains at least one more |)
+    if (/^\|.+\|/.test(line.trim())) {
+      if (inList) { htmlLines.push("</ul>"); inList = false; }
+      tableBuffer.push(line);
+      continue;
+    }
+
     // 无序列表 (- 或 *)
     if (/^\s*[-*]\s+/.test(line)) {
+      flushTable();
       if (!inList) {
         htmlLines.push("<ul>");
         inList = true;
@@ -228,6 +295,7 @@ function markdownToHtml(text: string): string {
 
     // 有序列表
     if (/^\s*\d+[.)]\s+/.test(line)) {
+      flushTable();
       if (!inList) {
         htmlLines.push("<ul>");
         inList = true;
@@ -244,9 +312,11 @@ function markdownToHtml(text: string): string {
     }
 
     // 普通段落
+    flushTable();
     htmlLines.push(`<p>${inlineMarkdown(line)}</p>`);
   }
 
+  flushTable();
   if (inList) htmlLines.push("</ul>");
   if (inCodeBlock) htmlLines.push("</code></pre>");
 

@@ -25,10 +25,21 @@ const require = createRequire(import.meta.url);
 const PptxGenJS: new () => any = require("pptxgenjs");
 const XLSX: typeof import("xlsx") = require("xlsx");
 
+export interface ChartSpec {
+  type: "bar" | "pie" | "line" | "column" | "doughnut" | "scatter";
+  title: string;
+  categories: string[];
+  series: Array<{ name: string; values: number[] }>;
+}
+
 export interface ExportSection {
   title: string;
   content: string;
   level?: number;
+  /** LLM 生成的 xlsxwriter Python 脚本（Code Interpreter Pattern） */
+  pythonScript?: string;
+  /** 从 LLM 输出或规则引擎提取的图表规格 */
+  chartSpecs?: ChartSpec[];
 }
 
 // 子标题标记（由 parseHtmlSections 在导出路径中注入，与 generation.ts 保持同步）
@@ -483,38 +494,57 @@ export async function generatePowerPoint(title: string, sections: ExportSection[
 /**
  * 生成 XLSX 格式（使用 xlsx 库）
  */
+/**
+ * Tier 3 fallback: 多 Sheet 纯文本 Excel（SheetJS，不含图表但保留多 sheet+表格）
+ * 每个 section 一个 sheet，引用来源追加到最后一个 sheet。
+ */
 export async function generateExcel(title: string, sections: ExportSection[], citations?: CitationItem[]): Promise<Buffer> {
-  const aoa: (string | number)[][] = [
-    ["章节", "内容", "字数"],
-  ];
-
-  for (const s of sections) {
-    aoa.push([
-      s.title,
-      s.content.replace(/\n/g, " "),
-      s.content.length,
-    ]);
-  }
-
-  if (citations && citations.length > 0) {
-    aoa.push(["", "", ""]);
-    aoa.push(["参考来源", "", ""]);
-    for (const c of citations) {
-      const urlPart = c.url ? ` (${c.url})` : "";
-      aoa.push([`[${c.index}]`, `${c.title}${urlPart}`, ""]);
-    }
-  }
-
   const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
 
-  ws["!cols"] = [
-    { wch: 20 },
-    { wch: 80 },
-    { wch: 10 },
-  ];
+  // ── 每个 section → 独立 sheet ──
+  for (let i = 0; i < sections.length; i++) {
+    const s = sections[i]!;
+    // Sheet 名最多 31 字符（Excel 限制）
+    const sheetName = s.title.slice(0, 31) || `Sheet ${i + 1}`;
 
-  XLSX.utils.book_append_sheet(wb, ws, title.slice(0, 31));
+    // 将 content 转为纯文本（content 可能是 HTML，需要去标签）
+    let plainContent = s.content
+      .replace(/&quot;/g, '"')
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&")
+      .replace(/&#39;/g, "'")
+      .replace(/<[^>]+>/g, "")
+      .trim();
+
+    // 按段落拆分，每段一行
+    const paragraphs = plainContent.split("\n").filter((p) => p.trim());
+    const rows: string[][] = paragraphs.map((p) => [p]);
+
+    // 首行放标题
+    rows.unshift([s.title]);
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws["!cols"] = [{ wch: 120 }];
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  }
+
+  // ── 引用来源追加到最后一个 sheet ──
+  if (citations && citations.length > 0) {
+    const refSheetName = "参考来源";
+    const citeRows: string[][] = [["编号", "标题", "链接"]];
+    for (const c of citations) {
+      citeRows.push([`[${c.index}]`, c.title, c.url || ""]);
+    }
+    const citeWs = XLSX.utils.aoa_to_sheet(citeRows);
+    citeWs["!cols"] = [
+      { wch: 8 },
+      { wch: 60 },
+      { wch: 80 },
+    ];
+    XLSX.utils.book_append_sheet(wb, citeWs, refSheetName);
+  }
+
   const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
   return buffer;
 }
@@ -619,12 +649,20 @@ export async function exportDocument(
         contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         extension: ".pptx",
       };
-    case "xlsx":
+    case "xlsx": {
+      // ── 三层自适应分流 ──
+      // Tier 1: LLM Python 脚本 → python3 执行
+      // Tier 2: Chart spec → 模板化 Python 脚本 → python3 执行
+      // Tier 3: 纯文本多 Sheet（SheetJS fallback）
+      const { generateXlsxWithCharts } = await import("./xlsxWriterGenerator.js");
+      const result = await generateXlsxWithCharts(title, sections, citations);
+      logger.info(`[DocExporter] xlsx 生成完成: Tier ${result.tier}, ${(result.buffer.length / 1024).toFixed(1)} KB`);
       return {
-        buffer: await generateExcel(title, sections, citations),
+        buffer: result.buffer,
         contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         extension: ".xlsx",
       };
+    }
     case "eml":
       return {
         buffer: generateEml(title, sections, citations),
