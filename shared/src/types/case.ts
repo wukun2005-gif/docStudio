@@ -23,6 +23,7 @@ export interface DocumentCase {
   lastRunId?: string;                 // 最近一次生成的 runId（用于生成树查询）
   workflowState: CaseWorkflowState;
   errorMessage?: string;              // 错误信息
+  deletedAt?: string;                 // 软删除时间，非空表示在回收站中
   createdAt: string;
   updatedAt: string;
 }

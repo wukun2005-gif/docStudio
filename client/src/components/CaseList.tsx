@@ -1,5 +1,6 @@
 /**
  * Case 列表侧边栏 — 支持折叠（图标模式）和展开（完整模式）
+ * 支持回收站功能：删除 → 软删除，回收站中可恢复/永久删除
  */
 import { useEffect, useState } from "react";
 import { useCaseStore } from "../store/caseStore.js";
@@ -27,19 +28,37 @@ interface CaseListProps {
   onToggle: () => void;
 }
 
+type Tab = "cases" | "trash";
+
 export default function CaseList({ collapsed, onToggle }: CaseListProps) {
-  const { cases, currentCase, isLoading, loadCases, createCase, openCase, deleteCase } = useCaseStore();
+  const {
+    cases, trashedCases, currentCase, isLoading,
+    loadCases, loadTrashedCases,
+    createCase, openCase, deleteCase,
+    permanentDeleteCase, restoreCase,
+  } = useCaseStore();
   const [search, setSearch] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
+  const [tab, setTab] = useState<Tab>("cases");
 
   useEffect(() => {
     loadCases();
   }, []);
 
+  useEffect(() => {
+    if (tab === "trash") {
+      loadTrashedCases();
+    }
+  }, [tab]);
+
   const filtered = search
     ? cases.filter((c) => c.title.includes(search) || c.userRequest.includes(search))
     : cases;
+
+  const filteredTrash = search
+    ? trashedCases.filter((c) => c.title.includes(search) || c.userRequest.includes(search))
+    : trashedCases;
 
   function handleNew() {
     createCase("");
@@ -47,9 +66,21 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
 
   function handleDelete(e: React.MouseEvent, id: string) {
     e.stopPropagation();
-    if (confirm("确定删除此文档？")) {
+    if (confirm("确定将此文档移入回收站？")) {
       deleteCase(id);
     }
+  }
+
+  function handlePermanentDelete(e: React.MouseEvent, id: string) {
+    e.stopPropagation();
+    if (confirm("确定永久删除此文档？此操作不可恢复。")) {
+      permanentDeleteCase(id);
+    }
+  }
+
+  function handleRestore(e: React.MouseEvent, id: string) {
+    e.stopPropagation();
+    restoreCase(id);
   }
 
   function handleRenameStart(e: React.MouseEvent, c: { id: string; title: string }) {
@@ -63,6 +94,13 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
       useCaseStore.getState().updateTitle(editTitle.trim());
     }
     setEditingId(null);
+  }
+
+  function formatDate(iso: string | undefined): string {
+    if (!iso) return "";
+    return new Date(iso).toLocaleString("zh-CN", {
+      month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    });
   }
 
   // 折叠模式：图标栏
@@ -98,16 +136,47 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
   // 展开模式：完整列表
   return (
     <div className="w-60 shrink-0 flex flex-col bg-white border-r overflow-hidden">
+      {/* Tabs */}
+      <div className="flex border-b shrink-0">
+        <button
+          onClick={() => setTab("cases")}
+          className={`flex-1 py-2 text-xs font-medium text-center transition-colors ${
+            tab === "cases"
+              ? "text-blue-600 border-b-2 border-blue-600"
+              : "text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          文档
+        </button>
+        <button
+          onClick={() => setTab("trash")}
+          className={`flex-1 py-2 text-xs font-medium text-center transition-colors ${
+            tab === "trash"
+              ? "text-blue-600 border-b-2 border-blue-600"
+              : "text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          回收站
+          {trashedCases.length > 0 && (
+            <span className="ml-1 text-[10px] text-gray-400">({trashedCases.length})</span>
+          )}
+        </button>
+      </div>
+
       {/* Header */}
       <div className="p-3 border-b shrink-0">
         <div className="flex items-center justify-between mb-2">
-          <h2 className="text-sm font-semibold text-gray-700">文档列表</h2>
-          <button
-            onClick={handleNew}
-            className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-          >
-            + 新建
-          </button>
+          <h2 className="text-sm font-semibold text-gray-700">
+            {tab === "cases" ? "文档列表" : "回收站"}
+          </h2>
+          {tab === "cases" && (
+            <button
+              onClick={handleNew}
+              className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+            >
+              + 新建
+            </button>
+          )}
         </div>
         <input
           type="text"
@@ -123,12 +192,14 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
         {isLoading && (
           <div className="p-4 text-center text-gray-400 text-sm">加载中...</div>
         )}
-        {!isLoading && filtered.length === 0 && (
+
+        {/* 文档列表 */}
+        {tab === "cases" && !isLoading && filtered.length === 0 && (
           <div className="p-4 text-center text-gray-400 text-sm">
             {search ? "无匹配结果" : "暂无文档"}
           </div>
         )}
-        {filtered.map((c) => (
+        {tab === "cases" && filtered.map((c) => (
           <div
             key={c.id}
             onClick={() => openCase(c.id)}
@@ -164,9 +235,9 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
                 <button
                   onClick={(e) => handleDelete(e, c.id)}
                   className="text-gray-400 hover:text-red-500 text-xs"
-                  title="删除"
+                  title="移入回收站"
                 >
-                  ×
+                  🗑
                 </button>
               </div>
             </div>
@@ -178,7 +249,50 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
                 {STATE_LABELS[c.workflowState] || c.workflowState}
               </span>
               <span className="text-[10px] text-gray-400">
-                {new Date(c.updatedAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                {formatDate(c.updatedAt)}
+              </span>
+            </div>
+          </div>
+        ))}
+
+        {/* 回收站列表 */}
+        {tab === "trash" && !isLoading && filteredTrash.length === 0 && (
+          <div className="p-4 text-center text-gray-400 text-sm">
+            {search ? "无匹配结果" : "回收站为空"}
+          </div>
+        )}
+        {tab === "trash" && filteredTrash.map((c) => (
+          <div
+            key={c.id}
+            className="group px-3 py-2 border-b hover:bg-gray-50 transition-colors"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-500 truncate flex-1 line-through">
+                {c.title || "未命名文档"}
+              </span>
+              <div className="flex items-center gap-1 ml-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button
+                  onClick={(e) => handleRestore(e, c.id)}
+                  className="text-gray-400 hover:text-green-600 text-xs"
+                  title="恢复"
+                >
+                  ↩
+                </button>
+                <button
+                  onClick={(e) => handlePermanentDelete(e, c.id)}
+                  className="text-gray-400 hover:text-red-500 text-xs"
+                  title="永久删除"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-[10px] text-gray-300 font-mono" title={c.id}>
+                {c.id}
+              </span>
+              <span className="text-[10px] text-gray-400">
+                删除于 {formatDate(c.deletedAt)}
               </span>
             </div>
           </div>

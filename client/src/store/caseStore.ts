@@ -9,20 +9,27 @@ import type { OutlineSection, DocumentFormat } from "../../../shared/src/types/g
 import {
   createCase as repoCreateCase,
   readAllCases as repoReadAllCases,
+  readTrashedCases as repoReadTrashedCases,
   updateCase as repoUpdateCase,
   deleteCase as repoDeleteCase,
+  permanentDeleteCase as repoPermanentDeleteCase,
+  restoreCase as repoRestoreCase,
 } from "../lib/caseRepo.js";
 
 export interface CaseStore {
   cases: DocumentCase[];
+  trashedCases: DocumentCase[];
   currentCase: DocumentCase | null;
   isLoading: boolean;
 
   // Case 管理
   loadCases: () => Promise<void>;
+  loadTrashedCases: () => Promise<void>;
   createCase: (userRequest: string) => DocumentCase;
   openCase: (id: string) => void;
   deleteCase: (id: string) => void;
+  permanentDeleteCase: (id: string) => void;
+  restoreCase: (id: string) => void;
   setCurrentCase: (c: DocumentCase | null) => void;
 
   // Case 字段更新（write-through）
@@ -41,6 +48,7 @@ function persistCase(c: DocumentCase) {
 
 export const useCaseStore = create<CaseStore>((set, get) => ({
   cases: [],
+  trashedCases: [],
   currentCase: null,
   isLoading: false,
 
@@ -51,6 +59,17 @@ export const useCaseStore = create<CaseStore>((set, get) => ({
       set({ cases, isLoading: false });
     } catch (err) {
       console.error("[CaseStore] loadCases failed:", err);
+      set({ isLoading: false });
+    }
+  },
+
+  loadTrashedCases: async () => {
+    set({ isLoading: true });
+    try {
+      const trashedCases = await repoReadTrashedCases();
+      set({ trashedCases, isLoading: false });
+    } catch (err) {
+      console.error("[CaseStore] loadTrashedCases failed:", err);
       set({ isLoading: false });
     }
   },
@@ -83,6 +102,22 @@ export const useCaseStore = create<CaseStore>((set, get) => ({
     set((prev) => ({
       cases: prev.cases.filter((x) => x.id !== id),
       currentCase: prev.currentCase?.id === id ? null : prev.currentCase,
+    }));
+  },
+
+  permanentDeleteCase: (id: string) => {
+    repoPermanentDeleteCase(id).catch(console.error);
+    set((prev) => ({
+      trashedCases: prev.trashedCases.filter((x) => x.id !== id),
+    }));
+  },
+
+  restoreCase: (id: string) => {
+    repoRestoreCase(id).catch(console.error);
+    const restored = get().trashedCases.find((x) => x.id === id);
+    set((prev) => ({
+      trashedCases: prev.trashedCases.filter((x) => x.id !== id),
+      cases: restored ? [restored, ...prev.cases] : prev.cases,
     }));
   },
 

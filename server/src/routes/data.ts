@@ -6,7 +6,7 @@
  */
 import { Router } from "express";
 import express from "express";
-import { dbRun, dbGet, dbAll, dbTransaction } from "../lib/dbQuery.js";
+import { dbRun, dbGet, dbAll } from "../lib/dbQuery.js";
 import { logger } from "../lib/logger.js";
 
 export const dataRouter = Router();
@@ -19,6 +19,7 @@ function errMsg(err: unknown): string {
 dataRouter.get("/:store", (req, res) => {
   try {
     const store = req.params.store;
+    const trashOnly = req.query.trash === "true";
     if (!store) { res.status(400).json({ ok: false, error: "store is required" }); return; }
 
     const rows = dbAll<{ record_id: string; data: string }>(
@@ -33,11 +34,19 @@ dataRouter.get("/:store", (req, res) => {
       try {
         const parsed = JSON.parse(row.data);
         const record = { id: row.record_id, ...parsed };
+        const isDeleted = !!record.deletedAt;
+
+        // 根据 trashOnly 参数过滤
+        if (store === "cases") {
+          if (trashOnly && !isDeleted) continue;
+          if (!trashOnly && isDeleted) continue;
+        }
+
         records.push(record);
-        if (store === "cases" && (!record.title || record.title === "新文档") && record.createdAt) {
+        if (store === "cases" && !isDeleted && (!record.title || record.title === "新文档") && record.createdAt) {
           needsTitleFix.push({ record, recordId: row.record_id });
         }
-        if (store === "cases" && record.workflowState === "generating") {
+        if (store === "cases" && !isDeleted && record.workflowState === "generating") {
           needsWorkflowFix.push({ record, recordId: row.record_id });
         }
       } catch {
@@ -239,26 +248,109 @@ dataRouter.put("/:store/:id", express.json(), (req, res) => {
   }
 });
 
-/** DELETE /api/data/:store/:id — 删除记录 */
+/** DELETE /api/data/:store/:id — 删除记录（软删除或永久删除） */
 dataRouter.delete("/:store/:id", (req, res) => {
   try {
     const store = req.params.store;
     const id = req.params.id;
+    const permanent = req.query.permanent === "true";
 
-    const result = dbRun(
-      "DELETE FROM sync_data WHERE store_name = ? AND record_id = ?",
+    if (permanent) {
+      // 永久删除
+      const result = dbRun(
+        "DELETE FROM sync_data WHERE store_name = ? AND record_id = ?",
+        [store, id],
+        { table: "sync_data", recordId: id, source: "data_api", operation: "DELETE" },
+      );
+
+      if (result.changes === 0) {
+        res.status(404).json({ ok: false, error: "Record not found" });
+        return;
+      }
+
+      logger.info(`[Data] 永久删除: store=${store} id=${id}`);
+      res.json({ ok: true, id });
+      return;
+    }
+
+    // 软删除：设置 deletedAt
+    const row = dbGet<{ data: string }>(
+      "SELECT data FROM sync_data WHERE store_name = ? AND record_id = ?",
       [store, id],
-      { table: "sync_data", recordId: id, source: "data_api", operation: "DELETE" },
     );
 
-    if (result.changes === 0) {
+    if (!row) {
       res.status(404).json({ ok: false, error: "Record not found" });
       return;
     }
 
+    let record: Record<string, unknown>;
+    try {
+      record = JSON.parse(row.data);
+    } catch {
+      res.status(500).json({ ok: false, error: "Corrupted data" });
+      return;
+    }
+
+    record.deletedAt = new Date().toISOString();
+    const newData = JSON.stringify(record);
+
+    dbRun(
+      "UPDATE sync_data SET data = ?, updated_at = datetime('now','localtime') WHERE store_name = ? AND record_id = ?",
+      [newData, store, id],
+      { table: "sync_data", recordId: id, source: "data_api", newData: record },
+    );
+
+    logger.info(`[Data] 软删除: store=${store} id=${id}`);
     res.json({ ok: true, id });
   } catch (err) {
     logger.error("[Data] DELETE error: " + errMsg(err));
+    res.status(500).json({ ok: false, error: errMsg(err) });
+  }
+});
+
+/** POST /api/data/:store/:id/restore — 从回收站恢复记录 */
+dataRouter.post("/:store/:id/restore", express.json(), (req, res) => {
+  try {
+    const store = req.params.store;
+    const id = req.params.id;
+
+    const row = dbGet<{ data: string }>(
+      "SELECT data FROM sync_data WHERE store_name = ? AND record_id = ?",
+      [store, id],
+    );
+
+    if (!row) {
+      res.status(404).json({ ok: false, error: "Record not found" });
+      return;
+    }
+
+    let record: Record<string, unknown>;
+    try {
+      record = JSON.parse(row.data);
+    } catch {
+      res.status(500).json({ ok: false, error: "Corrupted data" });
+      return;
+    }
+
+    if (!record.deletedAt) {
+      res.status(400).json({ ok: false, error: "Record is not in trash" });
+      return;
+    }
+
+    delete record.deletedAt;
+    const newData = JSON.stringify(record);
+
+    dbRun(
+      "UPDATE sync_data SET data = ?, updated_at = datetime('now','localtime') WHERE store_name = ? AND record_id = ?",
+      [newData, store, id],
+      { table: "sync_data", recordId: id, source: "data_api", newData: record },
+    );
+
+    logger.info(`[Data] 恢复: store=${store} id=${id}`);
+    res.json({ ok: true, id });
+  } catch (err) {
+    logger.error("[Data] RESTORE error: " + errMsg(err));
     res.status(500).json({ ok: false, error: errMsg(err) });
   }
 });

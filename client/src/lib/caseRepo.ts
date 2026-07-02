@@ -40,6 +40,22 @@ async function remove(store: string, id: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to delete ${store}/${id}: ${res.status}`);
 }
 
+async function removePermanent(store: string, id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/${store}/${id}?permanent=true`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`Failed to permanently delete ${store}/${id}: ${res.status}`);
+}
+
+async function restore(store: string, id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/${store}/${id}/restore`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) throw new Error(`Failed to restore ${store}/${id}: ${res.status}`);
+}
+
 // ── caseRepo ─────────────────────────────────────────
 
 export async function createCase(item: DocumentCase): Promise<void> {
@@ -51,10 +67,25 @@ export async function readAllCases(): Promise<DocumentCase[]> {
   return cases.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
 }
 
+export async function readTrashedCases(): Promise<DocumentCase[]> {
+  const res = await fetch(`${API_BASE}/cases?trash=true`);
+  if (!res.ok) throw new Error(`Failed to get trashed cases: ${res.status}`);
+  const data = await res.json() as { ok: boolean; records: DocumentCase[] };
+  return data.records.sort((a, b) => (b.deletedAt ?? "").localeCompare(a.deletedAt ?? ""));
+}
+
 export async function updateCase(item: DocumentCase): Promise<void> {
   await update("cases", item.id, item);
 }
 
 export async function deleteCase(id: string): Promise<void> {
   await remove("cases", id);
+}
+
+export async function permanentDeleteCase(id: string): Promise<void> {
+  await removePermanent("cases", id);
+}
+
+export async function restoreCase(id: string): Promise<void> {
+  await restore("cases", id);
 }
