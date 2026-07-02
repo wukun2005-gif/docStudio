@@ -56,7 +56,7 @@ export default function PeoplePanel() {
         // 过滤掉空部门和外部用户
         const tree: Record<string, typeof treeRes.tree[string]> = {};
         for (const [dept, members] of Object.entries(treeRes.tree)) {
-          if (!dept) continue; // 跳过"未分配"
+          if (!dept || dept === "未分配") continue; // 跳过空部门和未分配
           const filtered = (members as typeof treeRes.tree[string]).filter(
             (m: any) => !m.email?.includes("#EXT#"),
           );

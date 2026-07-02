@@ -307,27 +307,29 @@ function seedCurrentUser(db: Database.Database): void {
 
   // 检查是否已有 sender_profile
   const existingProfile = db.prepare("SELECT value FROM user_settings WHERE key = 'sender_profile'").get() as { value: string } | undefined;
-  if (existingProfile) return; // 已配置过，不覆盖
 
   // 检查 people 表是否已有此人（按姓名匹配）
   const existingPerson = db.prepare("SELECT id FROM people WHERE name = ?").get(SENDER_NAME) as { id: string } | undefined;
 
-  if (!existingPerson) {
-    // 插入 People Graph
-    db.prepare(`INSERT OR REPLACE INTO people (id, name, title, department, email, attributes, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))`)
-      .run(SENDER_ID, SENDER_NAME, null, null, null, JSON.stringify({ isCurrentUser: true }));
-    logger.info(`[DB] 种子数据: 创建当前用户 ${SENDER_NAME}（People Graph）`);
-  } else {
-    // 已有同名 person，标记为当前用户
+  if (existingPerson) {
+    // 已有同名 person（可能来自 Entra 同步），标记为当前用户
     const attrs = db.prepare("SELECT attributes FROM people WHERE id = ?").get(existingPerson.id) as { attributes: string | null } | undefined;
     let parsed: Record<string, unknown> = {};
     try { parsed = attrs?.attributes ? JSON.parse(attrs.attributes) : {}; } catch { /* ignore */ }
     parsed.isCurrentUser = true;
     db.prepare("UPDATE people SET attributes = ? WHERE id = ?").run(JSON.stringify(parsed), existingPerson.id);
+    logger.info(`[DB] 种子数据: 标记已有用户 ${SENDER_NAME} 为当前用户`);
+  } else if (!existingProfile) {
+    // 无同名 person 且从未初始化过 —— 创建种子用户
+    db.prepare(`INSERT OR REPLACE INTO people (id, name, title, department, email, attributes, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))`)
+      .run(SENDER_ID, SENDER_NAME, null, null, null, JSON.stringify({ isCurrentUser: true }));
+    logger.info(`[DB] 种子数据: 创建当前用户 ${SENDER_NAME}（People Graph）`);
   }
 
-  // 写入 sender_profile
-  db.prepare("INSERT OR REPLACE INTO user_settings (key, value, updated_at) VALUES (?, ?, datetime('now','localtime'))")
-    .run("sender_profile", JSON.stringify({ name: SENDER_NAME }));
-  logger.info(`[DB] 种子数据: 创建 sender_profile（${SENDER_NAME}）`);
+  // 写入 sender_profile（仅首次）
+  if (!existingProfile) {
+    db.prepare("INSERT OR REPLACE INTO user_settings (key, value, updated_at) VALUES (?, ?, datetime('now','localtime'))")
+      .run("sender_profile", JSON.stringify({ name: SENDER_NAME }));
+    logger.info(`[DB] 种子数据: 创建 sender_profile（${SENDER_NAME}）`);
+  }
 }

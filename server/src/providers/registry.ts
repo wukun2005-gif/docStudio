@@ -23,50 +23,216 @@ import { readSettingsFromDb } from "../lib/settingsReader.js";
 import {
   OpenAICompatibleAdapter,
   isReasoningModel,
-  isReasoningModelStatic,
   resolveMaxTokens,
 } from "./openai.js";
 import { PRESET_MODEL_PROVIDERS } from "../../../shared/src/types/provider.js";
 import { logger } from "../lib/logger.js";
 
-const BACKOFF_DELAYS = [500, 1500];
 const MAX_RETRIES = 2;
 const MAX_TOTAL_ATTEMPTS = 8;
 const TIMEOUT_MS = 240_000;
 
-// ── 会话级配额耗尽冷却 ──────────────────────────────────────
-// 当模型返回 insufficient_quota 错误时，将其加入此 Set，
-// 本 session 内后续 fallback chain 遍历时直接跳过，不再重试。
+// ── Circuit Breaker（三态机，per-model 隔离 + 任务周期） ──────
+// 照搬 LiteLLM / Portkey / OpenAI SDK 的断路器模式：
+//   CLOSED  → 连续失败达阈值 → OPEN
+//   OPEN    → 任务周期变化    → HALF_OPEN（允许探测）
+//   HALF_OPEN → 成功          → CLOSED
+//   HALF_OPEN → 失败          → OPEN（重置冷却）
+//
+// 任务周期（taskEpoch）：每次文档生成任务开始时递增。
+// 断路器仅在任务周期变化时才允许 HALF_OPEN 探测 — 同一次任务内
+// 已断路的模型不会再次被尝试，避免 50 分钟的任务中反复 ping-pong。
 
-const quotaExhaustedModels = new Set<string>();
+const enum CBState { CLOSED, OPEN, HALF_OPEN }
 
-/** 检查模型是否在会话级冷却名单中 */
-export function isModelQuotaExhausted(modelId: string): boolean {
-  return quotaExhaustedModels.has(modelId);
-}
+/** 永久性错误码 — 冷却无法解决，在任务周期内永远不探测 */
+const PERMANENT_ERROR_CODES = new Set(["quota-exceeded", "auth-failed"]);
 
-// ── 会话级超时冷却 ──────────────────────────────────────────
-// 当模型在 fallback chain 中连续超时，将其加入此 Set，
-// 本 session 内后续 fallback chain 遍历时直接跳过，不再浪费时间等待。
-// 阈值：同一模型连续超时 2 次后触发冷却。
+/** 全局任务周期计数器。调用 startNewTaskEpoch() 递增 */
+let currentTaskEpoch = 0;
 
-const timeoutCooldownModels = new Set<string>();
-const modelTimeoutCount = new Map<string, number>();
-const TIMEOUT_COOLDOWN_THRESHOLD = 2;
+class CircuitBreaker {
+  state = CBState.CLOSED;
+  failureCount = 0;
+  lastFailureTime = 0;
+  lastErrorCode = "";
+  openedAtEpoch = 0;            // 进入 OPEN 状态时的任务周期
 
-/** 检查模型是否在会话级超时冷却名单中 */
-export function isModelTimeoutCooldown(modelId: string): boolean {
-  return timeoutCooldownModels.has(modelId);
-}
+  /** 自适应学习：从 API 错误中学习的模型参数限制 */
+  learnedMaxTokens?: number;    // 模型实际的 max_tokens 上限
 
-/** 记录模型超时，超过阈值后加入冷却 */
-function recordModelTimeout(modelId: string): void {
-  const count = (modelTimeoutCount.get(modelId) ?? 0) + 1;
-  modelTimeoutCount.set(modelId, count);
-  if (count >= TIMEOUT_COOLDOWN_THRESHOLD) {
-    timeoutCooldownModels.add(modelId);
-    logger.warn(`[Registry] 模型 ${modelId} 连续超时 ${count} 次，加入会话级超时冷却（跳过后续重试）`);
+  constructor(
+    readonly modelId: string,
+    readonly failureThreshold: number = 3,
+    readonly cooldownMs: number = 30_000,
+  ) {}
+
+  /** 是否为永久性错误（quota 耗尽 / 认证失败 → 同任务周期内永不探测） */
+  private get isPermanent(): boolean {
+    return PERMANENT_ERROR_CODES.has(this.lastErrorCode);
   }
+
+  /** 是否允许执行。
+   *  OPEN + 不同任务周期 → HALF_OPEN（允许探测）
+   *  OPEN + 同任务周期 + 永久错误 → 永不探测
+   *  OPEN + 同任务周期 + 临时错误 → 不探测（等下一任务） */
+  canExecute(): boolean {
+    if (this.state === CBState.CLOSED) return true;
+    if (this.state === CBState.OPEN) {
+      // 永久性错误：同任务周期内绝不探测
+      if (this.isPermanent && this.openedAtEpoch === currentTaskEpoch) {
+        return false;
+      }
+      // 任务周期已变化 → 允许探测
+      if (this.openedAtEpoch !== currentTaskEpoch) {
+        this.state = CBState.HALF_OPEN;
+        logger.info(`[CB] ${this.modelId} OPEN → HALF_OPEN（新任务周期 epoch=${currentTaskEpoch}，允许探测）`);
+        return true;
+      }
+      // 同任务周期内：不探测，等任务结束
+      return false;
+    }
+    // HALF_OPEN — 允许探测请求通过
+    return true;
+  }
+
+  /** 记录成功。HALF_OPEN → CLOSED 恢复 */
+  recordSuccess(): void {
+    if (this.state === CBState.HALF_OPEN) {
+      logger.info(`[CB] ${this.modelId} HALF_OPEN → CLOSED（探测成功，恢复）`);
+    }
+    this.state = CBState.CLOSED;
+    this.failureCount = 0;
+    this.lastErrorCode = "";
+    this.openedAtEpoch = 0;
+  }
+
+  /** 记录失败。达到阈值后 CLOSED/HALF_OPEN → OPEN。已 OPEN 则忽略 */
+  recordFailure(code: string): void {
+    if (this.state === CBState.OPEN) return; // 已断路，不重复记录
+    this.failureCount++;
+    this.lastFailureTime = Date.now();
+    this.lastErrorCode = code;
+    if (this.state === CBState.HALF_OPEN) {
+      this.state = CBState.OPEN;
+      this.openedAtEpoch = currentTaskEpoch;
+      logger.warn(`[CB] ${this.modelId} HALF_OPEN → OPEN（探测失败: ${code}${this.isPermanent ? "，本任务周期内不再探测" : ""}）`);
+    } else if (this.failureCount >= this.failureThreshold) {
+      this.state = CBState.OPEN;
+      this.openedAtEpoch = currentTaskEpoch;
+      const permNote = this.isPermanent ? "，本任务周期内不再探测" : `，等待下一任务周期`;
+      logger.warn(`[CB] ${this.modelId} CLOSED → OPEN（连续 ${this.failureCount} 次失败: ${code}${permNote}）`);
+    }
+  }
+
+  get isOpen(): boolean { return this.state === CBState.OPEN; }
+}
+
+/** per-model 断路器注册表 */
+const breakers = new Map<string, CircuitBreaker>();
+
+export function getBreaker(modelId: string): CircuitBreaker {
+  let cb = breakers.get(modelId);
+  if (!cb) {
+    cb = new CircuitBreaker(modelId);
+    breakers.set(modelId, cb);
+  }
+  return cb;
+}
+
+/** 开始新的任务周期。应在每次文档生成任务开始时调用。
+ *  所有断路器保持在当前状态，但 canExecute() 会因 epoch 变化
+ *  而允许 HALF_OPEN 探测。永久性错误（quota/auth）的断路器也会重置。 */
+export function startNewTaskEpoch(): void {
+  currentTaskEpoch++;
+  // 永久性错误的断路器：新任务周期开始时重置（用户可能已充值/换 key）
+  for (const [modelId, cb] of breakers) {
+    if (cb.isOpen && PERMANENT_ERROR_CODES.has(cb.lastErrorCode)) {
+      cb.state = CBState.CLOSED;
+      cb.failureCount = 0;
+      cb.lastErrorCode = "";
+      cb.openedAtEpoch = 0;
+      logger.info(`[CB] ${modelId} 永久错误断路器已重置（新任务周期 epoch=${currentTaskEpoch}）`);
+    }
+  }
+  logger.info(`[Registry] 新任务周期: epoch=${currentTaskEpoch}`);
+}
+
+/** 重置所有断路器（调试用） */
+export function resetAllBreakers(): void {
+  for (const [modelId, cb] of breakers) {
+    cb.state = CBState.CLOSED;
+    cb.failureCount = 0;
+    cb.lastErrorCode = "";
+    cb.openedAtEpoch = 0;
+    cb.learnedMaxTokens = undefined;
+  }
+  logger.info(`[Registry] 所有断路器已重置`);
+}
+
+/** 兼容旧 API（被外部模块引用） */
+export function isModelQuotaExhausted(modelId: string): boolean {
+  const cb = breakers.get(modelId);
+  return cb ? cb.isOpen && cb.lastErrorCode === "quota-exceeded" : false;
+}
+export function isModelTimeoutCooldown(modelId: string): boolean {
+  const cb = breakers.get(modelId);
+  return cb ? cb.isOpen && cb.lastErrorCode === "timeout" : false;
+}
+
+// ── 指数退避 + jitter ─────────────────────────────────────────
+// delay = random(0, min(cap, base * 2^attempt))
+// 添加 jitter 防止惊群效应（thundering herd）
+
+function backoffDelay(attempt: number, baseMs = 1000, capMs = 60_000): number {
+  const exponential = Math.min(capMs, baseMs * Math.pow(2, attempt));
+  return Math.floor(Math.random() * exponential);
+}
+
+// ── 错误分类（基于 HTTP status code，不猜消息措辞） ──────────
+// 照搬 OpenAI SDK / LiteLLM 的分类策略：
+//   retryable — 是否可在 adapter 层重试
+//   circuitBreaker — 是否计入断路器失败计数
+//   fatal — 是否为不可恢复的致命错误（不尝试 fallback）
+
+interface ClassifiedError {
+  code: string;
+  message: string;
+  retryable: boolean;
+  circuitBreaker: boolean;
+  fatal: boolean;
+}
+
+function classifyHttpError(status: number, message: string): ClassifiedError {
+  // 400 Bad Request — 请求参数有问题。尝试自适应修复，修不了则计入断路器
+  if (status === 400) {
+    return { code: "bad-request", message, retryable: false, circuitBreaker: true, fatal: false };
+  }
+  // 401 Unauthorized — 密钥问题，不重试、不计入断路器、不 fallback
+  if (status === 401) {
+    return { code: "auth-failed", message, retryable: false, circuitBreaker: false, fatal: true };
+  }
+  // 403 Forbidden — 需区分 quota 耗尽 vs 其他
+  if (status === 403) {
+    if (/quota|insufficient/i.test(message)) {
+      return { code: "quota-exceeded", message, retryable: false, circuitBreaker: true, fatal: false };
+    }
+    return { code: "auth-failed", message, retryable: false, circuitBreaker: false, fatal: true };
+  }
+  // 429 Rate Limit — 可重试，但需 backoff。不计入断路器（这是正常的限流而非故障）
+  if (status === 429) {
+    return { code: "rate-limited", message, retryable: true, circuitBreaker: false, fatal: false };
+  }
+  // 5xx Server Error — 可重试
+  if (status >= 500) {
+    return { code: "server-error", message, retryable: true, circuitBreaker: true, fatal: false };
+  }
+  // 未知状态码
+  if (status > 0) {
+    return { code: `http-${status}`, message, retryable: status >= 500, circuitBreaker: true, fatal: false };
+  }
+  // 无 HTTP status（网络错误、超时等）
+  return { code: "network-error", message, retryable: true, circuitBreaker: false, fatal: false };
 }
 
 export interface AttemptRecord {
@@ -186,35 +352,35 @@ export class ProviderRegistry {
           const minEvalTokens = req.maxTokens ?? 4096;
           const fallbacks = models.filter((m) => {
             if (m === req.modelId) return false;
-            if (isReasoningModelStatic(m)) return false;
+            const breaker = getBreaker(m);
+            // 断路器 OPEN → 跳过（不需要浪费时间尝试已知故障的模型）
+            if (breaker.isOpen) return false;
+            // 学习到的上限不足 → 跳过
+            if (breaker.learnedMaxTokens != null && breaker.learnedMaxTokens < Math.min(minEvalTokens, 4096)) return false;
             const caps = getModelCapabilities(m);
             if (caps.maxOutputTokens < Math.min(minEvalTokens, 4096)) return false;
             return true;
           });
           const filtered = [...primary, ...fallbacks];
           if (filtered.length < models.length) {
-            logger.info(`[Registry] evalMode: 过滤推理/低容量模型, ${models.length} → ${filtered.length} (保留首选 ${req.modelId})`);
+            logger.info(`[Registry] evalMode: 过滤故障/低容量模型, ${models.length} → ${filtered.length} (保留首选 ${req.modelId})`);
             models = filtered;
           }
         }
 
-        // 过滤配额已耗尽的模型（会话级冷却）
-        // 保留用户主动选择的首选模型（可能是新配额恢复的调用）
+        // 断路器过滤：跳过 OPEN 状态的模型
         const preFilterCount = models.length;
-        models = models.filter((m) => m === req.modelId || !quotaExhaustedModels.has(m));
-        if (models.length < preFilterCount) {
-          const skipped = preFilterCount - models.length;
-          logger.warn(`[Registry] 跳过 ${skipped} 个配额耗尽的模型: ${Array.from(quotaExhaustedModels).join(", ")}`);
-        }
-
-        // 过滤超时冷却的模型（会话级冷却）
-        // 保留用户主动选择的首选模型
-        const preTimeoutCount = models.length;
-        models = models.filter((m) => m === req.modelId || !timeoutCooldownModels.has(m));
-        if (models.length < preTimeoutCount) {
-          const skipped = preTimeoutCount - models.length;
-          const cooledModels = Array.from(timeoutCooldownModels);
-          logger.warn(`[Registry] 跳过 ${skipped} 个超时冷却的模型: ${cooledModels.join(", ")}`);
+        const skippedModels: string[] = [];
+        models = models.filter((m) => {
+          const cb = getBreaker(m);
+          if (!cb.canExecute()) {
+            skippedModels.push(`${m}(${cb.lastErrorCode})`);
+            return false;
+          }
+          return true;
+        });
+        if (skippedModels.length > 0) {
+          logger.warn(`[Registry] 断路器跳过 ${skippedModels.length} 个模型: ${skippedModels.join(", ")}`);
         }
 
         logger.info(`[Registry] ${pid} fallback chain: initialModel=${req.modelId ?? "default"}, models=[${models.slice(0, 5).join(", ")}${models.length > 5 ? `, ...+${models.length - 5}` : ""}]`);
@@ -225,9 +391,9 @@ export class ProviderRegistry {
             return { response: buildMaxAttemptsError(attempts), attempts };
           }
 
-          // 动态冷却检查：长调用（如 5 分钟超时）期间可能有其他调用已冷却此模型
-          if (modelId !== req.modelId && (quotaExhaustedModels.has(modelId) || timeoutCooldownModels.has(modelId))) {
-            logger.warn(`[Registry] 动态跳过冷却模型: ${modelId}（loop 内置检查）`);
+          // 动态断路器检查（并行调用期间可能有其他调用已触发断路器）
+          if (!getBreaker(modelId).canExecute()) {
+            logger.warn(`[Registry] 断路器动态跳过: ${modelId}（${getBreaker(modelId).lastErrorCode}）`);
             continue;
           }
 
@@ -261,20 +427,14 @@ export class ProviderRegistry {
             if (inner) attempts.push(...inner);
             else attempts.push({ providerId: pid, ok: false, errorCode: errInfo.code, message: errInfo.message });
 
-            // 会话级冷却：配额耗尽的模型加入黑名单，后续请求直接跳过
-            if (errInfo.code === "quota-exceeded") {
-              quotaExhaustedModels.add(modelId);
-              logger.warn(`[Registry] 模型 ${modelId} 配额耗尽，加入会话级冷却（跳过后续重试）`);
-            }
-
-            // 会话级超时冷却：连续超时的模型加入黑名单，避免反复浪费时间
-            if (errInfo.code === "timeout") {
-              recordModelTimeout(modelId);
-            }
-
-            if (errInfo.code === "auth-failed") {
+            // 断路器已在 executeWithRetry 中记录，此处仅处理 fatal 错误
+            if (errInfo.fatal) {
+              logger.warn(`[Registry] 模型 ${modelId} 致命错误（${errInfo.code}），不尝试 fallback`);
               return { response: buildErrorResponse(errInfo), attempts };
             }
+
+            // 非致命错误 → 继续尝试下一个模型
+            logger.info(`[Registry] 模型 ${modelId} 失败（${errInfo.code}），尝试 fallback 下一个`);
           }
         }
         // All model fallbacks failed, try next provider
@@ -318,18 +478,9 @@ export class ProviderRegistry {
         if (inner) attempts.push(...inner);
         else attempts.push({ providerId: pid, ok: false, errorCode: errInfo.code });
 
-        // 会话级冷却：配额耗尽的模型加入黑名单，后续请求直接跳过
-        if (errInfo.code === "quota-exceeded" && req.modelId) {
-          quotaExhaustedModels.add(req.modelId);
-          logger.warn(`[Registry] 模型 ${req.modelId} 配额耗尽，加入会话级冷却（跳过后续重试）`);
-        }
-
-        // 会话级超时冷却：连续超时的模型加入黑名单
-        if (errInfo.code === "timeout" && req.modelId) {
-          recordModelTimeout(req.modelId);
-        }
-
-        if (errInfo.code === "auth-failed") {
+        // 断路器已在 executeWithRetry 中记录。fatal 错误不尝试 fallback
+        if (errInfo.fatal) {
+          logger.warn(`[Registry] 模型 ${req.modelId} 致命错误（${errInfo.code}），不尝试 fallback`);
           return { response: buildErrorResponse(errInfo), attempts };
         }
       }
@@ -397,11 +548,22 @@ export class ProviderRegistry {
     let lastErrInfo: ErrorInfo | undefined;
 
     const clientSignal = req.signal;
+    const modelId = req.modelId ?? "unknown";
+
+    // 预钳制：从断路器学习缓存中读取模型已知的 max_tokens 上限，
+    // 避免每个阶段都重新触发 400 错误再自适应修复
+    const breaker = getBreaker(modelId);
+    if (breaker.learnedMaxTokens && (req.maxTokens ?? 4096) > breaker.learnedMaxTokens) {
+      const original = req.maxTokens ?? 4096;
+      req = { ...req, maxTokens: breaker.learnedMaxTokens };
+      logger.info(`[Registry] 预钳制 max_tokens（学习缓存）: ${original} → ${breaker.learnedMaxTokens}, model=${modelId}`);
+    }
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
-        logger.info(`[Registry] 重试 attempt=${attempt}/${MAX_RETRIES}, delay=${BACKOFF_DELAYS[attempt - 1] ?? 3000}ms`);
-        await sleep(BACKOFF_DELAYS[attempt - 1] ?? 3000);
+        const delay = backoffDelay(attempt - 1);
+        logger.info(`[Registry] 重试 attempt=${attempt}/${MAX_RETRIES}, delay=${delay}ms（指数退避+jitter）`);
+        await sleep(delay);
       }
 
       // 客户端断连检测
@@ -409,15 +571,14 @@ export class ProviderRegistry {
         throw new Error("Request aborted by client");
       }
 
-      // 照搬 patentExaminator: 每次尝试创建独立的 AbortController + setTimeout
       const timeoutController = new AbortController();
-      const timeout = setTimeout(() => timeoutController.abort(), req.timeoutMs ?? TIMEOUT_MS);
+      const timeoutMs = req.timeoutMs ?? TIMEOUT_MS;
+      const timeout = setTimeout(() => timeoutController.abort(), timeoutMs);
 
-      // 客户端 abort 传播到 timeout controller
       const onClientAbort = () => timeoutController.abort();
       clientSignal?.addEventListener("abort", onClientAbort);
 
-      logger.info(`[Registry] 调用 LLM: provider=${adapter.id}, model=${req.modelId ?? "default"}, attempt=${attempt + 1}/${MAX_RETRIES + 1}, timeout=${req.timeoutMs ?? TIMEOUT_MS}ms`);
+      logger.info(`[Registry] 调用 LLM: provider=${adapter.id}, model=${modelId}, attempt=${attempt + 1}/${MAX_RETRIES + 1}, timeout=${timeoutMs}ms`);
       const startTime = Date.now();
 
       try {
@@ -427,6 +588,7 @@ export class ProviderRegistry {
 
         if (!response.error) {
           attempts.push({ providerId: adapter.id, ok: true });
+          getBreaker(modelId).recordSuccess();
           clearTimeout(timeout);
           clientSignal?.removeEventListener("abort", onClientAbort);
           return { response, attempts };
@@ -436,57 +598,109 @@ export class ProviderRegistry {
         lastErrInfo = classifyError(response);
         attempts.push({ providerId: adapter.id, ok: false, errorCode: lastErrInfo.code, message: lastErrInfo.message });
 
-        // 超时日志（照搬 patentExaminator）
-        if (lastErrInfo.code === "timeout") {
-          const timeoutMs = req.timeoutMs ?? TIMEOUT_MS;
-          logger.warn(`[Registry] ${adapter.id} attempt ${attempt + 1}/${MAX_RETRIES + 1} timed out after ${timeoutMs}ms, model=${req.modelId ?? "default"}`);
+        // 记录到断路器
+        if (lastErrInfo.circuitBreaker) {
+          getBreaker(modelId).recordFailure(lastErrInfo.code);
         }
 
-        // 401/400: 不重试
-        if (lastErrInfo.code === "auth-failed" || lastErrInfo.code === "bad-request") {
-          // 自适应 max_tokens：API 返回范围不匹配时，钳制后重试
-          if (lastErrInfo.code === "bad-request" && /max_tokens/i.test(lastErrInfo.message)) {
-            const rangeMatch = lastErrInfo.message.match(/\[(\d+),\s*(\d+)\]/);
-            if (rangeMatch) {
-              const apiMax = parseInt(rangeMatch[2], 10);
+        if (lastErrInfo.code === "timeout") {
+          logger.warn(`[Registry] ${adapter.id} attempt ${attempt + 1}/${MAX_RETRIES + 1} timed out after ${timeoutMs}ms, model=${modelId}`);
+        }
+
+        // 400 bad-request: 尝试自适应修复参数（不依赖具体 API 措辞）
+        if (lastErrInfo.code === "bad-request") {
+          const msg = lastErrInfo.message;
+          const rangeMatch = msg.match(/\[(\d+),\s*(\d+)\]/);
+
+          // 修复1: 消息含 "max_tokens" + 合法范围 → 钳制
+          if (rangeMatch && /max.tokens|max_tokens/i.test(msg)) {
+            const apiMax = parseInt(rangeMatch[2], 10);
+            const currentMax = req.maxTokens ?? 4096;
+            if (currentMax > apiMax) {
+              logger.warn(`[Registry] max_tokens 不兼容：${currentMax} → ${apiMax}`);
+              req = { ...req, maxTokens: apiMax };
+              // 缓存学习到的上限，避免后续阶段重复触发
+              getBreaker(modelId).learnedMaxTokens = apiMax;
+              clearTimeout(timeout);
+              clientSignal?.removeEventListener("abort", onClientAbort);
+              continue;
+            }
+          }
+
+          // 修复2: total length 超限 → input + output > context window
+          if (/total length|input tokens|context/i.test(msg)) {
+            // 用语义线索而非数字大小来识别每个数字的角色
+            // "Input tokens length is X" → input
+            // "less than or equal to Y" / "up to Y" / "maximum Y" → context limit
+            const inputMatch = msg.match(/input(?:\s+tokens)?\s+(?:length\s+is\s+|tokens?\s*[:=]?\s*)(\d+)/i);
+            const contextMatch = msg.match(/(?:less than or equal to|must be (?:less than|<=)|up to|maximum\s+(?:context|total)?\s*(?:length|tokens)?\s*(?:is|of|:)?)\s*(\d+)/i);
+            const inputTokens = inputMatch ? parseInt(inputMatch[1], 10) : 0;
+            const contextLimit = contextMatch ? parseInt(contextMatch[1], 10) : 0;
+            if (contextLimit > 0) {
+              const safeMax = Math.max(256, contextLimit - inputTokens - 256);
               const currentMax = req.maxTokens ?? 4096;
-              if (currentMax > apiMax) {
-                logger.warn(`[Registry] max_tokens 不兼容：请求 ${currentMax} → 钳制到 API 上限 ${apiMax}`);
-                req = { ...req, maxTokens: apiMax };
+              if (currentMax > safeMax && safeMax > 0) {
+                logger.warn(`[Registry] context length 不兼容：input=${inputTokens || "?"}, context=${contextLimit}, max_tokens ${currentMax} → ${safeMax}`);
+                req = { ...req, maxTokens: safeMax };
+                // 缓存学习到的上限
+                getBreaker(modelId).learnedMaxTokens = safeMax;
                 clearTimeout(timeout);
                 clientSignal?.removeEventListener("abort", onClientAbort);
                 continue;
               }
             }
           }
-          throw Object.assign(new Error(lastErrInfo.message), { attempts: [...attempts], status: lastErrInfo.code === "bad-request" ? 400 : 401, __errorCode: lastErrInfo.code });
+
+          // 修复3: 消息含范围但无法识别参数类型 → 保守钳制 max_tokens
+          if (rangeMatch && !/max.tokens|max_tokens/i.test(msg)) {
+            const apiMax = parseInt(rangeMatch[2], 10);
+            const currentMax = req.maxTokens ?? 4096;
+            if (currentMax > apiMax && apiMax > 0) {
+              logger.warn(`[Registry] 推测 max_tokens 不兼容（[1,${apiMax}]），钳制: ${currentMax} → ${apiMax}`);
+              req = { ...req, maxTokens: apiMax };
+              getBreaker(modelId).learnedMaxTokens = apiMax;
+              clearTimeout(timeout);
+              clientSignal?.removeEventListener("abort", onClientAbort);
+              continue;
+            }
+          }
         }
 
-        // 429: 不重试，直接 fallback
-        if (lastErrInfo.code === "quota-exceeded") {
-          throw Object.assign(new Error(lastErrInfo.message), { attempts: [...attempts], status: 429, __errorCode: "quota-exceeded" });
-        }
-
-        // 不可重试的错误（保留 errorCode 以穿过 throw/catch 边界）
+        // 不可重试 → throw 给上层 fallback
         if (!lastErrInfo.retryable) {
-          throw Object.assign(new Error(lastErrInfo.message), { attempts: [...attempts], __errorCode: lastErrInfo.code });
+          throw Object.assign(new Error(lastErrInfo.message), {
+            attempts: [...attempts],
+            status: codeToStatus(lastErrInfo.code) || 400,
+            __errorCode: lastErrInfo.code,
+          });
         }
       } catch (error) {
         lastError = error;
         lastErrInfo = classifyError(error);
-        attempts.push({ providerId: adapter.id, ok: false, errorCode: lastErrInfo.code, message: lastErrInfo.message });
+        if (!attempts.some(a => a.errorCode === lastErrInfo!.code)) {
+          attempts.push({ providerId: adapter.id, ok: false, errorCode: lastErrInfo.code, message: lastErrInfo.message });
+        }
 
-        // 超时日志已在上方 response.error 分支打印，此处不重复
+        // 记录到断路器
+        if (lastErrInfo.circuitBreaker) {
+          getBreaker(modelId).recordFailure(lastErrInfo.code);
+        }
 
         // 客户端断连 — 不浪费重试
         if (clientSignal?.aborted) {
-          (error as Error & { attempts: AttemptRecord[] }).attempts = [...attempts];
+          (error as any).attempts = [...attempts];
           throw error;
         }
 
-        // 超时、401、429、400、空响应: 不重试，直接 fallback
-        if (lastErrInfo.code === "timeout" || lastErrInfo.code === "auth-failed" || lastErrInfo.code === "quota-exceeded" || lastErrInfo.code === "bad-request" || lastErrInfo.code === "empty-response") {
-          (error as Error & { attempts: AttemptRecord[] }).attempts = [...attempts];
+        // 致命错误 — 不重试，直接抛出
+        if (lastErrInfo.fatal) {
+          (error as any).attempts = [...attempts];
+          throw error;
+        }
+
+        // 不可重试 — 抛出给上层 fallback
+        if (!lastErrInfo.retryable) {
+          (error as any).attempts = [...attempts];
           throw error;
         }
       } finally {
@@ -496,7 +710,7 @@ export class ProviderRegistry {
 
       // 最后一次重试失败
       if (attempt === MAX_RETRIES) {
-        (lastError as Error & { attempts: AttemptRecord[] }).attempts = [...attempts];
+        (lastError as any).attempts = [...attempts];
         throw lastError;
       }
     }
@@ -505,61 +719,94 @@ export class ProviderRegistry {
   }
 }
 
-// ── 错误分类 ────────────────────────────────────────────────
+// ── 错误分类（统一入口） ─────────────────────────────────────
+// 所有错误统一通过此函数分类。策略：
+//   1. 优先从 Error 对象提取 HTTP status（__errorCode / status）
+//   2. 其次从 ChatResponse.error.code 提取
+//   3. 用 classifyHttpError 按 status code 统一分类
+//   4. 兜底：消息关键词匹配（仅用于无 status 的网络/超时错误）
 
 interface ErrorInfo {
   code: string;
   message: string;
   retryable: boolean;
+  circuitBreaker: boolean;  // 是否计入断路器失败计数
+  fatal: boolean;            // 是否为不可恢复错误（不尝试 fallback）
 }
 
 function classifyError(error: unknown): ErrorInfo {
+  // ── 分支 1: Error 对象（被 throw 抛出的） ──
   if (error instanceof Error) {
-    const errWithMeta = error as Error & { status?: number; __errorCode?: string };
-    const status = errWithMeta.status;
-    // 优先使用 propagate 的 __errorCode（跨 throw/catch 边界传递）
-    if (errWithMeta.__errorCode === "empty-response") return { code: "empty-response", message: error.message, retryable: false };
-    if (errWithMeta.__errorCode === "quota-exceeded") return { code: "quota-exceeded", message: error.message, retryable: false };
-    if (errWithMeta.__errorCode === "auth-failed") return { code: "auth-failed", message: error.message, retryable: false };
-    if (errWithMeta.__errorCode === "bad-request") return { code: "bad-request", message: error.message, retryable: false };
-    if (errWithMeta.__errorCode === "timeout") return { code: "timeout", message: error.message, retryable: false };
-    if (status === 401) return { code: "auth-failed", message: error.message, retryable: false };
-    if (status === 400) return { code: "bad-request", message: error.message, retryable: false };
-    if (status === 429) return { code: "quota-exceeded", message: error.message, retryable: true };
-    if (status === 403 && /quota|insufficient/i.test(error.message)) {
-      return { code: "quota-exceeded", message: error.message, retryable: false };
+    const meta = error as Error & { status?: number; __errorCode?: string };
+    const status = meta.status;
+
+    // __errorCode 携带了 executeWithRetry 中分类好的信息
+    if (meta.__errorCode) {
+      const classified = classifyHttpError(
+        status || codeToStatus(meta.__errorCode),
+        error.message,
+      );
+      return { ...classified, code: meta.__errorCode };
     }
-    if (status === 403) return { code: "auth-failed", message: error.message, retryable: false };
-    if (status && status >= 500) return { code: "server-error", message: error.message, retryable: true };
-    // 兜底：消息中含有 quota 关键词但没有 status（跨 throw/catch 边界丢失 status）
-    if (/quota|insufficient/i.test(error.message)) return { code: "quota-exceeded", message: error.message, retryable: false };
-    // 超时直接 fallback 到下一个 model，不重试（照搬 patentExaminator）
-    if (error.name === "AbortError") return { code: "timeout", message: "Request timed out", retryable: false };
-    // 检测超时相关的错误消息（fetch abort 时 error.name 可能不是 AbortError）
-    if (error.message.includes("This operation was aborted") || error.message.includes("timed out")) {
-      return { code: "timeout", message: error.message, retryable: false };
+
+    // 有 HTTP status → 标准分类
+    if (status && status > 0) {
+      return { ...classifyHttpError(status, error.message), code: classifyHttpError(status, error.message).code };
     }
-    return { code: "network-error", message: error.message, retryable: true };
+
+    // 无 status 的兜底：超时检测（不重试，立刻 fallback，计入断路器）
+    if (error.name === "AbortError" || /aborted|timed out/i.test(error.message)) {
+      return { code: "timeout", message: "Request timed out", retryable: false, circuitBreaker: true, fatal: false };
+    }
+
+    // 网络错误 — 可重试，暂不计入断路器（可能是偶发）
+    return { code: "network-error", message: error.message, retryable: true, circuitBreaker: false, fatal: false };
   }
-  // ChatResponse with error field
+
+  // ── 分支 2: ChatResponse 对象（adapter 返回的） ──
   if (typeof error === "object" && error !== null && "error" in error) {
     const resp = error as ChatResponse;
     if (resp.error) {
-      const code = resp.error.code;
-      if (code === "400") return { code: "bad-request", message: resp.error.message, retryable: false };
-      if (code === "401" || (code === "403" && !/quota|insufficient/i.test(resp.error.message))) return { code: "auth-failed", message: resp.error.message, retryable: false };
-      if (code === "403") return { code: "quota-exceeded", message: resp.error.message, retryable: false };
-      if (code === "429") return { code: "quota-exceeded", message: resp.error.message, retryable: true };
-      // 检测超时：network 错误中包含超时关键词（直接 fallback，不重试）
-      if (code === "network" && (resp.error.message.includes("aborted") || resp.error.message.includes("timed out"))) {
-        return { code: "timeout", message: resp.error.message, retryable: false };
+      const adapterCode = resp.error.code;
+      // adapter 返回的 code 可能是 HTTP status 字符串（如 "400"）或语义码
+      const status = parseInt(adapterCode, 10);
+      if (!isNaN(status) && status >= 100) {
+        return { ...classifyHttpError(status, resp.error.message), code: classifyHttpError(status, resp.error.message).code };
       }
-      // 配额耗尽（API 返回 insufficient_quota / insufficent_quota 等）：不重试，直接 fallback
-      if (/quota|insufficient/i.test(code)) return { code: "quota-exceeded", message: resp.error.message, retryable: false };
-      return { code, message: resp.error.message, retryable: resp.error.retryable };
+      // 语义码（如 "insufficient_quota"、"network"）
+      if (/quota|insufficient/i.test(adapterCode)) {
+        return { code: "quota-exceeded", message: resp.error.message, retryable: false, circuitBreaker: true, fatal: false };
+      }
+      if (adapterCode === "empty-response") {
+        // 空响应重试极少成功，直接 fallback 更高效
+        return { code: "empty-response", message: resp.error.message, retryable: false, circuitBreaker: true, fatal: false };
+      }
+      if (adapterCode === "network") {
+        // 区分超时（AbortController 触发）vs 一般网络错误
+        // 超时不重试——已经等了 30s，重试只是再浪费 30s。应立刻 fallback
+        if (/aborted|timed out|timeout/i.test(resp.error.message)) {
+          return { code: "timeout", message: resp.error.message, retryable: false, circuitBreaker: true, fatal: false };
+        }
+        return { code: "network-error", message: resp.error.message, retryable: true, circuitBreaker: false, fatal: false };
+      }
+      return { code: adapterCode, message: resp.error.message, retryable: !!resp.error.retryable, circuitBreaker: true, fatal: false };
     }
   }
-  return { code: "unknown-error", message: String(error), retryable: false };
+
+  return { code: "unknown-error", message: String(error), retryable: false, circuitBreaker: false, fatal: false };
+}
+
+/** __errorCode → HTTP status 映射（用于跨 throw/catch 边界丢失 status 时恢复） */
+function codeToStatus(code: string): number {
+  switch (code) {
+    case "bad-request": case "model-incompatible": return 400;
+    case "auth-failed": return 401;
+    case "quota-exceeded": return 403;
+    case "rate-limited": return 429;
+    case "server-error": return 500;
+    case "timeout": return 408;
+    default: return 0;
+  }
 }
 
 function buildErrorResponse(errInfo: ErrorInfo): ChatResponse {

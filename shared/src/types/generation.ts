@@ -68,8 +68,10 @@ export interface DocumentMetadata {
   styleId?: string;     // 显式指定的 Style ID
   outputFormatId?: string; // 显式指定的 Format ID
   audienceId?: string;  // 显式指定的 Audience ID
-  // 邮件特有
-  recipient?: { name: string; email?: string; title?: string; department?: string; personId?: string };
+  // 邮件/文档读者（支持多读者）
+  recipient?: { name: string; email?: string; title?: string; department?: string; personId?: string; role?: string };
+  /** 所有读者（LLM 提取 + People Graph 匹配），recipient 为第一个主读者 */
+  recipients?: Array<{ name: string; email?: string; title?: string; department?: string; personId?: string; role?: string }>;
   subject?: string;
   cc?: string[];
   // 通用

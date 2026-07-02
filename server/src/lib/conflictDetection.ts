@@ -16,8 +16,7 @@
  */
 
 import { logger } from "./logger.js";
-import { registry, isModelQuotaExhausted, isModelTimeoutCooldown } from "../providers/registry.js";
-import { isReasoningModelStatic } from "../providers/openai.js";
+import { registry, getBreaker } from "../providers/registry.js";
 import { jsonrepair } from "jsonrepair";
 import { getApiKey } from "../security/keyStore.js";
 import { readSettingsFromDb } from "./settingsReader.js";
@@ -26,37 +25,44 @@ import { getModelCapabilities } from "../providers/model-capabilities-registry.j
 
 // ── 任务感知的模型选择 ──────────────────────────────────
 //
-// conflict detection 是"跨来源声明对比 + JSON 结构化输出"任务，
-// 不需要推理模型的推理深度。当且仅当用户启用了 model fallback 时，
-// 主动从 fallback 链中挑选第一个非推理模型。
+// 不猜模型名字。基于实际观测的断路器状态和学习的参数上限来判断。
+// 主模型没有已知问题就直接用，有问题才找替代。
 
 function selectBestEvalModel(
   primaryModel: string,
   providerPreference: string[],
   dbSettings: ReturnType<typeof readSettingsFromDb>,
 ): string {
-  if (!isReasoningModelStatic(primaryModel)) return primaryModel;
+  const MIN_EVAL_TOKENS = 4096;
 
+  // 主模型检查：断路 或 学习到的上限不足 或 声明容量不足 → 需要替代
+  const primaryBreaker = getBreaker(primaryModel);
+  const primaryCaps = getModelCapabilities(primaryModel);
+  const primaryNeedsFallback = primaryBreaker.isOpen
+    || (primaryBreaker.learnedMaxTokens != null && primaryBreaker.learnedMaxTokens < MIN_EVAL_TOKENS)
+    || primaryCaps.maxOutputTokens < MIN_EVAL_TOKENS;
+
+  if (!primaryNeedsFallback) return primaryModel;
+
+  // 主模型有问题 → 从 fallback 链中找第一个健康的替代
   const fallbackMap = dbSettings.enableModelFallback ?? {};
-  const fallbackEnabled = Object.values(fallbackMap).some(Boolean);
-  if (!fallbackEnabled) return primaryModel;
-
-  // 只选【非推理 + 支持 structured output + 容量足够 + 不在冷却】的模型
   const fallbackLists = dbSettings.modelFallbacks ?? {};
   for (const pid of providerPreference) {
     if (!fallbackMap[pid]) continue;
     const list = fallbackLists[pid];
     if (!list || list.length === 0) continue;
     for (const m of list) {
-      if (!isReasoningModelStatic(m)) {
-        if (isModelQuotaExhausted(m)) continue;
-        if (isModelTimeoutCooldown(m)) continue;
-        const caps = getModelCapabilities(m);
-        if (caps.maxOutputTokens < 4096) continue;
-        if (!caps.supportsStructuredOutput) continue;
-        logger.info(`[ConflictDetection] 任务感知选模型: ${primaryModel} → ${m} (非推理, 支持结构化输出)`);
-        return m;
-      }
+      if (m === primaryModel) continue;
+      const breaker = getBreaker(m);
+      // 断路器 OPEN（任何原因）→ 跳过
+      if (breaker.isOpen) continue;
+      // 学习到上限不足 → 跳过
+      if (breaker.learnedMaxTokens != null && breaker.learnedMaxTokens < MIN_EVAL_TOKENS) continue;
+      const caps = getModelCapabilities(m);
+      if (caps.maxOutputTokens < MIN_EVAL_TOKENS) continue;
+      if (!caps.supportsStructuredOutput) continue;
+      logger.info(`[ConflictDetection] 任务感知选模型: ${primaryModel} → ${m}（${primaryBreaker.isOpen ? `断路器OPEN(${primaryBreaker.lastErrorCode})` : "容量不足"}）`);
+      return m;
     }
   }
   return primaryModel;
@@ -223,11 +229,15 @@ function normalizeConflictItem(raw: any): ConflictItem {
 /**
  * 调用 LLM 进行冲突检测（参考 patentExaminator）
  */
+const CONFLICT_DETECTION_TIMEOUT_MS = 60_000;
+
 async function callConflictDetector(
   sources: Array<{ name: string; content: string; authority?: number; timestamp?: string }>,
   apiKey: string,
   providerId: string,
   modelId: string,
+  signal?: AbortSignal,
+  singleModelTimeout = CONFLICT_DETECTION_TIMEOUT_MS,
 ): Promise<ConflictDetectionResult> {
   // 格式化来源内容
   const formatSource = (s: { name: string; content: string; authority?: number; timestamp?: string }, i: number): string => {
@@ -321,8 +331,9 @@ async function callConflictDetector(
           apiKey: "",
           maxTokens,
           temperature: 0,
-          timeoutMs: 60_000,
+          timeoutMs: singleModelTimeout,
           evalMode: true,
+          signal,
         },
         undefined,
         undefined,
@@ -359,6 +370,8 @@ export async function detectConflicts(
   apiKey: string,
   providerId: string,
   modelId: string,
+  signal?: AbortSignal,
+  singleModelTimeout = CONFLICT_DETECTION_TIMEOUT_MS,
 ): Promise<ConflictDetectionResult> {
   // 收集所有来源
   const allSources: Array<{ name: string; content: string; authority?: number; timestamp?: string }> = [];
@@ -386,7 +399,7 @@ export async function detectConflicts(
   }
 
   try {
-    const result = await callConflictDetector(allSources, apiKey, providerId, modelId);
+    const result = await callConflictDetector(allSources, apiKey, providerId, modelId, signal, singleModelTimeout);
     return result;
   } catch (e) {
     logger.warn(`[ConflictDetection] Conflict detection failed: ${e}`);

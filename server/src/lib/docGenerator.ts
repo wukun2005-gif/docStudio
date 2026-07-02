@@ -4,7 +4,7 @@
  * Feature #13-15: Word/PPT/Excel 生成
  * 集成：向量检索 + Web Search (MCP tool calling) + Groundedness Check
  */
-import { registry } from "../providers/registry.js";
+import { registry, startNewTaskEpoch } from "../providers/registry.js";
 import { getApiKey } from "../security/keyStore.js";
 import { hybridSearch, hybridSearchWithRemote, type CrossSourceSearchResult } from "./hybridSearch.js";
 import { getValidAccessToken } from "./connectors/msGraphOAuth.js";
@@ -51,66 +51,55 @@ export function extractDocumentMetadata(userRequest: string, outline: OutlineSec
 
   // 通用：从 userRequest 中提取人名（面向/给/致/写给/发给等模式），
   // 在 People Graph 中匹配，作为文档读者画像。email 场景下叫"收件人"，
-  // 其他场景下叫"读者"，底层都写入 metadata.recipient。
+  // 其他场景下叫"读者"，底层都写入 metadata.recipients。
   // LLM 路径优先（generateTitleWithLLM 已在 generateDocument 中完成），
-  // 此处的 regex 作为无 API Key 时的回退方案。
+  // 此处的 regex 作为无 API Key 时的回退方案（保守匹配，仅取第一个有效结果）。
   const personPattern = /(?:面向|面向|给|致|向|写给|发给|寄给|呈报|汇报给|抄送[：:]?\s*)\s*([^\s,，。；;、\n写发寄打做干的]{1,20})/g;
   const allMatches = [...userRequest.matchAll(personPattern)];
   const JOB_TITLE_ONLY = /^(负责人|经理|主管|总监|主任|工程师|助理|专员|部长|总裁|总经理|CEO|CTO|COO|VP|HR|研发部|市场部|销售部|财务部|人事部|行政部|技术部|运维部|测试部|产品部|设计部|运营部|法务部|采购部|后勤部)$/;
 
   if (!metadata.recipient && allMatches.length > 0) {
+    const people = getAllPeople();
+
     for (const match of allMatches) {
       const candidate = match[1].trim();
-      if (JOB_TITLE_ONLY.test(candidate)) continue;
 
-      const people = getAllPeople();
+      // 职位关键词：尝试 title 匹配 People Graph
+      if (JOB_TITLE_ONLY.test(candidate)) {
+        const matchedByTitle = findPersonByTitle(candidate);
+        if (matchedByTitle) {
+          metadata.recipient = {
+            name: matchedByTitle.name, email: matchedByTitle.email,
+            title: matchedByTitle.title, department: matchedByTitle.department,
+            personId: matchedByTitle.id,
+          };
+          break;
+        }
+        continue;
+      }
+
+      // 长度或内容明显不是人名，跳过（避免 "全员管理层汇报会" 这类碎片）
+      if (candidate.length < 2 || candidate.length > 6 || /[）\)「」『』\(\)<>\d\/\\]/.test(candidate)) continue;
+
+      // 按姓名匹配 People Graph
       const matchedPerson = people.find((p) =>
-        p.name === candidate ||
-        p.name.includes(candidate) ||
-        candidate.includes(p.name)
+        p.name === candidate || p.name.includes(candidate) || candidate.includes(p.name)
       );
-
       if (matchedPerson) {
         metadata.recipient = {
-          name: matchedPerson.name,
-          email: matchedPerson.email,
-          title: matchedPerson.title,
-          department: matchedPerson.department,
+          name: matchedPerson.name, email: matchedPerson.email,
+          title: matchedPerson.title, department: matchedPerson.department,
           personId: matchedPerson.id,
         };
-        break; // 使用第一个匹配的人物作为主读者
-      }
-    }
-    // 如果都没有匹配到 People Graph，使用第一个非职位的人名
-    if (!metadata.recipient) {
-      for (const match of allMatches) {
-        const candidate = match[1].trim();
-        if (JOB_TITLE_ONLY.test(candidate)) continue;
-        metadata.recipient = { name: candidate };
         break;
       }
     }
+
+    // 都没匹配到 → 不设 recipient。LLM 路径为主，regex 宁缺毋滥
   }
 
-  // ── 回退：按职位匹配 People Graph ──
-  // 用户用职位（如 "CEO"、"产品总监"）描述读者时，在 People Graph 中按 title 字段查找
-  // 通过 personPattern 已提取的所有候选（包括被 JOB_TITLE_ONLY 过滤的）重新尝试
-  if (!metadata.recipient?.personId && allMatches.length > 0) {
-    for (const match of allMatches) {
-      const candidate = match[1].trim();
-      if (!candidate) continue;
-      const matchedByTitle = findPersonByTitle(candidate);
-      if (matchedByTitle) {
-        metadata.recipient = {
-          name: matchedByTitle.name,
-          email: matchedByTitle.email,
-          title: matchedByTitle.title,
-          department: matchedByTitle.department,
-          personId: matchedByTitle.id,
-        };
-        break;
-      }
-    }
+  if (metadata.recipient) {
+    metadata.recipients = [metadata.recipient];
   }
 
   if (detected.style === "email") {
@@ -424,7 +413,7 @@ async function preFilterConflictingSources(
   const sectionsForDetection = [{ title: "pre-filter", content: "", sources: allSources.map((s) => ({ chunkId: s.chunkId, content: s.content, score: 1, sourceName: s.name, timestamp: s.timestamp })) }];
 
   logger.info(`[DocGenerator] 冲突前置过滤: ${allSources.length} 个来源送检`);
-  const detectionResult = await detectConflicts(sectionsForDetection, apiKey, providers[0] ?? "mimo", modelId);
+  const detectionResult = await detectConflicts(sectionsForDetection, apiKey, providers[0] ?? "mimo", modelId, config.signal, 30_000);
 
   if (!detectionResult.hasConflicts) {
     logger.info("[DocGenerator] 冲突前置过滤: 未检测到冲突");
@@ -546,30 +535,40 @@ async function generateSection(
   // 4. 格式与约束
   const outlineText = outlineToText(fullOutline);
 
-  // 读者画像注入 — 对所有文档类型开放。email 场景叫"邮件信息/收件人"，其他叫"读者信息/读者"
+  // 读者画像注入 — 对所有文档类型开放。支持多读者（如"CEO 和 COO"）
   let personContextSection = "";
   const recipientLabel = isEmail ? "收件人" : "读者";
   const sectionTitle = isEmail ? "邮件信息" : "读者信息";
-  const recipient = metadata?.recipient;
+  const recipients = metadata?.recipients?.length ? metadata.recipients : (metadata?.recipient ? [metadata.recipient] : []);
+  const primaryReaders = recipients.filter(r => !r.role || r.role !== "attendee");
 
-  if (recipient) {
-    const parts = [`${recipientLabel}: ${recipient.name}`];
-    if (recipient.email) parts.push(`邮箱: ${recipient.email}`);
-    if (recipient.title) parts.push(`职位: ${recipient.title}`);
-    if (recipient.department) parts.push(`部门: ${recipient.department}`);
-    personContextSection = `\n═══ ${sectionTitle} ═══\n\n${parts.join(" | ")}`;
+  if (recipients.length > 0) {
+    const readerLines = recipients.map((r) => {
+      const parts = [`${r.role === "attendee" ? "列席" : "主读者"}: ${r.name}`];
+      if (r.title) parts.push(`职位: ${r.title}`);
+      if (r.department) parts.push(`部门: ${r.department}`);
+      if (r.email) parts.push(`邮箱: ${r.email}`);
+      return parts.join(" | ");
+    });
+    personContextSection = `\n═══ ${sectionTitle} ═══\n\n${readerLines.join("\n")}`;
 
     if (isEmail) {
-      if (metadata.subject) personContextSection += `\n主题: ${metadata.subject}`;
-      if (metadata.cc?.length) personContextSection += `\n抄送: ${metadata.cc.join(", ")}`;
+      if (metadata?.subject) personContextSection += `\n主题: ${metadata.subject}`;
+      if (metadata?.cc?.length) personContextSection += `\n抄送: ${metadata.cc.join(", ")}`;
     }
 
-    // 注入读者/收件人画像（关系网络 + 沟通风格）
-    if (recipient.personId) {
-      const personCtx = getPersonContext(recipient.personId);
-      if (personCtx) {
-        personContextSection += `\n${recipientLabel}画像: ${personCtx}`;
+    // 注入所有读者的 People Graph 画像
+    const pgProfiles: string[] = [];
+    for (const r of recipients) {
+      if (r.personId) {
+        const personCtx = getPersonContext(r.personId);
+        if (personCtx) {
+          pgProfiles.push(`${r.name}: ${personCtx}`);
+        }
       }
+    }
+    if (pgProfiles.length > 0) {
+      personContextSection += `\n${recipientLabel}画像:\n${pgProfiles.join("\n")}`;
     }
 
     personContextSection += "\n";
@@ -578,26 +577,36 @@ async function generateSection(
   // ── Composable Prompt Layers: 组装 system prompt ──
   const rulesText = writingRules.map((r, i) => `${i + 1}. ${r.rule}`).join("\n");
 
-  // 邮件特有的章节指令
+  // 邮件特有的章节指令（支持多读者称呼）
   let emailSectionRule = "";
-  if (isFirstSection && isEmail && metadata?.recipient) {
+  const primaryNames = primaryReaders.map(r => r.name);
+  const greetingNames = primaryNames.length > 1
+    ? `${primaryNames.slice(0, -1).join("、")}和${primaryNames[primaryNames.length - 1]}`
+    : (primaryNames[0] ?? "XXX");
+  const greetingExample = primaryNames.length > 1
+    ? `"${greetingNames}，你们好："`
+    : `"${greetingNames}，你好："`;
+
+  if (isFirstSection && isEmail && recipients.length > 0) {
+    const toLine = primaryReaders.map(r => r.email ? `${r.name} <${r.email}>` : r.name).join("、");
     emailSectionRule = `这是邮件的第一个章节。请在开头写明：
-   - 收件人：${metadata.recipient.name}${metadata.recipient.email ? ` <${metadata.recipient.email}>` : ""}
-   - 主题：${metadata.subject || "（从内容中提炼）"}
-   然后写称呼（如"${metadata.recipient.name}，你好："）。
+   - 收件人：${toLine}
+   - 主题：${metadata?.subject || "（从内容中提炼）"}
+   然后写称呼（如${greetingExample}）。
    【注意】不要写邮件结尾（如"此致"、"祝好"、"Best regards"等）和署名，结尾由后续章节处理。`;
   } else if (isFirstSection) {
-    emailSectionRule = `这是第一个章节，请写称呼（如"XXX，你好："）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}`;
+    emailSectionRule = `这是第一个章节，请写称呼（如${greetingExample}）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}`;
   } else if (isEmail && isLastSection) {
     emailSectionRule = `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："）。但这是最后一个章节，请在内容末尾写上邮件结尾问候语（如"此致"、"祝好"、"Best regards"等）和署名（如"${senderName}"）。`;
   } else {
     emailSectionRule = `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`;
   }
 
-  // 读者沟通风格偏好 — 对所有文档类型开放
+  // 读者沟通风格偏好 — 取第一个有 personId 的读者
   let toneRule = "";
-  if (metadata?.recipient?.personId) {
-    const person = getPersonById(metadata.recipient.personId);
+  const toneReader = recipients.find(r => r.personId);
+  if (toneReader?.personId) {
+    const person = getPersonById(toneReader.personId);
     const commStyle = person?.attributes?.communicationStyle;
     if (commStyle === "formal") toneRule = `\n【语气要求】${recipientLabel}偏好正式风格，请使用严谨、正式的措辞，避免口语化表达`;
     if (commStyle === "casual") toneRule = `\n【语气要求】${recipientLabel}偏好轻松风格，请使用亲切、自然的措辞，适当口语化`;
@@ -851,49 +860,65 @@ async function generateMergedSection(
   const writingRules = getRulesForContext(effectiveStyleId, effectiveFormatId);
   const rulesText = writingRules.map((r, i) => `${i + 1}. ${r.rule}`).join("\n");
 
-  // 读者画像注入 — 对所有文档类型开放
+  // 读者画像注入 — 对所有文档类型开放。支持多读者
   let personContextSection = "";
   const recipientLabel = isEmail ? "收件人" : "读者";
   const sectionTitle = isEmail ? "邮件信息" : "读者信息";
+  const allRecipients = metadata?.recipients?.length ? metadata.recipients : (metadata?.recipient ? [metadata.recipient] : []);
+  const allPrimary = allRecipients.filter(r => !r.role || r.role !== "attendee");
 
-  if (recipient) {
-    const parts: string[] = [`${recipientLabel}: ${recipient.name}`];
-    if (recipient.email) parts.push(`邮箱: ${recipient.email}`);
-    if (recipient.title) parts.push(`职位: ${recipient.title}`);
-    if (recipient.department) parts.push(`部门: ${recipient.department}`);
-    personContextSection = `\n═══ ${sectionTitle} ═══\n\n${parts.join(" | ")}`;
+  if (allRecipients.length > 0) {
+    const readerLines = allRecipients.map((r) => {
+      const parts = [`${r.role === "attendee" ? "列席" : "主读者"}: ${r.name}`];
+      if (r.title) parts.push(`职位: ${r.title}`);
+      if (r.department) parts.push(`部门: ${r.department}`);
+      if (r.email) parts.push(`邮箱: ${r.email}`);
+      return parts.join(" | ");
+    });
+    personContextSection = `\n═══ ${sectionTitle} ═══\n\n${readerLines.join("\n")}`;
 
     if (isEmail) {
-      if (metadata.subject) personContextSection += `\n主题: ${metadata.subject}`;
+      if (metadata?.subject) personContextSection += `\n主题: ${metadata.subject}`;
     }
 
-    if (recipient.personId) {
-      const personCtx = getPersonContext(recipient.personId);
-      if (personCtx) personContextSection += `\n${recipientLabel}画像: ${personCtx}`;
+    const pgProfiles: string[] = [];
+    for (const r of allRecipients) {
+      if (r.personId) {
+        const personCtx = getPersonContext(r.personId);
+        if (personCtx) pgProfiles.push(`${r.name}: ${personCtx}`);
+      }
     }
+    if (pgProfiles.length > 0) personContextSection += `\n${recipientLabel}画像:\n${pgProfiles.join("\n")}`;
 
     personContextSection += "\n";
   }
 
+  const greetingNames = allPrimary.map(r => r.name);
+  const greetingExample = greetingNames.length > 1
+    ? `"${greetingNames.slice(0, -1).join("、")}和${greetingNames[greetingNames.length - 1]}，你们好："`
+    : `"${greetingNames[0] ?? "XXX"}，你好："`;
+
   let emailSectionRule = "";
-  if (isFirstSection && isEmail && metadata?.recipient) {
+  if (isFirstSection && isEmail && allRecipients.length > 0) {
+    const toLine = allPrimary.map(r => r.email ? `${r.name} <${r.email}>` : r.name).join("、");
     emailSectionRule = `这是邮件的第一个章节。请在开头写明：
-   - 收件人：${metadata.recipient.name}${metadata.recipient.email ? ` <${metadata.recipient.email}>` : ""}
-   - 主题：${metadata.subject || "（从内容中提炼）"}
-   然后写称呼（如"${metadata.recipient.name}，你好："）。
+   - 收件人：${toLine}
+   - 主题：${metadata?.subject || "（从内容中提炼）"}
+   然后写称呼（如${greetingExample}）。
    【注意】不要写邮件结尾（如"此致"、"祝好"、"Best regards"等）和署名，结尾由后续章节处理。`;
   } else if (isFirstSection) {
-    emailSectionRule = `这是第一个章节，请写称呼（如"XXX，你好："）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}`;
+    emailSectionRule = `这是第一个章节，请写称呼（如${greetingExample}）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}`;
   } else if (isEmail && isLastSection) {
     emailSectionRule = `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："）。但这是最后一个章节，请在内容末尾写上邮件结尾问候语（如"此致"、"祝好"、"Best regards"等）和署名（如"${senderName}"）。`;
   } else {
     emailSectionRule = `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`;
   }
 
-  // 读者沟通风格偏好 — 对所有文档类型开放
+  // 读者沟通风格偏好 — 取第一个有 personId 的读者
   let toneRule = "";
-  if (metadata?.recipient?.personId) {
-    const person = getPersonById(metadata.recipient.personId);
+  const toneReader = allRecipients.find(r => r.personId);
+  if (toneReader?.personId) {
+    const person = getPersonById(toneReader.personId);
     const commStyle = person?.attributes?.communicationStyle;
     if (commStyle === "formal") toneRule = `\n【语气要求】${recipientLabel}偏好正式风格，请使用严谨、正式的措辞，避免口语化表达`;
     if (commStyle === "casual") toneRule = `\n【语气要求】${recipientLabel}偏好轻松风格，请使用亲切、自然的措辞，适当口语化`;
@@ -1304,20 +1329,37 @@ function sanitizeTitle(raw: string): string {
 }
 
 /** 用 LLM 根据用户需求生成简短标题 */
-async function generateTitleWithLLM(userRequest: string, outline: OutlineSection[], config: GenerateDocRequest): Promise<{ title: string; persons: string[] }> {
+/** LLM 提取的读者信息（姓名和/或职位，至少有一个非空） */
+interface ExtractedReader {
+  name: string | null;   // 人物姓名，如"陈强"，无则为 null
+  title: string | null;  // 职位/头衔，如"COO"、"产品总监"，无则为 null
+  role: string;          // 读者角色：primary（主读者）/ attendee（列席）/ cc（抄送）
+}
+
+async function generateTitleWithLLM(
+  userRequest: string,
+  outline: OutlineSection[],
+  config: GenerateDocRequest,
+): Promise<{ title: string; readers: ExtractedReader[] }> {
   const outlineText = outline.map((s) => s.title).join("、");
-  const systemPrompt = `你是一个文档标题生成器和命名实体识别助手。根据用户的写作需求，完成两项任务：
+  const systemPrompt = `你是一个文档标题生成器和读者信息提取助手。根据用户的写作需求，完成两项任务：
 1. 生成一个简短的中文标题（不超过 10 个字）
-2. 从用户请求中提取所有提到的人物姓名
+2. 提取文档的目标读者信息——用户可能用人名、职位或两者混合来描述读者
 
-规则：
-- 标题要简洁明了，概括文档核心主题
-- 提取人名时，区分职位/头衔和实际人名（如"技术负责人陈强"提取"陈强"，不提取"技术负责人"）
-- 区分部门名和人名（如"研发部"不是人名）
-- 如果没有人名，persons 数组为空
+读者提取规则：
+- 从用户请求中提取所有被提及为文档读者/收件人/汇报对象的人物
+- **重要**：检查文档开头的问候语/称呼（如"王琳总，您好"、"Dear 陈强"），从中提取收件人姓名和职位
+- 如果用户提供了具体姓名（如"陈强"），填入 name 字段
+- 如果用户用职位描述读者（如"COO"、"产品总监"、"VP 工程"），填入 title 字段
+- 如果用户同时提供了姓名和职位（如"王琳 COO"、"王琳总"），name 填"王琳"，title 填"COO"或"总"
+- 如果问候语和正文都提到了读者，合并信息：如问候"王琳总" + 正文"主读者是COO" → {name:"王琳", title:"COO"}
+- 区分读者角色：用户明确说的"主读者"/"汇报给"/"面向"是 primary，"列席"/"抄送"是 attendee
+- 区分部门名和读者——"研发部"不是读者，但"研发部负责人"说明读者 title 是"研发部负责人"
+- 不要提取非读者的提及（如"竞品 X 的 CEO 说"——这不是文档读者）
+- 如果用户请求中没有指明读者，readers 数组为空
 
-输出 JSON 格式（不要添加任何其他内容）：
-{"title": "文档标题", "persons": ["姓名1", "姓名2"]}`;
+输出 JSON 格式（不要添加任何其他内容，不要 markdown 代码块标记）：
+{"title": "文档标题", "readers": [{"name": null, "title": "COO", "role": "primary"}, {"name": "陈强", "title": "技术负责人", "role": "primary"}]}`;
 
   const userPrompt = `用户需求：${userRequest}
 文档大纲：${outlineText}`;
@@ -1353,7 +1395,7 @@ async function generateTitleWithLLM(userRequest: string, outline: OutlineSection
 
     if (result.response.error || !result.response.text?.trim()) {
       logger.warn(`[DocGenerator] LLM 标题生成失败: ${result.response.error?.message ?? "空响应"}，回退到启发式`);
-      return { title: sanitizeTitle(userRequest.slice(0, 10)), persons: [] };
+      return { title: sanitizeTitle(userRequest.slice(0, 10)), readers: [] };
     }
 
     const rawResponse = result.response.text.trim();
@@ -1364,18 +1406,33 @@ async function generateTitleWithLLM(userRequest: string, outline: OutlineSection
       if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
       const parsed = JSON.parse(jsonStr);
       const title = sanitizeTitle((typeof parsed.title === "string" ? parsed.title : "") || rawResponse.slice(0, 10));
-      const persons: string[] = Array.isArray(parsed.persons) ? parsed.persons.filter((p: unknown) => typeof p === "string" && p.trim().length > 0) : [];
-      logger.info(`[DocGenerator] LLM 生成标题: "${title}", 提取人名: [${persons.join(", ")}]`);
-      return { title, persons };
+
+      // 解析 readers 数组
+      const rawReaders: unknown[] = Array.isArray(parsed.readers) ? parsed.readers : [];
+      const readers: ExtractedReader[] = [];
+      for (const r of rawReaders) {
+        if (typeof r !== "object" || r === null) continue;
+        const obj = r as Record<string, unknown>;
+        const name = typeof obj.name === "string" && obj.name.trim() ? obj.name.trim() : null;
+        const title = typeof obj.title === "string" && obj.title.trim() ? obj.title.trim() : null;
+        const role = typeof obj.role === "string" ? obj.role : "primary";
+        // 至少 name 或 title 有一个非空才算有效读者
+        if (name || title) {
+          readers.push({ name, title, role: role === "attendee" || role === "cc" ? "attendee" : "primary" });
+        }
+      }
+
+      logger.info(`[DocGenerator] LLM 生成标题: "${title}", 提取读者: [${readers.map(r => r.name ?? r.title ?? "?").join(", ")}]`);
+      return { title, readers };
     } catch {
       // JSON 解析失败，回退到纯文本标题
       const title = sanitizeTitle(rawResponse);
       logger.info(`[DocGenerator] LLM 生成标题（非 JSON）: "${rawResponse}" → 清洗后: "${title}"`);
-      return { title, persons: [] };
+      return { title, readers: [] };
     }
   } catch (err) {
     logger.warn(`[DocGenerator] LLM 标题生成失败，回退到启发式: ${err}`);
-    return { title: sanitizeTitle(userRequest.slice(0, 10)), persons: [] };
+    return { title: sanitizeTitle(userRequest.slice(0, 10)), readers: [] };
   }
 }
 
@@ -1511,27 +1568,90 @@ async function filterConflictingContent(
   );
 
   // Step 7: 逐 section 清理 — 删除引用 losing source 的句子、从 sources 中移除 losing chunk、清理 citation 标记
-  // 中文句子分割器：以 。 ！ ？ \n 为句末
-  const splitSentences = (text: string): { sentence: string; endChar: string }[] => {
-    const out: { sentence: string; endChar: string }[] = [];
+  // ── 将纯文本按句子分割（。！？\n .!? 为句末）──
+  const splitTextBySentences = (text: string): string[] => {
+    const sentences: string[] = [];
     let current = "";
     for (let i = 0; i < text.length; i++) {
-      const ch = text[i];
+      const ch = text[i]!;
       current += ch;
       if (ch === "。" || ch === "！" || ch === "？" || ch === "\n" || ch === "." || ch === "!" || ch === "?") {
         const trimmed = current.trim();
-        if (trimmed.length > 0) out.push({ sentence: trimmed.slice(0, -1), endChar: ch === "\n" ? "\n" : ch });
+        if (trimmed.length > 0) sentences.push(trimmed);
         current = "";
       }
     }
-    if (current.trim().length > 0) out.push({ sentence: current.trim(), endChar: "" });
-    return out;
+    if (current.trim().length > 0) sentences.push(current.trim());
+    return sentences;
+  };
+
+  /**
+   * 使用 cheerio DOM 解析 + 文本节点遍历，在保留 HTML 结构的前提下删除句子。
+   *
+   * 比正则方案更健壮：cheerio 是完整的 HTML parser，能正确处理：
+   * - 属性值中的 '>' 字符
+   * - HTML 注释、CDATA
+   * - 自闭合标签、嵌套标签
+   * - 任何 LLM 可能输出的 HTML 变体
+   *
+   * 返回 { cleaned, removed, total } — cleaned 是处理后的 HTML，removed/total 是句子计数。
+   */
+  const removeSentencesFromHtml = (
+    html: string,
+    shouldRemove: (sentence: string) => boolean,
+  ): { cleaned: string; removed: number; total: number } => {
+    let removed = 0;
+    let total = 0;
+
+    const $ = cheerio.load(html, { xml: { decodeEntities: false, xmlMode: false } });
+
+    // 递归遍历 DOM 树，找到所有文本节点并处理
+    // node 类型由 cheerio 内部的 domhandler 提供，使用 any 以避免 cheerio v1 的类型导出差异
+    const walk = (node: any) => {
+      const children = $(node).contents().toArray();
+      for (const child of children) {
+        if (child.type === "text") {
+          const text = (child as any).data || "";
+          if (text.trim().length === 0) continue;
+          const sentences = splitTextBySentences(text);
+          const kept: string[] = [];
+          for (const s of sentences) {
+            total++;
+            if (shouldRemove(s)) {
+              removed++;
+            } else {
+              kept.push(s);
+            }
+          }
+          $(child).replaceWith(kept.join(""));
+        } else if (child.type === "tag") {
+          walk(child);
+        }
+      }
+    };
+
+    // 从 root 的子节点开始遍历（跳过 cheerio 自动添加的 html/head/body 包裹）
+    $.root().children().each((_i, el) => {
+      if (el.type === "tag") walk(el);
+    });
+
+    let result = $.html();
+    const bodyMatch = result.match(/<body>([\s\S]*)<\/body>/i);
+    if (bodyMatch) result = bodyMatch[1]!;
+
+    // 清理因删除句子产生的空标签对
+    result = result.replace(/<sup><a[^>]*><\/a><\/sup>/g, "");
+    result = result.replace(/<sup><span[^>]*><\/span><\/sup>/g, "");
+    result = result.replace(/<sup class="cite-ref"><\/sup>/g, "");
+    result = result.replace(/<p>\s*<\/p>/g, "");
+
+    return { cleaned: result.trim(), removed, total };
   };
 
   /**
    * 用 cheerio DOM parser 规范 HTML 片段结构
    *
-   * 修复 splitSentences 按标点分割后删除句子导致的 HTML 残损：
+   * 修复句子删除后可能的 HTML 残损：
    * - 裸文本节点（不在任何 <p>/<h*>/<li> 标签内）自动用 <p> 包裹
    * - 孤儿 </p>（cheerio HTML 模式下转为 <p></p>）自动清除
    *
@@ -1591,54 +1711,43 @@ async function filterConflictingContent(
 
     if (!hasLosingCitations && !hasLosingSourceInSources) return sec;
 
-    // ── 删除句子：句子若包含 losing citation index 或 losing source 关键词 → 整句删除 ──
-    const allLosingIndexPatterns = new Set<string>();
-    for (const idx of secLosing) {
-      allLosingIndexPatterns.add(`[${idx}]`);
-      allLosingIndexPatterns.add(String(idx));
-    }
-
-    const sentences = splitSentences(sec.content);
-    const keptSentences: string[] = [];
-    let removedSentenceCount = 0;
-
-    for (const { sentence, endChar } of sentences) {
-      let shouldDrop = false;
-
-      // 条件 A：句子包含 losing citation 标记（如 [3]）
-      for (const idx of secLosing) {
-        if (sentence.includes(`[${idx}]`)) { shouldDrop = true; break; }
-      }
-
-      // 条件 B：句子包含 losing source name 或冲突主题关键词（大小写/符号模糊）
-      if (!shouldDrop) {
+    // ── HTML 感知的句子级删除（cheerio DOM 遍历，不破坏 HTML 结构）──
+    const { cleaned: cleanedFromSentences, removed: removedSentenceCount, total: totalSentenceCount } = removeSentencesFromHtml(
+      sec.content,
+      (sentence) => {
+        // 条件 A：句子包含 losing citation 标记（如 [3]）
+        for (const idx of secLosing) {
+          if (sentence.includes(`[${idx}]`)) return true;
+        }
+        // 条件 B：句子包含冲突主题关键词，且关键词占比 ≥ 15%（避免长句中无关关键词导致整句删除）
         const lowered = sentence.toLowerCase();
         for (const kw of conflictTopicKeywords) {
-          if (lowered.includes(kw.toLowerCase()) && kw.length >= 2) {
-            shouldDrop = true;
-            break;
+          if (kw.length < 2) continue;
+          if (lowered.includes(kw.toLowerCase())) {
+            const ratio = kw.length / Math.max(sentence.length, 1);
+            if (ratio >= 0.15) return true;
           }
         }
-      }
+        return false;
+      },
+    );
 
-      if (shouldDrop) {
-        removedSentenceCount++;
-      } else {
-        keptSentences.push(endChar === "\n" ? sentence + "\n" : sentence + endChar);
-      }
-    }
-
-    let cleanedContent = keptSentences.join("").trim();
+    let cleanedContent = cleanedFromSentences;
 
     // ── 第二步：删除所有 losing citation 的编号标记（即使句子未删，标记也要删）
     const allIndicesSorted = [...new Set(sec.citationLinks.map((l) => l.index))].sort((a, b) => b - a);
-    for (const idx of allIndicesSorted) {
-      if (!losingIndices.has(idx)) continue;
-      cleanedContent = cleanedContent.replace(new RegExp(`<sup><a[^>]*>\\[${idx}\\]</a></sup>`, "g"), "");
-      cleanedContent = cleanedContent.replace(new RegExp(`<sup><span[^>]*>\\[${idx}\\]</span></sup>`, "g"), "");
-      cleanedContent = cleanedContent.replace(new RegExp(`<sup class="cite-ref">\\[${idx}\\]</sup>`, "g"), "");
-      cleanedContent = cleanedContent.replace(new RegExp(`\\[${idx}\\]`, "g"), "");
-    }
+    const stripCitationTags = (content: string): string => {
+      let result = content;
+      for (const idx of allIndicesSorted) {
+        if (!losingIndices.has(idx)) continue;
+        result = result.replace(new RegExp(`<sup><a[^>]*>\\[${idx}\\]</a></sup>`, "g"), "");
+        result = result.replace(new RegExp(`<sup><span[^>]*>\\[${idx}\\]</span></sup>`, "g"), "");
+        result = result.replace(new RegExp(`<sup class="cite-ref">\\[${idx}\\]</sup>`, "g"), "");
+        result = result.replace(new RegExp(`\\[${idx}\\]`, "g"), "");
+      }
+      return result;
+    };
+    cleanedContent = stripCitationTags(cleanedContent);
 
     // ── 规范 HTML 结构：修复因删除句子产生的残损 HTML 标签 ──
     cleanedContent = normalizeHtmlFragment(cleanedContent);
@@ -1659,13 +1768,23 @@ async function filterConflictingContent(
     // ── 从 citationLinks 中移除 losing indices
     const keptLinks = sec.citationLinks.filter((l) => !losingIndices.has(l.index));
 
-    // ── 若清理后内容过短或核心信息被删除，替换为"已因来源冲突移除"提示
+    // ── 若清理后内容过短，回退到"只删 citation 标记、不删句子"的保守策略
+    // 原因：句子级删除 + HTML 残损修复会导致内容大量丢失（如 2430→91 字符），
+    // 对总结性章节（如"执行摘要"）尤其致命。保守策略保留原文内容，只移除冲突来源的 citation 链接。
     const originalLength = sec.content.length;
     const newLength = cleanedContent.length;
-    if (originalLength > 0 && (newLength < originalLength * 0.4 || removedSentenceCount >= Math.max(1, Math.floor(sentences.length * 0.3)))) {
+    if (originalLength > 0 && newLength < originalLength * 0.4) {
+      const fallbackContent = stripCitationTags(sec.content);
+      const fallbackLength = fallbackContent.length;
       logger.info(
-        `[DocGenerator] Post-filter: 章节 "${sec.title}" 因冲突被大幅裁剪 (${removedSentenceCount}/${sentences.length} 句)，保留关键段落`,
+        `[DocGenerator] Post-filter: 章节 "${sec.title}" 句子删除导致内容大幅丢失 (${originalLength}→${newLength})，回退到保守策略: 仅删除 citation 标记 (${originalLength}→${fallbackLength})`,
       );
+      return {
+        ...sec,
+        content: fallbackContent,
+        sources: keptSources,
+        citationLinks: keptLinks,
+      };
     }
 
     // 若清理后为空，写一个占位说明（而非空内容），但避免暴露任何冲突相关信息
@@ -1674,7 +1793,7 @@ async function filterConflictingContent(
     }
 
     logger.info(
-      `[DocGenerator] Post-filter: 章节 #${secIdx + 1} "${sec.title}" 删除 ${removedSentenceCount}/${sentences.length} 句, 内容长度 ${originalLength} → ${newLength}`,
+      `[DocGenerator] Post-filter: 章节 #${secIdx + 1} "${sec.title}" 删除 ${removedSentenceCount}/${totalSentenceCount} 句, 内容长度 ${originalLength} → ${newLength}`,
     );
 
     return { ...sec, content: cleanedContent, sources: keptSources, citationLinks: keptLinks };
@@ -1689,12 +1808,16 @@ export async function generateDocument(
 ): Promise<GenerateDocResult> {
   logger.info(`[DocGenerator] 开始生成: ${config.title}`);
 
+  // 开始新的任务周期：断路器在此任务期间已 OPEN 的模型不会被探测
+  startNewTaskEpoch();
+
   const userRequest = config.userRequest ?? config.title;
 
   // 如果没有提供元数据，自动提取
   if (!config.metadata) {
     config.metadata = extractDocumentMetadata(userRequest, config.outline);
-    logger.info(`[DocGenerator] 自动提取元数据: style=${config.metadata.style}, recipient=${config.metadata.recipient?.name ?? "无"}, subject=${config.metadata.subject ?? "无"}`);
+    const readerNames = config.metadata.recipients?.map(r => r.name) ?? [];
+    logger.info(`[DocGenerator] 自动提取元数据: style=${config.metadata.style}, readers=[${readerNames.join(", ")}], subject=${config.metadata.subject ?? "无"}`);
   }
 
   const { style: documentStyle } = config.metadata;
@@ -1709,21 +1832,29 @@ export async function generateDocument(
   const shouldPreFilter = config.preFilter !== false; // 默认 true，显式 false 才关闭
   if (shouldPreFilter) {
     try {
-      // pre-filter 超时保护：超过 45s 降级到 post-filter 兜底，不阻塞章节生成
-      const PRE_FILTER_TIMEOUT_MS = 45_000;
+      // pre-filter 超时保护：超过 90s 降级到 post-filter 兜底，不阻塞章节生成。
+      // 同时 AbortController 确保超时后 LLM 调用被真正取消，不浪费 API 调用。
+      const PRE_FILTER_TIMEOUT_MS = 90_000;
+      const preFilterAbort = new AbortController();
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
       const timeoutPromise = new Promise<null>((resolve) => {
         timeoutId = setTimeout(() => {
           logger.warn(`[DocGenerator] Pre-filter 超时 (${PRE_FILTER_TIMEOUT_MS / 1000}s)，降级为 post-filter 兜底`);
+          preFilterAbort.abort(); // 取消还在跑的 LLM 调用
           resolve(null);
         }, PRE_FILTER_TIMEOUT_MS);
       });
+      // 合并客户端信号和 pre-filter 超时信号
+      const combinedSignal = config.signal
+        ? AbortSignal.any([config.signal, preFilterAbort.signal])
+        : preFilterAbort.signal;
+      const preFilterConfig = { ...config, signal: combinedSignal };
       conflictResolution = await Promise.race([
-        preFilterConflictingSources(config.outline, config),
+        preFilterConflictingSources(config.outline, preFilterConfig),
         timeoutPromise,
       ]);
-      // 清除 timer：pre-filter 已完成（成功或超时），不再需要 timer
       clearTimeout(timeoutId);
+      preFilterAbort.abort(); // pre-filter 正常完成，清理 abort 信号
       if (conflictResolution && conflictResolution.excludedChunkIds.length > 0) {
         excludeChunkIds = new Set(conflictResolution.excludedChunkIds);
         logger.info(`[DocGenerator] 冲突前置过滤: 排除 ${excludeChunkIds.size} 个 chunk（第一道防线）`);
@@ -1739,36 +1870,71 @@ export async function generateDocument(
   const titleResult = await generateTitleWithLLM(userRequest, config.outline, config);
   const title = titleResult.title;
 
-  // ── LLM 人名提取 → 匹配 People Graph → 增强 metadata ──
-  if (titleResult.persons.length > 0 && (!config.metadata!.recipient || !config.metadata!.recipient.personId)) {
+  // ── LLM 读者提取 → 匹配 People Graph（按姓名 + 按职位） → 增强 metadata ──
+  // LLM 结果优先排序（CEO > COO > VP > ...），regex 结果去重后追加到末尾。
+  if (titleResult.readers.length > 0) {
     const people = getAllPeople();
-    for (const personName of titleResult.persons) {
-      const matchedPerson = people.find((p) =>
-        p.name === personName ||
-        p.name.includes(personName) ||
-        personName.includes(p.name)
-      );
-      if (matchedPerson) {
-        config.metadata!.recipient = {
-          name: matchedPerson.name,
-          email: matchedPerson.email,
-          title: matchedPerson.title,
-          department: matchedPerson.department,
-          personId: matchedPerson.id,
-        };
-        logger.info(`[DocGenerator] LLM 提取读者: ${matchedPerson.name} (${matchedPerson.title ?? ""}) — People Graph 匹配成功`);
-        break; // 使用第一个匹配的人物作为主读者
+    const regexRecipients = config.metadata!.recipients ?? [];
+    const newRecipients: typeof regexRecipients = [];
+    const seenNames = new Set<string>();
+
+    // 第一轮：LLM 提取的读者（保持 LLM 的顺序）
+    for (const reader of titleResult.readers) {
+      let matchedPerson: Person | undefined;
+
+      if (reader.name) {
+        matchedPerson = people.find((p) =>
+          p.name === reader.name ||
+          p.name.includes(reader.name!) ||
+          reader.name!.includes(p.name)
+        );
+        if (matchedPerson) {
+          logger.info(`[DocGenerator] LLM 提取读者: ${matchedPerson.name} (${matchedPerson.title ?? ""}) — People Graph 姓名匹配`);
+        }
+      }
+
+      if (!matchedPerson && reader.title) {
+        matchedPerson = findPersonByTitle(reader.title);
+        if (matchedPerson) {
+          logger.info(`[DocGenerator] LLM 提取读者: ${matchedPerson.name} (${matchedPerson.title ?? ""}) — People Graph 职位匹配 "${reader.title}"`);
+        }
+      }
+
+      if (matchedPerson && !seenNames.has(matchedPerson.name)) {
+        seenNames.add(matchedPerson.name);
+        newRecipients.push({
+          name: matchedPerson.name, email: matchedPerson.email,
+          title: matchedPerson.title, department: matchedPerson.department,
+          personId: matchedPerson.id, role: reader.role,
+        });
+      } else if (!matchedPerson) {
+        const label = reader.name ?? reader.title ?? "未知";
+        if (!seenNames.has(label)) {
+          seenNames.add(label);
+          newRecipients.push({ name: label, title: reader.title ?? undefined, role: reader.role });
+          logger.info(`[DocGenerator] LLM 提取读者: ${label} — 未在 People Graph 中找到匹配，使用 LLM 提取结果`);
+        }
       }
     }
-    if (!config.metadata!.recipient?.personId) {
-      // 没有匹配到 People Graph，但仍使用 LLM 提取的第一个人名
-      config.metadata!.recipient = { name: titleResult.persons[0] };
-      logger.info(`[DocGenerator] LLM 提取读者: ${titleResult.persons[0]} — 未在 People Graph 中找到匹配`);
+
+    // 第二轮：regex 找到但 LLM 没覆盖的读者追加到末尾
+    for (const r of regexRecipients) {
+      if (!seenNames.has(r.name)) {
+        seenNames.add(r.name);
+        newRecipients.push(r);
+      }
+    }
+
+    if (newRecipients.length > 0) {
+      config.metadata!.recipients = newRecipients;
+      config.metadata!.recipient = newRecipients.find((r) => r.personId) ?? newRecipients[0];
     }
   }
 
-  // ── 回退：LLM 未提取到人名时，尝试从 userRequest 中按职位匹配 People Graph ──
-  if (!config.metadata!.recipient?.personId) {
+  // ── 兜底：LLM 未提取到任何读者时，按职位匹配 People Graph ──
+  // 仅当 LLM 调用失败或返回空 readers 时生效，不作为主路径
+  if (titleResult.readers.length === 0 && !config.metadata!.recipient?.personId) {
+    logger.info(`[DocGenerator] LLM 未提取到读者，回退到职位匹配`);
     const titlePattern = /(?:面向|面向|给|致|向|写给|发给|寄给|呈报|汇报给|抄送[：:]?\s*)\s*([^\s,，。；;、\n写发寄打做干的]{1,20})/g;
     const titleMatches = [...userRequest.matchAll(titlePattern)];
     for (const tm of titleMatches) {
@@ -1783,7 +1949,7 @@ export async function generateDocument(
           department: matchedByTitle.department,
           personId: matchedByTitle.id,
         };
-        logger.info(`[DocGenerator] 职位匹配读者: ${matchedByTitle.name} (${matchedByTitle.title ?? ""}) ← "${candidate}"`);
+        logger.info(`[DocGenerator] 兜底职位匹配: ${matchedByTitle.name} (${matchedByTitle.title ?? ""}) ← "${candidate}"`);
         break;
       }
     }

@@ -15,8 +15,7 @@
  */
 
 import { logger } from "./logger.js";
-import { registry, isModelQuotaExhausted, isModelTimeoutCooldown } from "../providers/registry.js";
-import { isReasoningModelStatic } from "../providers/openai.js";
+import { registry, getBreaker } from "../providers/registry.js";
 import { getApiKey } from "../security/keyStore.js";
 import { jsonrepair } from "jsonrepair";
 import { readSettingsFromDb } from "./settingsReader.js";
@@ -34,28 +33,30 @@ function selectBestEvalModel(
   providerPreference: string[],
   dbSettings: ReturnType<typeof readSettingsFromDb>,
 ): string {
-  if (!isReasoningModelStatic(primaryModel)) return primaryModel;
+  const MIN_EVAL_TOKENS = 4096;
+
+  const primaryBreaker = getBreaker(primaryModel);
+  const primaryCaps = getModelCapabilities(primaryModel);
+  if (!primaryBreaker.isOpen
+    && (primaryBreaker.learnedMaxTokens == null || primaryBreaker.learnedMaxTokens >= MIN_EVAL_TOKENS)
+    && primaryCaps.maxOutputTokens >= MIN_EVAL_TOKENS) return primaryModel;
 
   const fallbackMap = dbSettings.enableModelFallback ?? {};
-  const fallbackEnabled = Object.values(fallbackMap).some(Boolean);
-  if (!fallbackEnabled) return primaryModel;
-
-  // 只选【非推理 + 支持 structured output + 容量足够 + 不在冷却】的模型
   const fallbackLists = dbSettings.modelFallbacks ?? {};
   for (const pid of providerPreference) {
     if (!fallbackMap[pid]) continue;
     const list = fallbackLists[pid];
     if (!list || list.length === 0) continue;
     for (const m of list) {
-      if (!isReasoningModelStatic(m)) {
-        if (isModelQuotaExhausted(m)) continue;
-        if (isModelTimeoutCooldown(m)) continue;
-        const caps = getModelCapabilities(m);
-        if (caps.maxOutputTokens < 4096) continue;
-        if (!caps.supportsStructuredOutput) continue;
-        logger.info(`[RelevanceCheck] 任务感知选模型: ${primaryModel} → ${m} (非推理, 支持结构化输出)`);
-        return m;
-      }
+      if (m === primaryModel) continue;
+      const breaker = getBreaker(m);
+      if (breaker.isOpen) continue;
+      if (breaker.learnedMaxTokens != null && breaker.learnedMaxTokens < MIN_EVAL_TOKENS) continue;
+      const caps = getModelCapabilities(m);
+      if (caps.maxOutputTokens < MIN_EVAL_TOKENS) continue;
+      if (!caps.supportsStructuredOutput) continue;
+      logger.info(`[RelevanceCheck] 任务感知选模型: ${primaryModel} → ${m}`);
+      return m;
     }
   }
   return primaryModel;

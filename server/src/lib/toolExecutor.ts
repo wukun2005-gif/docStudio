@@ -185,7 +185,12 @@ async function fuseAndRank(
 
   // 合并所有结果
   const allResults = [...ragAsFused, ...uniqueWeb];
-  logger.info(`[Rerank] 融合输入: ${countSources(allResults)} = ${allResults.length} 候选`);
+  // 去重摘要：仅在发生去重时打印
+  const ragDropped = ragCitations.length - dedupedRagCitations.length;
+  const webDropped = webResults.length - uniqueWeb.length;
+  if (ragDropped > 0 || webDropped > 0) {
+    logger.info(`[Rerank] 去重: RAG ${ragCitations.length}→${dedupedRagCitations.length}(${ragDropped > 0 ? `-${ragDropped}` : ""}), Web ${webResults.length}→${uniqueWeb.length}(${webDropped > 0 ? `-${webDropped}` : ""}), 融合=${allResults.length} 候选`);
+  }
 
   if (allResults.length === 0) {
     return { citations: [] };
@@ -395,8 +400,17 @@ export async function executeWithTools(input: ToolExecutorInput): Promise<ToolEx
   }
 
   // Step 3: 跨源融合排序（照搬 patentExaminator fuseAndRank）
+  // 预计算去重后数量，使日志与 fuseAndRank 内部一致
+  const ragUniqueSourceIds = new Set(ragCitations.map(c => c.sourceId || `fallback:${c.source || ""}`));
+  const webUniqueUrls = new Set(webSearchResults.map(r => r.url.toLowerCase()));
+  const ragDeduped = ragUniqueSourceIds.size;
+  const webDeduped = webUniqueUrls.size;
   const totalCandidates = ragCitations.length + webSearchResults.length;
-  logger.info(`[ToolExecutor] 跨源融合: RAG=${ragCitations.length} + Web=${webSearchResults.length} = ${totalCandidates} 候选`);
+  const totalDeduped = ragDeduped + webDeduped;
+  const dedupNote = (ragDeduped !== ragCitations.length || webDeduped !== webSearchResults.length)
+    ? ` (去重后: RAG=${ragDeduped} + Web=${webDeduped} = ${totalDeduped})`
+    : "";
+  logger.info(`[ToolExecutor] 跨源融合: RAG=${ragCitations.length} + Web=${webSearchResults.length} = ${totalCandidates} 候选${dedupNote}`);
   const fuseResult = totalCandidates > 0
     ? await fuseAndRank(query, ragCitations, webSearchResults, rerankerConfig)
     : { citations: [] as FusedCitation[] };

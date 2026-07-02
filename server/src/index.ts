@@ -20,6 +20,7 @@ import { workflowsRouter } from "./routes/workflows.js";
 import { dataRouter } from "./routes/data.js";
 import { promptTemplatesRouter } from "./routes/promptTemplates.js";
 import { getDb, closeDb } from "./lib/db.js";
+import { dbRun, dbAll } from "./lib/dbQuery.js";
 import { logger, initFileLogging } from "./lib/logger.js";
 import { localShort } from "../../shared/src/datetime.js";
 
@@ -197,18 +198,18 @@ function start() {
 
   // 启动时清理所有遗留的 generating 状态记录（进程崩溃/退出导致的死锁）
   try {
-    const { dbRun, dbAll } = require("./lib/dbQuery.js");
     const stale = dbAll(
       "SELECT id, title FROM generation_runs WHERE status = 'generating'",
-    );
+    ) as Array<{ id: string; title: string }>;
     if (stale && stale.length > 0) {
-      stale.forEach((r: { id: string; title: string }) => {
-        dbRun("UPDATE generation_runs SET status = 'crashed' WHERE id = ?", [r.id]);
-      });
+      for (const r of stale) {
+        dbRun("UPDATE generation_runs SET status = 'crashed' WHERE id = ?", [r.id],
+          { table: "generation_runs", recordId: r.id, source: "server.startup" });
+      }
       logger.info(`[Server] 启动清理: ${stale.length} 个遗留生成任务标记为 crashed`);
     }
   } catch (e) {
-    // 忽略清理失败，不影响启动
+    logger.warn(`[Server] 启动清理遗留任务失败: ${e}`);
   }
 
   app.listen(PORT, () => {

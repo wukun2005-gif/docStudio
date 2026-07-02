@@ -33,7 +33,7 @@ function makeSection(
 }
 
 describe("Bug 5: Citation 去重", () => {
-  it("同章节内相同 sourceId 的 citations 应该被去重", () => {
+  it("同章节内相同 sourceId 的 citations 应该被去重（并重新编号为 1, 2, ...）", () => {
     const section = makeSection("数据安全", [
       { index: 10, title: "数据安全合规方案.docx", sourceId: "uuid-same-123" },
       { index: 11, title: "数据安全合规方案.docx", sourceId: "uuid-same-123" },
@@ -48,8 +48,12 @@ describe("Bug 5: Citation 去重", () => {
     // 检查 citation-item 的数量（不是字符串出现次数，因为 URL 中可能也包含标题）
     const itemMatches = refListMatch![0].match(/<div class="citation-item">/g) || [];
     expect(itemMatches.length).toBe(2); // 去重后应该只有 2 个条目（同一 sourceId 合并）
-    expect(html).toContain(">[10]<");
+    // 重新编号后：原 [10] → [1], [12] → [2]
+    expect(html).toContain(">[1]<");
+    expect(html).toContain(">[2]<");
+    expect(html).not.toContain(">[10]<");
     expect(html).not.toContain(">[11]<");
+    expect(html).not.toContain(">[12]<");
   });
 
   it("跨章节相同 sourceId 的 citations 应该被去重", () => {
@@ -73,7 +77,7 @@ describe("Bug 5: Citation 去重", () => {
     expect(html).not.toContain(">[5]<");
   });
 
-  it("不同 sourceId 但相同 URL 的 citations 应该被去重（如同一 GitHub 文件）", () => {
+  it("不同 sourceId 但相同 URL 的 citations 应该被去重（并重新编号为 1）", () => {
     const sameUrl = "https://github.com/user/repo/blob/main/docs/backlog.md";
     const section = makeSection("参考文档", [
       { index: 3, title: "backlog.md", sourceId: "uuid-x", url: sameUrl },
@@ -87,7 +91,9 @@ describe("Bug 5: Citation 去重", () => {
     expect(refListMatch).not.toBeNull();
     const itemMatches = refListMatch![0].match(/<div class="citation-item">/g) || [];
     expect(itemMatches.length).toBe(1); // 相同 URL 被去重
-    expect(html).toContain(">[3]<");
+    // 重新编号后：原 [3] → [1]
+    expect(html).toContain(">[1]<");
+    expect(html).not.toContain(">[3]<");
     expect(html).not.toContain(">[4]<");
   });
 

@@ -11,8 +11,7 @@
  */
 
 import { logger } from "./logger.js";
-import { registry, isModelQuotaExhausted, isModelTimeoutCooldown } from "../providers/registry.js";
-import { isReasoningModelStatic } from "../providers/openai.js";
+import { registry, getBreaker } from "../providers/registry.js";
 import { getApiKey } from "../security/keyStore.js";
 import { readSettingsFromDb } from "./settingsReader.js";
 import { resolveEvalMaxTokens, estimateTokens } from "./llmUtils.js";
@@ -21,37 +20,42 @@ import { jsonrepair } from "jsonrepair";
 
 // ── 任务感知的模型选择 ──────────────────────────────────
 //
-// completeness check 是"需求要点覆盖判定 + JSON 结构化输出"任务，
-// 不需要推理模型的推理深度。当且仅当用户启用了 model fallback 时，
-// 主动从 fallback 链中挑选第一个非推理模型。
+// 不猜模型名字。基于实际观测的断路器状态和学习的参数上限来判断。
+// 主模型没有已知问题就直接用，有问题才找替代。
 
 function selectBestEvalModel(
   primaryModel: string,
   providerPreference: string[],
   dbSettings: ReturnType<typeof readSettingsFromDb>,
 ): string {
-  if (!isReasoningModelStatic(primaryModel)) return primaryModel;
+  const MIN_EVAL_TOKENS = 4096;
 
+  // 主模型检查：断路 或 学习到的上限不足 或 声明容量不足 → 需要替代
+  const primaryBreaker = getBreaker(primaryModel);
+  const primaryCaps = getModelCapabilities(primaryModel);
+  const primaryNeedsFallback = primaryBreaker.isOpen
+    || (primaryBreaker.learnedMaxTokens != null && primaryBreaker.learnedMaxTokens < MIN_EVAL_TOKENS)
+    || primaryCaps.maxOutputTokens < MIN_EVAL_TOKENS;
+
+  if (!primaryNeedsFallback) return primaryModel;
+
+  // 主模型有问题 → 从 fallback 链中找第一个健康的替代
   const fallbackMap = dbSettings.enableModelFallback ?? {};
-  const fallbackEnabled = Object.values(fallbackMap).some(Boolean);
-  if (!fallbackEnabled) return primaryModel;
-
-  // 只选【非推理 + 支持 structured output + 容量足够 + 不在冷却】的模型
   const fallbackLists = dbSettings.modelFallbacks ?? {};
   for (const pid of providerPreference) {
     if (!fallbackMap[pid]) continue;
     const list = fallbackLists[pid];
     if (!list || list.length === 0) continue;
     for (const m of list) {
-      if (!isReasoningModelStatic(m)) {
-        if (isModelQuotaExhausted(m)) continue;
-        if (isModelTimeoutCooldown(m)) continue;
-        const caps = getModelCapabilities(m);
-        if (caps.maxOutputTokens < 4096) continue;
-        if (!caps.supportsStructuredOutput) continue;
-        logger.info(`[CompletenessCheck] 任务感知选模型: ${primaryModel} → ${m} (非推理, 支持结构化输出)`);
-        return m;
-      }
+      if (m === primaryModel) continue;
+      const breaker = getBreaker(m);
+      if (breaker.isOpen) continue;
+      if (breaker.learnedMaxTokens != null && breaker.learnedMaxTokens < MIN_EVAL_TOKENS) continue;
+      const caps = getModelCapabilities(m);
+      if (caps.maxOutputTokens < MIN_EVAL_TOKENS) continue;
+      if (!caps.supportsStructuredOutput) continue;
+      logger.info(`[CompletenessCheck] 任务感知选模型: ${primaryModel} → ${m}（${primaryBreaker.isOpen ? `断路器OPEN(${primaryBreaker.lastErrorCode})` : "容量不足"}）`);
+      return m;
     }
   }
   return primaryModel;
@@ -327,6 +331,24 @@ export async function checkDocumentCompleteness(
   providerId: string,
   modelId: string,
 ): Promise<CompletenessCheckResult> {
+  // ── 内容充足性预检：检测 post-filter 冲突裁剪后的空壳章节 ──
+  // 当章节内容极短（< 200 字符），说明冲突过滤已将其内容大幅移除，
+  // 这些章节不应被视为"已覆盖"，需要注入到 LLM judge 的 prompt 中。
+  const CONTENT_SUFFICIENCY_THRESHOLD = 200; // 字符数，低于此值视为内容不充分
+  const insufficientSections: Array<{ title: string; charCount: number }> = [];
+  for (const sec of sections) {
+    const textLen = (sec.content || "").replace(/<[^>]+>/g, "").trim().length; // 去 HTML 标签后的纯文本长度
+    if (textLen < CONTENT_SUFFICIENCY_THRESHOLD) {
+      insufficientSections.push({ title: sec.title, charCount: textLen });
+    }
+  }
+  const insufficiencyNote = insufficientSections.length > 0
+    ? `\n\n⚠️ 内容充足性警告：以下章节因知识库来源冲突已被大幅裁剪，内容几乎为空，不应视为已充分覆盖：\n${
+        insufficientSections.map((s) => `- ${s.title}（纯文本仅 ${s.charCount} 字符）`).join("\n")
+      }\n请将这些章节对应的需求要点标记为 missing（除非其他章节中有充分覆盖）。`
+    : "";
+  logger.info(`[CompletenessCheck] 内容充足性预检: ${insufficientSections.length}/${sections.length} 章节内容不足${insufficientSections.length > 0 ? ` (${insufficientSections.map(s => s.title).join(", ")})` : ""}`);
+
   // ── 分批策略：保留全文覆盖，不截断（避免丢失尾部章节的覆盖信息）──
   // 单批上限 40K tokens，超出则分批调用 + 合并结果
   const MAX_BATCH_TOKENS = 40_000;
@@ -368,9 +390,10 @@ export async function checkDocumentCompleteness(
       .map((s) => `## ${s.title}\n\n${s.content}`)
       .join("\n\n");
 
-    // 注入全文大纲作为 running context
+    // 注入全文大纲作为 running context + 内容充足性警告（仅首批）
     const batchLabel = batches.length === 1 ? "" : `\n\n【当前批次：第 ${i + 1}/${batches.length} 批，包含章节：${batch.map((s) => s.title).join("、")}】`;
-    const docWithOutline = `【全文大纲】\n${outlineText}${batchLabel}\n\n【本批章节内容】\n\n${batchDoc}`;
+    const sufficiencyWarning = i === 0 ? insufficiencyNote : "";
+    const docWithOutline = `【全文大纲】\n${outlineText}${batchLabel}\n\n【本批章节内容】\n\n${batchDoc}${sufficiencyWarning}`;
 
     try {
       const result = await callCompletenessJudge(requirement, docWithOutline, apiKey, providerId, modelId);

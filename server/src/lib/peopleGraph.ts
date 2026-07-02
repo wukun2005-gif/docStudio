@@ -223,7 +223,7 @@ export function getOrgTree(): Map<string, Person[]> {
   const people = getAllPeople();
   const tree = new Map<string, Person[]>();
   for (const p of people) {
-    const dept = p.department ?? "未分配";
+    const dept = p.department || "未分配";
     if (!tree.has(dept)) tree.set(dept, []);
     tree.get(dept)!.push(p);
   }
