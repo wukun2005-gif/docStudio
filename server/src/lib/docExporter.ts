@@ -18,6 +18,14 @@ import {
   convertInchesToTwip,
 } from "docx";
 import { logger } from "./logger.js";
+import { parseSectionHtml, computeSlideLayout } from "./slideLayoutEngine.js";
+import { buildSlideHtml } from "./slideHtmlBuilder.js";
+import { extractSlideElements } from "./slideElementExtractor.js";
+import { newPage } from "./browserManager.js";
+import { execFile } from "child_process";
+import fs from "fs";
+import path from "path";
+import os from "os";
 
 // pptxgenjs & xlsx - dynamic require to avoid ESM interop type issues
 import { createRequire } from "module";
@@ -40,6 +48,8 @@ export interface ExportSection {
   pythonScript?: string;
   /** 从 LLM 输出或规则引擎提取的图表规格 */
   chartSpecs?: ChartSpec[];
+  /** 从 HTML 中提取的表格数据（二维数组，第一行为表头） */
+  tables?: Array<Array<string[]>>;
 }
 
 // 子标题标记（由 parseHtmlSections 在导出路径中注入，与 generation.ts 保持同步）
@@ -409,6 +419,61 @@ function buildInlineRuns(text: string, citations?: CitationItem[]): TextRun[] {
 // ── PowerPoint 生成 (#14) ─────────────────────────────
 
 /**
+ * 将带 SUB_MARKER 标记的纯文本转换为 pptxgenjs TextProps 数组
+ * SUB_MARKER = "\x01H\x01" 用于标记子标题行（需要加粗+大字号）
+ * 同时剥离 \x01 控制字符，避免生成无效的 OOXML
+ */
+function buildPptxTextRuns(content: string): Array<{ text: string; options: Record<string, unknown> }> {
+  const SUB_MARKER = "\x01H\x01";
+  const runs: Array<{ text: string; options: Record<string, unknown> }> = [];
+  const lines = content.split("\n");
+
+  let currentText = "";
+  let currentIsSub = false;
+  let startNewSegment = true;
+
+  const flush = () => {
+    if (currentText) {
+      runs.push({
+        text: currentText,
+        options: currentIsSub
+          ? { fontSize: 18, bold: true, color: "1a1a2e" }
+          : { fontSize: 16, color: "333333" },
+      });
+      currentText = "";
+      startNewSegment = true;
+    }
+  };
+
+  for (const line of lines) {
+    if (line.startsWith(SUB_MARKER)) {
+      flush();
+      currentIsSub = true;
+      currentText = line.slice(SUB_MARKER.length).trim();
+    } else {
+      if (currentIsSub) {
+        flush();
+      }
+      currentIsSub = false;
+      if (startNewSegment) {
+        currentText = line;
+        startNewSegment = false;
+      } else {
+        currentText += "\n" + line;
+      }
+    }
+  }
+  flush();
+
+  // 防御性移除所有 \x01 控制字符（避免生成无效 OOXML）
+  for (const run of runs) {
+    run.text = run.text.replace(/\x01/g, "");
+  }
+
+  return runs;
+}
+
+/**
  * 生成 PPTX 格式（使用 pptxgenjs 库）
  */
 export async function generatePowerPoint(title: string, sections: ExportSection[], citations?: CitationItem[]): Promise<Buffer> {
@@ -445,13 +510,181 @@ export async function generatePowerPoint(title: string, sections: ExportSection[
       fill: { color: "16213e" },
     });
 
-    slide.addText(section.content, {
-      x: 0.5, y: 1.4, w: "90%", h: 4.5,
-      fontSize: 16, color: "333333",
-      fontFace: "Microsoft YaHei",
-      valign: "top",
-      lineSpacingMultiple: 1.5,
-    });
+    // 使用 buildPptxTextRuns 将内容转换为带格式的文本数组
+    const textRuns = buildPptxTextRuns(section.content);
+    const hasTables = section.tables && section.tables.length > 0;
+    const hasCharts = section.chartSpecs && section.chartSpecs.length > 0;
+
+    // 紧凑布局：同时有表格和图表时减小文字区域，为 side-by-side 布局腾空间
+    const bothTablesAndCharts = hasTables && hasCharts;
+    const textHeight = bothTablesAndCharts ? 0.7 : (hasTables || hasCharts ? 2.0 : 4.5);
+
+    if (textRuns.length > 0) {
+      slide.addText(textRuns, {
+        x: 0.5, y: 1.4, w: "90%", h: textHeight,
+        fontFace: "Microsoft YaHei",
+        valign: "top",
+        lineSpacingMultiple: 1.1,
+        fontSize: 10,
+      });
+    }
+
+    // ── Side-by-side 布局：table[i] + chart[i] 并排 ──
+    // 同时有表格和图表时：表格在左(4.0"宽)，图表在右(4.7"宽)，每对占 1.5"高
+    // 只有表格/图表时：全宽(9.0"宽)，纵向堆叠
+    if (bothTablesAndCharts) {
+      const tables = section.tables!;
+      const charts = section.chartSpecs!;
+      const pairCount = Math.max(tables.length, charts.length);
+      let zoneY = 1.4 + textHeight + 0.1;
+      const SLIDE_BOTTOM = 7.0;
+      const zoneH = Math.min(1.5, (SLIDE_BOTTOM - zoneY) / Math.max(pairCount, 1));
+
+      for (let p = 0; p < pairCount; p++) {
+        const tableData = tables[p];
+        const chartSpec = charts[p];
+
+        // ── 表格（左侧）──
+        if (tableData && tableData.length > 0) {
+          try {
+            const colCount = Math.max(...tableData.map(r => r.length));
+            const tableRows: Array<Array<{ text: string; options: Record<string, unknown> }>> = [];
+            const hdrRow = tableData[0]!;
+            const headerCells = hdrRow.map(cell => ({
+              text: cell || "",
+              options: { fontSize: 8, bold: true, color: "FFFFFF", fill: { color: "16213e" }, align: "center" as const, valign: "middle" as const },
+            }));
+            while (headerCells.length < colCount) {
+              headerCells.push({ text: "", options: { fontSize: 8, bold: true, color: "FFFFFF", fill: { color: "16213e" }, align: "center" as const, valign: "middle" as const } });
+            }
+            tableRows.push(headerCells);
+            for (const row of tableData.slice(1)) {
+              const cells = row.map(cell => ({
+                text: cell || "",
+                options: { fontSize: 7, color: "333333", fill: { color: "F8F9FA" }, valign: "middle" as const },
+              }));
+              while (cells.length < colCount) {
+                cells.push({ text: "", options: { fontSize: 7, color: "333333", fill: { color: "F8F9FA" }, valign: "middle" as const } });
+              }
+              tableRows.push(cells);
+            }
+            slide.addTable(tableRows, {
+              x: 0.5, y: zoneY, w: 4.0,
+              border: { type: "solid", pt: 0.5, color: "D1D5DB" },
+              fontFace: "Microsoft YaHei",
+              autoPage: false,
+            });
+          } catch (tableErr) {
+            logger.warn(`[DocExporter] 表格渲染失败: ${tableErr}`);
+          }
+        }
+
+        // ── 图表（右侧）──
+        if (chartSpec) {
+          try {
+            let chartData: Array<{ name: string; labels?: string[]; values: number[] | Array<{ x: number; y: number }> }>;
+            if (chartSpec.type === "scatter") {
+              chartData = chartSpec.series.map((s) => {
+                const vals: unknown[] = s.values as unknown[];
+                if (vals.length > 0 && Array.isArray(vals[0])) {
+                  const flatY = (vals as unknown[][]).map((v) => Number(v[1]) || 0);
+                  return { name: s.name, labels: chartSpec.categories, values: flatY };
+                }
+                return { name: s.name, labels: chartSpec.categories, values: vals as number[] };
+              });
+            } else {
+              chartData = chartSpec.series.map((s) => ({
+                name: s.name,
+                labels: chartSpec.categories,
+                values: s.values,
+              }));
+            }
+
+            let chartType: any;
+            switch (chartSpec.type) {
+              case "bar": chartType = pptx.charts.BAR; break;
+              case "column": chartType = pptx.charts.BAR; break;
+              case "pie": chartType = pptx.charts.PIE; break;
+              case "doughnut": chartType = pptx.charts.DOUGHNUT; break;
+              case "line": chartType = pptx.charts.LINE; break;
+              case "scatter": chartType = pptx.charts.SCATTER; break;
+              default: chartType = pptx.charts.BAR;
+            }
+
+            renderChartOnSlide(slide, pptx, chartSpec, 4.8, zoneY, 4.7, zoneH - 0.1);
+          } catch (chartErr) {
+            logger.warn(`[DocExporter] 图表渲染失败: ${chartErr}`);
+          }
+        }
+
+        zoneY += zoneH;
+      }
+    } else {
+      // ── 只有表格或只有图表：全宽纵向堆叠 ──
+      let currentY = 1.4 + textHeight + 0.1;
+      if (hasTables) {
+        for (const tableData of section.tables!) {
+          if (tableData.length === 0) continue;
+          const colCount = Math.max(...tableData.map(r => r.length));
+          const tableRows: Array<Array<{ text: string; options: Record<string, unknown> }>> = [];
+          const headerCells = tableData[0]!.map(cell => ({
+            text: cell || "",
+            options: { fontSize: 10, bold: true, color: "FFFFFF", fill: { color: "16213e" }, align: "center" as const, valign: "middle" as const },
+          }));
+          while (headerCells.length < colCount) {
+            headerCells.push({ text: "", options: { fontSize: 10, bold: true, color: "FFFFFF", fill: { color: "16213e" }, align: "center" as const, valign: "middle" as const } });
+          }
+          tableRows.push(headerCells);
+          for (const row of tableData.slice(1)) {
+            const cells = row.map(cell => ({
+              text: cell || "",
+              options: { fontSize: 9, color: "333333", fill: { color: "F8F9FA" }, valign: "middle" as const },
+            }));
+            while (cells.length < colCount) {
+              cells.push({ text: "", options: { fontSize: 9, color: "333333", fill: { color: "F8F9FA" }, valign: "middle" as const } });
+            }
+            tableRows.push(cells);
+          }
+          const tableHeight = Math.min(tableRows.length * 0.3, 2.0);
+          try {
+            slide.addTable(tableRows, {
+              x: 0.5, y: currentY, w: 9.0,
+              border: { type: "solid", pt: 0.5, color: "D1D5DB" },
+              fontFace: "Microsoft YaHei",
+              autoPage: false,
+            });
+            currentY += tableHeight + 0.1;
+          } catch (tableErr) {
+            logger.warn(`[DocExporter] 表格渲染失败: ${tableErr}`);
+          }
+        }
+      }
+      if (hasCharts) {
+        for (const chartSpec of section.chartSpecs!) {
+          try {
+            const chartData = chartSpec.series.map((s) => ({
+              name: s.name,
+              labels: chartSpec.categories,
+              values: s.values,
+            }));
+            let chartType: any;
+            switch (chartSpec.type) {
+              case "bar": chartType = pptx.charts.BAR; break;
+              case "column": chartType = pptx.charts.BAR; break;
+              case "pie": chartType = pptx.charts.PIE; break;
+              case "doughnut": chartType = pptx.charts.DOUGHNUT; break;
+              case "line": chartType = pptx.charts.LINE; break;
+              case "scatter": chartType = pptx.charts.SCATTER; break;
+              default: chartType = pptx.charts.BAR;
+            }
+            renderChartOnSlide(slide, pptx, chartSpec, 0.5, currentY, 9.0, 2.5);
+            currentY += 2.6;
+          } catch (chartErr) {
+            logger.warn(`[DocExporter] 图表渲染失败: ${chartErr}`);
+          }
+        }
+      }
+    }
 
     slide.addText(`${idx + 1}`, {
       x: 9.0, y: 5.1, w: 0.5, h: 0.4,
@@ -509,6 +742,7 @@ export async function generateExcel(title: string, sections: ExportSection[], ci
 
     // 将 content 转为纯文本（content 可能是 HTML，需要去标签）
     let plainContent = s.content
+      .replace(/\x01/g, "")  // 移除 SUB_MARKER 控制字符
       .replace(/&quot;/g, '"')
       .replace(/&lt;/g, "<")
       .replace(/&gt;/g, ">")
@@ -565,7 +799,7 @@ export interface CitationItem {
  */
 export function generateEml(title: string, sections: ExportSection[], citations?: CitationItem[]): Buffer {
   const bodyHtml = sections.map((s) => {
-    const paragraphs = s.content.split("\n").filter((p) => p.trim());
+    const paragraphs = s.content.replace(/\x01/g, "").split("\n").filter((p) => p.trim());
     return paragraphs.map((p) => {
       let html = escapeHtml(p);
       if (citations && citations.length > 0) {
@@ -624,6 +858,465 @@ ${citationsHtml}
   return Buffer.from(eml, "utf-8");
 }
 
+// ── PowerPoint 生成 v2 辅助函数 ─────────────────────────
+
+function renderTableOnSlide(
+  slide: any,
+  tableData: string[][],
+  x: number, y: number, w: number, h: number,
+) {
+  const colCount = Math.max(...tableData.map(r => r.length));
+  const tableRows: Array<Array<{ text: string; options: Record<string, unknown> }>> = [];
+  // header
+  const hdrRow = tableData[0]!;
+  const headerCells = hdrRow.map(cell => ({
+    text: cell || "",
+    options: { fontSize: 9, bold: true, color: "FFFFFF", fill: { color: "16213e" }, align: "center" as const, valign: "middle" as const },
+  }));
+  while (headerCells.length < colCount) {
+    headerCells.push({ text: "", options: { fontSize: 9, bold: true, color: "FFFFFF", fill: { color: "16213e" }, align: "center" as const, valign: "middle" as const } });
+  }
+  tableRows.push(headerCells);
+  for (const row of tableData.slice(1)) {
+    const cells = row.map(cell => ({
+      text: cell || "",
+      options: { fontSize: 8, color: "333333", fill: { color: "F8F9FA" }, valign: "middle" as const },
+    }));
+    while (cells.length < colCount) {
+      cells.push({ text: "", options: { fontSize: 8, color: "333333", fill: { color: "F8F9FA" }, valign: "middle" as const } });
+    }
+    tableRows.push(cells);
+  }
+  slide.addTable(tableRows, {
+    x, y, w,
+    border: { type: "solid", pt: 0.5, color: "D1D5DB" },
+    fontFace: "Microsoft YaHei",
+    autoPage: false,
+  });
+}
+
+function renderChartOnSlide(
+  slide: any,
+  pptx: any,
+  chartSpec: ChartSpec,
+  x: number, y: number, w: number, h: number,
+) {
+  // 数据校验：跳过无效数据
+  if (!chartSpec.categories || chartSpec.categories.length === 0) {
+    if (chartSpec.type === "scatter" && chartSpec.series.length > 0) {
+      // scatter 无 categories → 尝试从嵌套 values 中提取
+      const firstVal = chartSpec.series[0]!.values[0];
+      if (!Array.isArray(firstVal)) {
+        logger.warn('[DocExporter] 跳过无效 chart（无 categories）');
+        return;
+      }
+    } else {
+      logger.warn('[DocExporter] 跳过无效 chart（无 categories）');
+      return;
+    }
+  }
+
+  let chartData: Array<{ name: string; labels?: string[]; values: number[] }>;
+  if (chartSpec.type === "scatter") {
+    chartData = chartSpec.series.map((s) => {
+      const vals: unknown[] = s.values as unknown[];
+      if (vals.length > 0 && Array.isArray(vals[0])) {
+        const xs = (vals as unknown[][]).map((v) => String(v[0] ?? ""));
+        const ys = (vals as unknown[][]).map((v) => Number(v[1]) || 0);
+        return { name: s.name, labels: xs, values: ys };
+      }
+      return { name: s.name, labels: chartSpec.categories, values: s.values };
+    });
+  } else {
+    chartData = chartSpec.series.map((s) => ({
+      name: s.name,
+      labels: chartSpec.categories,
+      values: s.values,
+    }));
+  }
+
+  let chartType: any;
+  let chartOpts: Record<string, unknown> = {};
+  switch (chartSpec.type) {
+    case "bar": chartType = pptx.charts.BAR; chartOpts = { barDir: "bar" }; break;
+    case "column": chartType = pptx.charts.BAR; chartOpts = { barDir: "col" }; break;
+    case "pie": chartType = pptx.charts.PIE; break;
+    case "doughnut": chartType = pptx.charts.DOUGHNUT; break;
+    case "line": chartType = pptx.charts.LINE; break;
+    case "scatter": chartType = pptx.charts.SCATTER; break;
+    default: chartType = pptx.charts.BAR; chartOpts = { barDir: "col" };
+  }
+
+  slide.addChart(chartType, chartData, {
+    x, y, w, h,
+    ...chartOpts,
+    showTitle: true,
+    title: chartSpec.title,
+    titleFontFace: "Microsoft YaHei",
+    titleFontSize: 10,
+    catAxisLabelFontFace: "Microsoft YaHei",
+    catAxisLabelFontSize: 7,
+    valAxisLabelFontFace: "Microsoft YaHei",
+    valAxisLabelFontSize: 7,
+    showLegend: chartSpec.series.length > 1,
+    legendFontFace: "Microsoft YaHei",
+    legendFontSize: 7,
+  });
+}
+
+// ── PowerPoint 生成 v2（基于 slideLayoutEngine）──────────
+
+/**
+ * 使用 slideLayoutEngine 动态计算布局的 PPT 生成。
+ * 替代 generatePowerPoint() 中的硬编码坐标，根据内容自适应。
+ */
+export async function generatePowerPointFromLayout(
+  title: string,
+  sections: ExportSection[],
+  citations?: CitationItem[],
+): Promise<Buffer> {
+  const pptx = new PptxGenJS();
+
+  pptx.layout = "LAYOUT_WIDE";
+  pptx.author = "DocStudio";
+  pptx.title = title;
+
+  // ── Title slide ──
+  const titleSlide = pptx.addSlide();
+  titleSlide.background = { color: "1a1a2e" };
+  titleSlide.addText(title, {
+    x: 0.5, y: 2.0, w: "90%", h: 1.5,
+    fontSize: 44, color: "FFFFFF", bold: true, align: "center",
+    fontFace: "Microsoft YaHei",
+  });
+  titleSlide.addText(new Date().toLocaleDateString("zh-CN"), {
+    x: 0.5, y: 3.8, w: "90%", h: 0.5,
+    fontSize: 18, color: "CCCCCC", align: "center",
+    fontFace: "Microsoft YaHei",
+  });
+
+  // ── Section slides ──
+  for (const [idx, section] of sections.entries()) {
+    // 如果没有 HTML 内容（旧格式 plain text），回退到 buildPptxTextRuns
+    const hasHtml = /<[^>]+>/.test(section.content);
+
+    if (hasHtml) {
+      // ── 新路径：HTML → parseSectionHtml → computeSlideLayout ──
+      const elements = parseSectionHtml(section.content, section.chartSpecs);
+      const slideLayouts = computeSlideLayout(elements);
+
+      for (const [li, layoutElements] of slideLayouts.entries()) {
+        const slide = pptx.addSlide();
+
+        // Slide title
+        const displayTitle = li === 0
+          ? section.title
+          : `${section.title}（续）`;
+        slide.addText(displayTitle, {
+          x: 0.5, y: 0.3, w: "90%", h: 0.8,
+          fontSize: 28, color: "1a1a2e", bold: true,
+          fontFace: "Microsoft YaHei",
+        });
+        slide.addShape(pptx.ShapeType.rect, {
+          x: 0.5, y: 1.1, w: 9.0, h: 0.05,
+          fill: { color: "16213e" },
+        });
+
+        // 渲染每个 layout element
+        for (const el of layoutElements) {
+          try {
+            switch (el.type) {
+              case "heading": {
+                slide.addText(el.text ?? "", {
+                  x: el.x, y: el.y, w: el.w, h: el.h,
+                  fontSize: 18, bold: true, color: "1a1a2e",
+                  fontFace: "Microsoft YaHei",
+                  valign: "top",
+                });
+                break;
+              }
+              case "paragraph": {
+                const runs = buildPptxTextRuns(el.text ?? "");
+                if (runs.length > 0) {
+                  slide.addText(runs, {
+                    x: el.x, y: el.y, w: el.w, h: el.h,
+                    fontSize: 14, color: "333333",
+                    fontFace: "Microsoft YaHei",
+                    valign: "top",
+                    lineSpacingMultiple: 1.2,
+                  });
+                }
+                break;
+              }
+              case "list": {
+                const bulletText = (el.items ?? [])
+                  .map((item) => `• ${item}`)
+                  .join("\n");
+                slide.addText(bulletText, {
+                  x: el.x, y: el.y, w: el.w, h: el.h,
+                  fontSize: 14, color: "333333",
+                  fontFace: "Microsoft YaHei",
+                  valign: "top",
+                  lineSpacingMultiple: 1.2,
+                });
+                break;
+              }
+              case "table": {
+                // table+chart pair → side-by-side
+                if (el.chartSpec && el.tableData && el.tableData.length > 0) {
+                  // Pie/doughnut 需要接近正方形的空间 → 全宽渲染
+                  const isPieLike = el.chartSpec.type === "pie" || el.chartSpec.type === "doughnut";
+                  if (isPieLike) {
+                    renderTableOnSlide(slide, el.tableData, el.x, el.y, el.w / 2 - 0.2, el.h);
+                    renderChartOnSlide(slide, pptx, el.chartSpec, el.x + el.w / 2 + 0.1, el.y, el.w / 2 - 0.2, el.h);
+                  } else {
+                    const halfW = el.w / 2 - 0.1;
+                    renderTableOnSlide(slide, el.tableData, el.x, el.y, halfW, el.h);
+                    renderChartOnSlide(slide, pptx, el.chartSpec, el.x + halfW + 0.2, el.y, halfW, el.h);
+                  }
+                } else if (el.tableData && el.tableData.length > 0) {
+                  renderTableOnSlide(slide, el.tableData, el.x, el.y, el.w, el.h);
+                }
+                break;
+              }
+              case "chart": {
+                if (el.chartSpec) {
+                  renderChartOnSlide(slide, pptx, el.chartSpec, el.x, el.y, el.w, el.h);
+                }
+                break;
+              }
+            }
+          } catch (renderErr) {
+            logger.warn(`[DocExporter] 元素渲染失败 (type=${el.type}): ${renderErr}`);
+          }
+        }
+
+        // Page number - fixed bottom-right, doesn't overlap content
+        slide.addText(`${idx + 1}`, {
+          x: 8.5, y: 6.8, w: 1.0, h: 0.4,
+          fontSize: 10, color: "AAAAAA", align: "right",
+        });
+      }
+    } else {
+      // ── 旧路径：plain text（回退） ──
+      const slide = pptx.addSlide();
+      slide.addText(section.title, {
+        x: 0.5, y: 0.3, w: "90%", h: 0.8,
+        fontSize: 28, color: "1a1a2e", bold: true,
+        fontFace: "Microsoft YaHei",
+      });
+      slide.addShape(pptx.ShapeType.rect, {
+        x: 0.5, y: 1.1, w: 9.0, h: 0.05,
+        fill: { color: "16213e" },
+      });
+
+      const textRuns = buildPptxTextRuns(section.content);
+      if (textRuns.length > 0) {
+        slide.addText(textRuns, {
+          x: 0.5, y: 1.4, w: "90%", h: 4.5,
+          fontFace: "Microsoft YaHei",
+          valign: "top",
+          lineSpacingMultiple: 1.5,
+        });
+      }
+
+      slide.addText(`${idx + 1}`, {
+        x: 9.0, y: 5.1, w: 0.5, h: 0.4,
+        fontSize: 12, color: "999999", align: "right",
+      });
+    }
+  }
+
+  // ── Citations slide ──
+  if (citations && citations.length > 0) {
+    const citeSlide = pptx.addSlide();
+    citeSlide.addText("参考来源", {
+      x: 0.5, y: 0.3, w: "90%", h: 0.8,
+      fontSize: 28, color: "1a1a2e", bold: true,
+      fontFace: "Microsoft YaHei",
+    });
+    citeSlide.addShape(pptx.ShapeType.rect, {
+      x: 0.5, y: 1.1, w: 9.0, h: 0.05,
+      fill: { color: "16213e" },
+    });
+
+    const citeText = citations.map(c => {
+      const urlPart = c.url ? ` ${c.url}` : "";
+      return `[${c.index}] ${c.title}${urlPart}`;
+    }).join("\n");
+
+    citeSlide.addText(citeText, {
+      x: 0.5, y: 1.4, w: "90%", h: 4.5,
+      fontSize: 14, color: "333333",
+      fontFace: "Microsoft YaHei",
+      valign: "top",
+      lineSpacingMultiple: 1.5,
+    });
+  }
+
+  const buffer = await pptx.write({ outputType: "arraybuffer" }) as ArrayBuffer;
+  return Buffer.from(buffer);
+}
+
+// ── PPTX Python 生成 ──────────────────────────────────
+
+function execFileAsync(
+  cmd: string,
+  args: string[],
+  timeoutMs: number = 120_000,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) reject(err);
+      else resolve({ stdout, stderr });
+    });
+  });
+}
+
+// ── PPTX HTML 方案（Playwright + CSS Flexbox）──────────
+
+export async function generatePowerPointFromHtml(
+  title: string,
+  sections: ExportSection[],
+  citations?: CitationItem[],
+): Promise<Buffer> {
+  const pptx = new PptxGenJS();
+  pptx.layout = "LAYOUT_WIDE";
+  pptx.author = "DocStudio";
+  pptx.title = title;
+
+  // Title slide
+  const ts = pptx.addSlide();
+  ts.background = { color: "1a1a2e" };
+  ts.addText(title, {
+    x: 0.5, y: 2.0, w: "90%", h: 1.5, fontSize: 44, color: "FFFFFF", bold: true, align: "center",
+    fontFace: "Microsoft YaHei",
+  });
+  ts.addText(new Date().toLocaleDateString("zh-CN"), {
+    x: 0.5, y: 3.8, w: "90%", h: 0.5, fontSize: 18, color: "CCCCCC", align: "center",
+    fontFace: "Microsoft YaHei",
+  });
+
+  for (const section of sections) {
+    const html = buildSlideHtml(section);
+    const chartSpecs = section.chartSpecs || [];
+
+    // 渲染 HTML → 提取坐标
+    const { page, context } = await newPage();
+    await page.setContent(html, { waitUntil: "networkidle" });
+    const elements = await extractSlideElements(page);
+    await context.close();
+
+    const slide = pptx.addSlide();
+
+    // 按 y 坐标排序渲染（从上到下）
+    elements.sort((a, b) => a.y - b.y || a.x - b.x);
+
+    for (const el of elements) {
+      try {
+        if (el.type === "text") {
+          // 颜色转换：rgb(r,g,b) → hex, 去掉 #
+          let colorHex = (el.color || "#333333").replace("#", "");
+          const rgbMatch = colorHex.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+          if (rgbMatch) {
+            colorHex = [parseInt(rgbMatch[1]!), parseInt(rgbMatch[2]!), parseInt(rgbMatch[3]!)]
+              .map(v => v.toString(16).padStart(2, "0").toUpperCase()).join("");
+          }
+          slide.addText(el.text || "", {
+            x: el.x, y: el.y, w: el.w, h: el.h,
+            fontSize: Math.round(el.fontSize || 14),
+            bold: el.bold,
+            color: colorHex,
+            fontFace: "Microsoft YaHei",
+            valign: "top",
+            lineSpacingMultiple: 1.1,
+          });
+        } else if (el.type === "table" && el.tableData) {
+          const colCount = Math.max(...el.tableData.map(r => r.length));
+          const rows = el.tableData.map((row, ri) =>
+            row.map(cell => ({
+              text: cell || "",
+              options: ri === 0
+                ? { fontSize: 9, bold: true, color: "FFFFFF", fill: { color: "16213E" }, align: "center" as const, valign: "middle" as const }
+                : { fontSize: 8, color: "333333", fill: { color: "F8F9FA" }, valign: "middle" as const },
+            }))
+          );
+          slide.addTable(rows, {
+            x: el.x, y: el.y, w: el.w,
+            border: { type: "solid", pt: 0.5, color: "D1D5DB" },
+            fontFace: "Microsoft YaHei", autoPage: false,
+          });
+        } else if (el.type === "chart" && el.chartIndex !== undefined) {
+          const chartSpec = chartSpecs[el.chartIndex];
+          if (chartSpec) {
+            renderChartOnSlide(slide, pptx, chartSpec, el.x, el.y, el.w, el.h);
+          }
+        }
+      } catch (renderErr) {
+        logger.warn(`[DocExporter] HTML 方案渲染失败 (${el.type}): ${renderErr}`);
+      }
+    }
+  }
+
+  // Citations slide
+  if (citations && citations.length > 0) {
+    const cs = pptx.addSlide();
+    cs.addText("参考来源", { x: 0.5, y: 0.3, w: "90%", h: 0.8, fontSize: 28, color: "1a1a2e", bold: true, fontFace: "Microsoft YaHei" });
+    cs.addShape(pptx.ShapeType.rect, { x: 0.5, y: 1.1, w: 9.0, h: 0.05, fill: { color: "16213E" } });
+    cs.addText(citations.map(c => `[${c.index}] ${c.title}${c.url ? " " + c.url : ""}`).join("\n"), {
+      x: 0.5, y: 1.4, w: "90%", h: 4.5, fontSize: 14, color: "333333", fontFace: "Microsoft YaHei", valign: "top", lineSpacingMultiple: 1.5,
+    });
+  }
+
+  const buf = await pptx.write({ outputType: "arraybuffer" }) as ArrayBuffer;
+  return Buffer.from(buf);
+}
+
+// ── PPTX Python 回退 ──────────────────────────────────
+
+/** 用 python-pptx 生成 PPTX（替代 pptxgenjs 的 COLUMN chart bug） */
+async function generatePPTXWithPython(
+  title: string,
+  sections: ExportSection[],
+  citations?: CitationItem[],
+): Promise<Buffer> {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "iwrite-pptx-"));
+  const inputPath = path.join(tmpDir, "input.json");
+  const outputPath = path.join(tmpDir, "output.pptx");
+  const scriptPath = path.join(
+    path.dirname(new URL(import.meta.url).pathname),
+    "..", "scripts", "pptx_generator.py",
+  );
+
+  try {
+    // Write input JSON
+    const input = {
+      title,
+      sections: sections.map(s => ({
+        title: s.title,
+        content: s.content,
+        tables: s.tables,
+        chartSpecs: s.chartSpecs,
+      })),
+      citations: citations || [],
+    };
+    fs.writeFileSync(inputPath, JSON.stringify(input, null, 2), "utf-8");
+
+    await execFileAsync("python3", [scriptPath, inputPath, outputPath], 120_000);
+
+    if (!fs.existsSync(outputPath)) {
+      throw new Error("Python 脚本执行完成但未生成 output.pptx");
+    }
+
+    const buffer = fs.readFileSync(outputPath);
+    logger.info(`[DocExporter] Python PPTX 生成成功: ${(buffer.length / 1024).toFixed(1)} KB`);
+    return buffer;
+  } finally {
+    // Cleanup
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
 // ── 统一导出接口 ──────────────────────────────────────
 
 export type ExportFormat = "docx" | "pptx" | "xlsx" | "eml";
@@ -643,12 +1336,22 @@ export async function exportDocument(
         contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         extension: ".docx",
       };
-    case "pptx":
-      return {
-        buffer: await generatePowerPoint(title, sections, citations),
-        contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        extension: ".pptx",
-      };
+    case "pptx": {
+      // 三层回退：HTML → layout engine → legacy
+      try {
+        const buffer = await generatePowerPointFromHtml(title, sections, citations);
+        return { buffer, contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", extension: ".pptx" };
+      } catch (err1) {
+        logger.warn(`[DocExporter] HTML 方案失败，回退 layout engine: ${err1}`);
+        try {
+          const buffer = await generatePowerPointFromLayout(title, sections, citations);
+          return { buffer, contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", extension: ".pptx" };
+        } catch (err2) {
+          logger.warn(`[DocExporter] Layout engine 也失败，回退 legacy: ${err2}`);
+          return { buffer: await generatePowerPoint(title, sections, citations), contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", extension: ".pptx" };
+        }
+      }
+    }
     case "xlsx": {
       // ── 三层自适应分流 ──
       // Tier 1: LLM Python 脚本 → python3 执行

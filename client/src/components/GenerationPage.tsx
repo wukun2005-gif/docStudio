@@ -413,7 +413,13 @@ export default function GenerationPage() {
           updateLastRunId(finalData.runId);
         }
         if (finalData.title) {
-          updateTitle(finalData.title);
+          const autoTitle = currentCase?.userRequest?.slice(0, 50);
+          const isAutoTitle = !currentCase?.title
+            || currentCase.title === "新文档"
+            || currentCase.title === autoTitle;
+          if (isAutoTitle) {
+            updateTitle(finalData.title);
+          }
         }
         setDocumentStyle(finalData.documentStyle);
 

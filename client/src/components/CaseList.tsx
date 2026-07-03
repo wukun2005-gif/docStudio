@@ -91,7 +91,7 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
 
   function handleRenameConfirm(id: string) {
     if (editTitle.trim()) {
-      useCaseStore.getState().updateTitle(editTitle.trim());
+      useCaseStore.getState().updateTitle(editTitle.trim(), id);
     }
     setEditingId(null);
   }

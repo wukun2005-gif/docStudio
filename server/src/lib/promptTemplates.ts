@@ -40,12 +40,14 @@ const BUILTIN_STYLES: StyleTemplate[] = [
   {
     id: "presentation",
     name: "演示文稿",
-    description: "PPT 幻灯片风格，要点列表为主",
+    description: "PPT 幻灯片风格，结构化信息呈现",
     promptFragment: `这是一份演示文稿。请按 PPT 格式输出：
 - 每个章节对应一页幻灯片
-- 用要点列表（bullet points）呈现，每页 3-5 个要点
-- 每个要点简洁有力，不超过 20 字
-- 可以在页末加备注说明`,
+- 用子标题(h3)区分信息点，每个信息点按"说明文字 → 数据表格 → 图表"结构组织
+- 说明文字简洁有力，2-3句话概括核心结论
+- 数据必须用 markdown 表格呈现（| 列1 | 列2 | ... |），不要只写文字描述
+- 需要可视化对比的数据，用 /chart 代码块提供图表规格（格式见输出格式要求）
+- 信息点之间用空行分隔，保持幻灯片可读性`,
     isBuiltin: true,
   },
   {
@@ -116,10 +118,15 @@ const BUILTIN_FORMATS: FormatTemplate[] = [
     name: "PPT 演示",
     constraints: `输出格式要求（PPT 演示文稿）：
 - 每个章节是一个独立的幻灯片
-- 使用要点列表，每页 3-5 个要点
-- 每个要点简洁有力，核心信息优先
-- 可以使用 markdown 的列表语法
-- 避免大段文字`,
+- 用 h3 标记每个信息点的标题
+- 数据用 markdown 表格格式（| 列1 | 列2 | ... |），表头行和数据行之间用 |---| 分隔
+- 需要图表可视化时，在 /chart 代码块中附 JSON 数据（每个信息点最多一个图表）：
+/chart
+[{"type": "column", "title": "图表标题", "categories": ["类别1", "类别2"], "series": [{"name": "系列名", "values": [10, 20]}]}]
+/chart
+- chart type 支持: bar / column / pie / doughnut / line / scatter
+- 文字简洁但信息完整，不要用空洞的 bullet points 代替具体数据
+- 表格和图表基于参考信息中的真实数据，不编造`,
   },
   {
     id: "excel",

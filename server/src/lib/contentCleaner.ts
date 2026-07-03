@@ -281,6 +281,22 @@ function markdownToHtml(text: string): string {
       continue;
     }
 
+    // Trailing table segment: LLM sometimes appends table rows to paragraph text
+    // e.g. "这是一段说明文字。| 列1 | 列2 | 列3 |"
+    // Split the line into paragraph text + table row, so the table header isn't lost
+    const trailingTableMatch = line.match(/^(.+?[。！？.!；;])\s*(\|.+\|)$/);
+    if (trailingTableMatch) {
+      const paraText = trailingTableMatch[1].trim();
+      const tableRow = trailingTableMatch[2].trim();
+      flushTable();
+      if (inList) { htmlLines.push("</ul>"); inList = false; }
+      if (paraText) {
+        htmlLines.push(`<p>${inlineMarkdown(paraText)}</p>`);
+      }
+      tableBuffer.push(tableRow);
+      continue;
+    }
+
     // 无序列表 (- 或 *)
     if (/^\s*[-*]\s+/.test(line)) {
       flushTable();

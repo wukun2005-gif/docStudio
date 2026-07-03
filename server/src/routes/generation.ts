@@ -675,6 +675,30 @@ function parseHtmlSections(html: string, title: string): ExportSection[] {
     const { cleanedContent, pythonScript, chartSpecs } = extractScriptTags(rawContent);
     rawContent = cleanedContent;
 
+    // ── 提取 HTML 表格（在去标签之前提取，避免丢失结构） ──
+    const extractedTables: Array<string[][]> = [];
+    const tableRegex = /<table\b[^>]*>([\s\S]*?)<\/table\b[^>]*>/gi;
+    let tableMatch;
+    while ((tableMatch = tableRegex.exec(rawContent)) !== null) {
+      const tableHtml = tableMatch[1];
+      const rows: string[][] = [];
+      const trRegex = /<tr\b[^>]*>([\s\S]*?)<\/tr\b[^>]*>/gi;
+      let trMatch;
+      while ((trMatch = trRegex.exec(tableHtml)) !== null) {
+        const rowHtml = trMatch[1];
+        const cells: string[] = [];
+        const cellRegex = /<t[hd]\b[^>]*>([\s\S]*?)<\/t[hd]\b[^>]*>/gi;
+        let cellMatch;
+        while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
+          cells.push(cellMatch[1].replace(/<[^>]+>/g, "").trim());
+        }
+        if (cells.length > 0) rows.push(cells);
+      }
+      if (rows.length > 0) extractedTables.push(rows);
+    }
+    // 从 rawContent 中移除表格，避免干扰后续 <p> 匹配
+    rawContent = rawContent.replace(tableRegex, "");
+
     // ── 子标题检测：在去 HTML 标签之前，按 <p> 边界分段 ──
     // 将 section 内容按 <p>...</p> 或 <p>...</p（broken closing）分段落
     const paraRegex = /<p\b[^>]*>([\s\S]*?)<\/p\b[^>]*>/gi;
@@ -683,12 +707,18 @@ function parseHtmlSections(html: string, title: string): ExportSection[] {
     let prevEnd = 0;
 
     while ((paraMatch = paraRegex.exec(rawContent)) !== null) {
-      // 捕获 </p> 和 <p> 之间的间隙文本（Post-filter 句子删除可能导致裸文本节点）
+      // 捕获 </p> 和 <p> 之间的间隙文本（Post-filter 句子删除可能导致裸文本节点，以及 <h3> 等非 <p> 标签）
       const gapRaw = rawContent.slice(prevEnd, paraMatch.index);
       const gapText = gapRaw.replace(/<[^>]+>/g, "").trim();
       if (gapText) {
         const gapLines = gapText.split("\n").filter((l) => l.trim());
-        for (const line of gapLines) processedLines.push(line.trim());
+        for (const line of gapLines) {
+          if (isSubHeadingLine(line)) {
+            processedLines.push(`${SUB_MARKER}${line.trim()}`);
+          } else {
+            processedLines.push(line.trim());
+          }
+        }
       }
 
       const paraText = paraMatch[1].replace(/<[^>]+>/g, "").trim();
@@ -702,12 +732,16 @@ function parseHtmlSections(html: string, title: string): ExportSection[] {
       prevEnd = paraMatch.index + paraMatch[0].length;
     }
 
-    // 处理最后一个 <p> 之后未被包裹的残留文本（如 <ul>/<li>）
+    // 处理最后一个 <p> 之后未被包裹的残留文本（如 <ul>/<li>/<h3>）
     const remaining = rawContent.slice(prevEnd).replace(/<[^>]+>/g, "").trim();
     if (remaining) {
       const lines = remaining.split("\n").filter((l) => l.trim());
       for (const line of lines) {
-        processedLines.push(line.trim());
+        if (isSubHeadingLine(line)) {
+          processedLines.push(`${SUB_MARKER}${line.trim()}`);
+        } else {
+          processedLines.push(line.trim());
+        }
       }
     }
 
@@ -716,6 +750,7 @@ function parseHtmlSections(html: string, title: string): ExportSection[] {
         title: sectionTitle, content: processedLines.join("\n"), level: 1,
         ...(pythonScript && { pythonScript }),
         ...(chartSpecs && chartSpecs.length > 0 && { chartSpecs }),
+        ...(extractedTables.length > 0 && { tables: extractedTables }),
       });
     } else {
       // 回退：整体去 HTML 标签
@@ -725,6 +760,7 @@ function parseHtmlSections(html: string, title: string): ExportSection[] {
           title: sectionTitle, content: text, level: 1,
           ...(pythonScript && { pythonScript }),
           ...(chartSpecs && chartSpecs.length > 0 && { chartSpecs }),
+          ...(extractedTables.length > 0 && { tables: extractedTables }),
         });
       }
     }
@@ -745,6 +781,104 @@ function parseHtmlSections(html: string, title: string): ExportSection[] {
         ...(pythonScript && { pythonScript }),
         ...(chartSpecs && chartSpecs.length > 0 && { chartSpecs }),
       });
+    }
+  }
+
+  return sections;
+}
+
+/**
+ * 从 HTML 内容中解析章节（PPT 专用）。
+ * 与 parseHtmlSections 不同：保留内层 HTML 给 slideLayoutEngine 解析。
+ * 仅移除 script 标签和 SVG 图表，保留 <h3>/<p>/<ul>/<table> 等结构标签。
+ */
+export function parseHtmlSectionsForPPT(html: string, title: string): ExportSection[] {
+  const sections: ExportSection[] = [];
+
+  // citation 转纯文本 [N]
+  let processedHtml = html
+    .replace(/<sup>\s*<(?:a|span)[^>]*?>\[(\d+)\]<\/(?:a|span)>\s*<\/sup>/gi, '[$1]')
+    .replace(/<sup[^>]*?>\s*\[(\d+)\]\s*<\/sup>/gi, '[$1]')
+    .replace(/<a[^>]*?>\s*\[(\d+)\]\s*<\/a>/gi, '[$1]');
+
+  // 按 <section> 分割
+  const sectionRegex = /<section>\s*<h2>(.*?)<\/h2>([\s\S]*?)<\/section>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = sectionRegex.exec(processedHtml)) !== null) {
+    const sectionTitle = match[1]!.replace(/<[^>]+>/g, "").trim();
+    let innerHtml = match[2]!;
+
+    // 提取 chart spec
+    let chartSpecs: ChartSpec[] | undefined;
+    const chartRegex = /<script\s+type="application\/json"\s+class="chart-spec">([\s\S]*?)<\/script>/gi;
+    let cm: RegExpExecArray | null;
+    while ((cm = chartRegex.exec(innerHtml)) !== null) {
+      try {
+        const raw = cm[1]!.trim();
+        const rawSpecs: string[] = JSON.parse(raw);
+        const parsed: ChartSpec[] = [];
+        for (const s of rawSpecs) {
+          try {
+            const obj = JSON.parse(s);
+            const items = Array.isArray(obj) ? obj : [obj];
+            for (const item of items) {
+              if (item && item.type && item.categories && item.series) {
+                parsed.push(item as ChartSpec);
+              }
+            }
+          } catch { /* skip */ }
+        }
+        if (parsed.length > 0) chartSpecs = parsed;
+      } catch { /* skip */ }
+    }
+    innerHtml = innerHtml.replace(chartRegex, "");
+
+    // 移除 SVG 图表
+    innerHtml = innerHtml.replace(/<div class="charts">[\s\S]*?<\/div>/gi, "");
+    // 移除 xlsx-script
+    innerHtml = innerHtml.replace(/<script\s+type="application\/x-python"[\s\S]*?<\/script>/gi, "");
+
+    // 提取 HTML 表格（与 parseHtmlSections 逻辑相同）
+    const extractedTables: Array<string[][]> = [];
+    const tableRegex = /<table\b[^>]*>([\s\S]*?)<\/table\b[^>]*>/gi;
+    let tm: RegExpExecArray | null;
+    while ((tm = tableRegex.exec(innerHtml)) !== null) {
+      const rows: string[][] = [];
+      const trRegex = /<tr\b[^>]*>([\s\S]*?)<\/tr\b[^>]*>/gi;
+      let trm: RegExpExecArray | null;
+      while ((trm = trRegex.exec(tm[1]!)) !== null) {
+        const cells: string[] = [];
+        const cellRegex = /<t[hd]\b[^>]*>([\s\S]*?)<\/t[hd]\b[^>]*>/gi;
+        let cellm: RegExpExecArray | null;
+        while ((cellm = cellRegex.exec(trm[1]!)) !== null) {
+          cells.push(cellm[1]!.replace(/<[^>]+>/g, "").trim());
+        }
+        if (cells.length > 0) rows.push(cells);
+      }
+      if (rows.length > 0) extractedTables.push(rows);
+    }
+
+    // 保留内层 HTML（去除 script/svg/footer 但保留结构和表格）
+    let content = innerHtml
+      .replace(/<footer[\s\S]*?<\/footer>/gi, "")
+      .trim();
+
+    if (content) {
+      sections.push({
+        title: sectionTitle,
+        content,
+        level: 1,
+        ...(chartSpecs && chartSpecs.length > 0 && { chartSpecs }),
+        ...(extractedTables.length > 0 && { tables: extractedTables }),
+      });
+    }
+  }
+
+  // 回退：没有 <section> 标签
+  if (sections.length === 0) {
+    const text = processedHtml.replace(/<footer[\s\S]*?<\/footer>/gi, "").trim();
+    if (text) {
+      sections.push({ title, content: text, level: 1 });
     }
   }
 
@@ -808,9 +942,10 @@ generationRouter.get("/:id/export/:format", async (req, res) => {
       return;
     }
 
-    // 从生成的 HTML 内容中解析章节（而非使用 outline description）
+    // 从生成的 HTML 内容中解析章节（PPT 格式保留 HTML 结构给 layout engine）
+    const isPpt = format === "pptx";
     const sections = run.content
-      ? parseHtmlSections(run.content, run.title)
+      ? (isPpt ? parseHtmlSectionsForPPT(run.content, run.title) : parseHtmlSections(run.content, run.title))
       : [];
 
     // 解析参考来源列表

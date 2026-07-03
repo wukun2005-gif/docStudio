@@ -587,6 +587,8 @@ async function generateSection(
   webCitations: Array<{ title: string; url: string; snippet: string; score?: number }>;
   groundingScore: number;
   citationLinks: CitationLink[];
+  pythonScript?: string;
+  chartSpecsRaw?: string[];
 }> {
   const sources = await retrieveForSection(section.title, section.description, excludeChunkIds);
   // 照搬 patentExaminator：显示来源标签和相似度分数，帮助 LLM 判断引用权重

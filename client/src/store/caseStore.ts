@@ -33,7 +33,7 @@ export interface CaseStore {
   setCurrentCase: (c: DocumentCase | null) => void;
 
   // Case 字段更新（write-through）
-  updateTitle: (title: string) => void;
+  updateTitle: (title: string, id?: string) => void;
   updateUserRequest: (userRequest: string) => void;
   updateOutline: (outline: OutlineSection[]) => void;
   updateGeneratedContent: (content: string, trustScore?: number) => void;
@@ -126,11 +126,17 @@ export const useCaseStore = create<CaseStore>((set, get) => ({
     set({ currentCase: c });
   },
 
-  updateTitle: (title) => {
-    const c = get().currentCase;
+  updateTitle: (title, id) => {
+    const c = id
+      ? get().cases.find((x) => x.id === id) ?? get().trashedCases.find((x) => x.id === id)
+      : get().currentCase;
     if (!c) return;
     const updated = { ...c, title };
-    set({ currentCase: updated, cases: get().cases.map((x) => x.id === c.id ? updated : x) });
+    set({
+      currentCase: get().currentCase?.id === c.id ? updated : get().currentCase,
+      cases: get().cases.map((x) => x.id === c.id ? updated : x),
+      trashedCases: get().trashedCases.map((x) => x.id === c.id ? updated : x),
+    });
     persistCase(updated);
   },
 
