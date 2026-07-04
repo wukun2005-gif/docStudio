@@ -707,8 +707,7 @@ export default function DocPreview({
             </div>
           )
             ) : sanitizedContent ? (
-          <>
-            <div className="p-6" ref={containerRef}>
+          <div className="p-6" ref={containerRef}>
             {showHeatmap && (
               <div className="fixed bottom-4 right-4 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-20 text-xs">
                 <div className="font-medium mb-1.5 text-gray-700">置信度热力图</div>
@@ -894,13 +893,14 @@ export default function DocPreview({
                 </div>
               </div>
             )}
-          </div>
 
           {/* 🔍 AI 文档自审 / 压力测试（nf3） */}
-          <div className="mt-6">
-            <DocumentAudit />
+          {sections.length > 0 && (
+            <div className="mt-6">
+              <DocumentAudit />
+            </div>
+          )}
           </div>
-          </>
 
         ) : (
           <div className="flex items-center justify-center h-full text-gray-400">
