@@ -265,8 +265,9 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
         await moveToCenter("i-Write 提供可量化信任指标", 2000);
         await moveToCenter("有据可查度 0.89 · 内容相关度 0.92\n内容完整度 0.87 · 无冲突检测", 3500);
 
-        // ── 60-70s: 置信度热力图（nf2 占位） ─────
-        await moveToCenter("置信度热力图 — 绿/黄/红分层显示每个段落的信任程度", 3000);
+        // ── 60-70s: 置信度热力图（nf2） ────────────
+        await moveToCenter("置信度热力图 — 绿/黄/红分层显示每个段落的信任程度", 2000);
+        await moveAndClick("demo-heatmap-toggle", "点击热力图开关 → 段落边缘着色", 2000);
         await moveToCenter("绿色 = 多源交叉验证，黄色 = 单源支撑，红色 = AI 推断", 3000);
 
         // ── 70-80s: AI 自审（nf3 占位） ──────────

@@ -76,6 +76,7 @@ export default function DocPreview({
   const [dragOverSection, setDragOverSection] = useState<number | null>(null);
   const [pendingDrop, setPendingDrop] = useState<PendingDrop | null>(null);
   const [showMetrics, setShowMetrics] = useState(false);
+  const [showHeatmap, setShowHeatmap] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editedContent, setEditedContent] = useState("");
   const [saving, setSaving] = useState(false);
@@ -101,6 +102,58 @@ export default function DocPreview({
       setShowMetrics(true);
     }
   }, [evaluationMetrics]);
+
+  // ── 置信度热力图（nf2）──
+  const heatmapColors = useMemo(() => {
+    if (!showHeatmap || sections.length === 0) return {};
+    const colors: Record<number, { color: string; label: string }> = {};
+    let globalIdx = 0;
+    for (const s of sections) {
+      const uniqueSources = new Set(s.sources.map((src) => src.sourceId).filter(Boolean));
+      const sourceCount = uniqueSources.size;
+      const gs = s.groundingScore;
+      let color: string;
+      let label: string;
+      if (gs < 0.5) {
+        color = "rgba(239,68,68,0.25)";
+        label = "AI 推断";
+      } else if (sourceCount >= 2) {
+        color = "rgba(34,197,94,0.25)";
+        label = "多源验证";
+      } else {
+        color = "rgba(234,179,8,0.25)";
+        label = "单源支撑";
+      }
+      const paraCount = Math.max((s.content.match(/<(p|h[1-6]|li)\b/gi) || []).length, 1);
+      for (let i = 0; i < paraCount; i++) {
+        colors[globalIdx + 1] = { color, label };
+        globalIdx++;
+      }
+    }
+    return colors;
+  }, [showHeatmap, sections]);
+
+  // 热力图 DOM 注入
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const allParas = container.querySelectorAll<HTMLElement>("[id^='para-']");
+    allParas.forEach((el) => {
+      const match = el.id.match(/^para-(\d+)$/);
+      if (!match) return;
+      const idx = parseInt(match[1], 10);
+      const hc = heatmapColors[idx];
+      if (hc) {
+        el.style.boxShadow = `inset 4px 0 0 ${hc.color}`;
+        el.style.paddingLeft = "8px";
+        el.style.borderRadius = "0 4px 4px 0";
+      } else {
+        el.style.boxShadow = "";
+        el.style.paddingLeft = "";
+        el.style.borderRadius = "";
+      }
+    });
+  }, [heatmapColors, sanitizedContent]);
 
   // DOMPurify 净化 + 段落标记
   const sanitizedContent = useMemo(() => {
@@ -409,6 +462,19 @@ export default function DocPreview({
               <span className="text-[10px]">{showMetrics ? "▲" : "▼"}</span>
             </button>
           )}
+          {sections.length > 0 && (
+            <button
+              id="demo-heatmap-toggle"
+              onClick={() => setShowHeatmap(!showHeatmap)}
+              className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                showHeatmap
+                  ? "bg-purple-100 text-purple-700 border border-purple-300"
+                  : "bg-white text-gray-500 border border-gray-300 hover:bg-gray-50"
+              }`}
+            >
+              🔥 热力图
+            </button>
+          )}
           </div>
         </div>
         {content !== null && showMetrics && (
@@ -634,6 +700,23 @@ export default function DocPreview({
           )
         ) : sanitizedContent ? (
           <div className="p-6" ref={containerRef}>
+            {showHeatmap && (
+              <div className="fixed bottom-4 right-4 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-20 text-xs">
+                <div className="font-medium mb-1.5 text-gray-700">置信度热力图</div>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="w-3 h-3 rounded" style={{ background: "rgba(34,197,94,0.6)" }} />
+                  <span className="text-gray-600">多源交叉验证（≥2 源）</span>
+                </div>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="w-3 h-3 rounded" style={{ background: "rgba(234,179,8,0.6)" }} />
+                  <span className="text-gray-600">单源支撑（1 源）</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-3 h-3 rounded" style={{ background: "rgba(239,68,68,0.6)" }} />
+                  <span className="text-gray-600">AI 推断（无直接来源）</span>
+                </div>
+              </div>
+            )}
             {/* 编辑模式：textarea */}
             {editing ? (
               <textarea
