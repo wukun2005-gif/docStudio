@@ -13,6 +13,37 @@ import DOMPurify from "dompurify";
 import DocumentAudit from "./DocumentAudit";
 import type { OutlineSection } from "../../../shared/src/types/generation.js";
 
+/** 热力图颜色计算（nf2）— 基于 section sources 和 groundingScore */
+export function computeHeatmapColors(
+  sections: SectionData[],
+): Record<number, { color: string; label: string }> {
+  const colors: Record<number, { color: string; label: string }> = {};
+  let globalIdx = 0;
+  for (const s of sections) {
+    const uniqueSources = new Set(s.sources.map((src) => src.sourceId).filter(Boolean));
+    const sourceCount = uniqueSources.size;
+    const gs = s.groundingScore;
+    let color: string;
+    let label: string;
+    if (gs < 0.5) {
+      color = "rgba(239,68,68,0.25)";
+      label = "AI 推断";
+    } else if (sourceCount >= 2) {
+      color = "rgba(34,197,94,0.25)";
+      label = "多源验证";
+    } else {
+      color = "rgba(234,179,8,0.25)";
+      label = "单源支撑";
+    }
+    const paraCount = Math.max((s.content.match(/<(p|h[1-6]|li)\b/gi) || []).length, 1);
+    for (let i = 0; i < paraCount; i++) {
+      colors[globalIdx + 1] = { color, label };
+      globalIdx++;
+    }
+  }
+  return colors;
+}
+
 export interface SectionData {
   title: string;
   content: string;
@@ -105,33 +136,9 @@ export default function DocPreview({
   }, [evaluationMetrics]);
 
   // ── 置信度热力图（nf2）──
+
   const heatmapColors = useMemo(() => {
-    if (!showHeatmap || sections.length === 0) return {};
-    const colors: Record<number, { color: string; label: string }> = {};
-    let globalIdx = 0;
-    for (const s of sections) {
-      const uniqueSources = new Set(s.sources.map((src) => src.sourceId).filter(Boolean));
-      const sourceCount = uniqueSources.size;
-      const gs = s.groundingScore;
-      let color: string;
-      let label: string;
-      if (gs < 0.5) {
-        color = "rgba(239,68,68,0.25)";
-        label = "AI 推断";
-      } else if (sourceCount >= 2) {
-        color = "rgba(34,197,94,0.25)";
-        label = "多源验证";
-      } else {
-        color = "rgba(234,179,8,0.25)";
-        label = "单源支撑";
-      }
-      const paraCount = Math.max((s.content.match(/<(p|h[1-6]|li)\b/gi) || []).length, 1);
-      for (let i = 0; i < paraCount; i++) {
-        colors[globalIdx + 1] = { color, label };
-        globalIdx++;
-      }
-    }
-    return colors;
+    return computeHeatmapColors(showHeatmap ? sections : []);
   }, [showHeatmap, sections]);
 
   // 热力图 DOM 注入
@@ -699,8 +706,9 @@ export default function DocPreview({
               </div>
             </div>
           )
-        ) : sanitizedContent ? (
-          <div className="p-6" ref={containerRef}>
+            ) : sanitizedContent ? (
+          <>
+            <div className="p-6" ref={containerRef}>
             {showHeatmap && (
               <div className="fixed bottom-4 right-4 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-20 text-xs">
                 <div className="font-medium mb-1.5 text-gray-700">置信度热力图</div>
@@ -892,6 +900,7 @@ export default function DocPreview({
           <div className="mt-6">
             <DocumentAudit />
           </div>
+          </>
 
         ) : (
           <div className="flex items-center justify-center h-full text-gray-400">
