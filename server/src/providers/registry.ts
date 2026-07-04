@@ -26,6 +26,7 @@ import {
   resolveMaxTokens,
 } from "./openai.js";
 import { PRESET_MODEL_PROVIDERS } from "../../../shared/src/types/provider.js";
+import { DemoProvider } from "./demo.js";
 import { logger } from "../lib/logger.js";
 
 const MAX_RETRIES = 2;
@@ -274,6 +275,8 @@ export class ProviderRegistry {
     for (const preset of PRESET_MODEL_PROVIDERS) {
       this.register(new GenericProvider(preset.id, preset.baseUrl));
     }
+    // 注册 DemoProvider（nf1: 一键 Demo Mock Mode）
+    this.register(new DemoProvider());
   }
 
   register(adapter: ProviderAdapter): void {

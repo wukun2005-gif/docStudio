@@ -401,12 +401,14 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
               }
             }}
             placeholder="输入你的需求... (Shift+Enter 换行)"
+            id="demo-chat-input"
             className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none overflow-y-auto"
             style={{ minHeight: "40px", maxHeight: "200px" }}
             rows={1}
             disabled={loading}
           />
           <button
+            id="demo-chat-send"
             onClick={handleSend}
             disabled={loading || !input.trim()}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm transition-colors shrink-0"

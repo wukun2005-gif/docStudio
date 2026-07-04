@@ -9,6 +9,11 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+@keyframes demo-click-ripple {
+  0% { transform: translate(-50%, -50%) scale(0.5); opacity: 1; }
+  100% { transform: translate(-50%, -50%) scale(2); opacity: 0; }
+}
+
 /* 允许所有 UI 文字被选择（拖拽手柄等例外在下方覆盖） */
 *, *::before, *::after {
   -webkit-user-select: text;

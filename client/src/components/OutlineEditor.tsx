@@ -54,6 +54,7 @@ export default function OutlineEditor({ outline, onChange, onGenerate }: Outline
             + 添加章节
           </button>
           <button
+            id="demo-generate-btn"
             onClick={onGenerate}
             className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
           >

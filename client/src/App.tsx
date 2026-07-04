@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Settings from "./components/Settings";
 import KnowledgePanel from "./components/KnowledgePanel";
 import GenerationPage from "./components/GenerationPage";
 import CaseList from "./components/CaseList";
 import ChatBox from "./components/ChatBox";
+import DemoOverlay from "./components/DemoOverlay";
 import { useCaseStore } from "./store/caseStore.js";
 
 type Page = "home" | "generate" | "knowledge" | "settings";
@@ -19,9 +20,23 @@ export default function App() {
   const [page, setPage] = useState<Page>("home");
   const [leftCollapsed, setLeftCollapsed] = useState(true);
   const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [isDemoPlaying, setIsDemoPlaying] = useState(false);
   const currentCase = useCaseStore((s) => s.currentCase);
 
   const showSidePanels = page === "generate" || page === "home";
+
+  const handleStopDemo = useCallback(() => setIsDemoPlaying(false), []);
+
+  // 桥接 FakeCursor 自定义事件 → React state
+  useEffect(() => {
+    if (!isDemoPlaying) return;
+    const onNav = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { page?: Page };
+      if (detail.page) setPage(detail.page);
+    };
+    window.addEventListener("demo-nav", onNav);
+    return () => window.removeEventListener("demo-nav", onNav);
+  }, [isDemoPlaying]);
 
   return (
     <div className="h-screen bg-gray-50 flex flex-col">
@@ -63,15 +78,27 @@ export default function App() {
             ))}
           </div>
           {showSidePanels && (
-            <button
-              onClick={() => setRightCollapsed(!rightCollapsed)}
-              className="p-1.5 rounded hover:bg-gray-100 text-gray-500"
-              title={rightCollapsed ? "展开对话面板" : "收起对话面板"}
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-              </svg>
-            </button>
+            <>
+              {!isDemoPlaying && (
+                <button
+                  id="btn-demo-start"
+                  title="一键演示"
+                  onClick={() => setIsDemoPlaying(true)}
+                  className="px-2.5 py-1 text-xs rounded border border-blue-300 bg-blue-50 hover:bg-blue-100 text-blue-600 transition-colors font-medium"
+                >
+                  ▶
+                </button>
+              )}
+              <button
+                onClick={() => setRightCollapsed(!rightCollapsed)}
+                className="p-1.5 rounded hover:bg-gray-100 text-gray-500"
+                title={rightCollapsed ? "展开对话面板" : "收起对话面板"}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+              </button>
+            </>
           )}
         </div>
       </nav>
@@ -111,6 +138,8 @@ export default function App() {
           </div>
         )}
       </div>
+
+      <DemoOverlay isPlaying={isDemoPlaying} onStop={handleStopDemo} />
     </div>
   );
 }
