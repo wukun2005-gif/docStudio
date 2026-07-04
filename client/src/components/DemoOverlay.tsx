@@ -270,9 +270,19 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
         await moveAndClick("demo-heatmap-toggle", "点击热力图开关 → 段落边缘着色", 2000);
         await moveToCenter("绿色 = 多源交叉验证，黄色 = 单源支撑，红色 = AI 推断", 3000);
 
-        // ── 70-80s: AI 自审（nf3 占位） ──────────
-        await moveToCenter("AI 自审 / 压力测试 — AI 主动挑战自己的生成内容", 3000);
-        await moveToCenter("检查逻辑漏洞、未支撑断言、遗漏视角、过时引用", 2500);
+        // ── 70-80s: AI 自审（nf3） ─────────────────
+        await moveToCenter("AI 自审 / 压力测试 — AI 主动挑战自己的生成内容", 2000);
+        const auditPanel = document.getElementById("demo-audit-panel");
+        if (auditPanel) {
+          const rect = auditPanel.getBoundingClientRect();
+          await moveTo(rect.left + rect.width / 2, rect.top + 60,
+            "风险雷达图 + 问题卡片：逻辑漏洞、未支撑断言、遗漏视角",
+          );
+          await wait(2500);
+        }
+        await moveToCenter("5 维度雷达图：Groundedness / Relevance / Completeness / Consistency / Conflict", 2500);
+        await moveAndClick("demo-audit-fix", "点击「一键修正」→ AI 自动修复问题", 2500);
+        await moveToCenter("审查发现 5 个问题：2 高优、2 中优、1 低优", 2500);
 
         // ── 80-88s: 导出 ──────────────────────────
         await moveToCenter("支持导出为 Word / PowerPoint / Excel 格式", 2500);

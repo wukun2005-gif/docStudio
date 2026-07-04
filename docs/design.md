@@ -1205,6 +1205,7 @@ npm run eval:report      # 查看评估报告
 
 | 日期 | 简述 | 影响范围 | 关联 commit |
 |------|------|---------|-------------|
+| 2026-07-04 | nf3: AI 文档自审 / 压力测试 — 风险雷达图（SVG）+ 5 个问题卡片（严重程度/类别/建议）+ 一键修正按钮 + DemoOverlay 集成 | DocumentAudit.tsx, DocPreview.tsx, DemoOverlay.tsx | — |
 | 2026-07-04 | nf2: 置信度热力图 — 文档段落左边缘着色（绿多源/黄单源/红AI推断）+ 浮动图例 + DemoOverlay 集成 | DocPreview.tsx, DemoOverlay.tsx | — |
 | 2026-07-04 | nf1: 一键 Demo — DemoProvider（实现 ProviderAdapter）+ FakeCursor（参考 GraphMe 模式）+ 90s 自动演示脚本 | demo.ts, DemoOverlay.tsx, App.tsx, registry.ts | — |
 | 2026-06-28 | Bug3: 修复生成阶段 SSE spinner 刷新问题 + 新增评估阶段 SSE 流式端点 | DocPreview.tsx, GenerationPage.tsx, generation.ts | — |

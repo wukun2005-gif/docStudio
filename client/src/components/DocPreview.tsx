@@ -10,6 +10,7 @@
  */
 import { useState, useRef, useMemo, useCallback, useEffect } from "react";
 import DOMPurify from "dompurify";
+import DocumentAudit from "./DocumentAudit";
 import type { OutlineSection } from "../../../shared/src/types/generation.js";
 
 export interface SectionData {
@@ -886,6 +887,12 @@ export default function DocPreview({
               </div>
             )}
           </div>
+
+          {/* 🔍 AI 文档自审 / 压力测试（nf3） */}
+          <div className="mt-6">
+            <DocumentAudit />
+          </div>
+
         ) : (
           <div className="flex items-center justify-center h-full text-gray-400">
             <div className="text-center">
