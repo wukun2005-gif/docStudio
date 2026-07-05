@@ -547,9 +547,11 @@ export async function generatePowerPoint(title: string, sections: ExportSection[
         // ── 表格（左侧）──
         if (tableData && tableData.length > 0) {
           try {
-            const colCount = Math.max(...tableData.map(r => r.length));
+            const validRows = tableData.filter((r): r is string[] => Array.isArray(r) && r.length > 0);
+            if (validRows.length === 0) continue;
+            const colCount = Math.max(...validRows.map(r => r.length));
             const tableRows: Array<Array<{ text: string; options: Record<string, unknown> }>> = [];
-            const hdrRow = tableData[0]!;
+            const hdrRow = validRows[0]!;
             const headerCells = hdrRow.map(cell => ({
               text: cell || "",
               options: { fontSize: 8, bold: true, color: "FFFFFF", fill: { color: "16213e" }, align: "center" as const, valign: "middle" as const },
@@ -558,7 +560,7 @@ export async function generatePowerPoint(title: string, sections: ExportSection[
               headerCells.push({ text: "", options: { fontSize: 8, bold: true, color: "FFFFFF", fill: { color: "16213e" }, align: "center" as const, valign: "middle" as const } });
             }
             tableRows.push(headerCells);
-            for (const row of tableData.slice(1)) {
+            for (const row of validRows.slice(1)) {
               const cells = row.map(cell => ({
                 text: cell || "",
                 options: { fontSize: 7, color: "333333", fill: { color: "F8F9FA" }, valign: "middle" as const },
@@ -582,9 +584,11 @@ export async function generatePowerPoint(title: string, sections: ExportSection[
         // ── 图表（右侧）──
         if (chartSpec) {
           try {
+            const validSeries = chartSpec.series.filter((s) => s && Array.isArray(s.values) && s.values.length > 0);
+            if (validSeries.length === 0) { /* skip chart with no valid series */ break; }
             let chartData: Array<{ name: string; labels?: string[]; values: number[] | Array<{ x: number; y: number }> }>;
             if (chartSpec.type === "scatter") {
-              chartData = chartSpec.series.map((s) => {
+              chartData = validSeries.map((s) => {
                 const vals: unknown[] = s.values as unknown[];
                 if (vals.length > 0 && Array.isArray(vals[0])) {
                   const flatY = (vals as unknown[][]).map((v) => Number(v[1]) || 0);
@@ -593,7 +597,7 @@ export async function generatePowerPoint(title: string, sections: ExportSection[
                 return { name: s.name, labels: chartSpec.categories, values: vals as number[] };
               });
             } else {
-              chartData = chartSpec.series.map((s) => ({
+              chartData = validSeries.map((s) => ({
                 name: s.name,
                 labels: chartSpec.categories,
                 values: s.values,
@@ -624,10 +628,12 @@ export async function generatePowerPoint(title: string, sections: ExportSection[
       let currentY = 1.4 + textHeight + 0.1;
       if (hasTables) {
         for (const tableData of section.tables!) {
-          if (tableData.length === 0) continue;
-          const colCount = Math.max(...tableData.map(r => r.length));
+          if (!tableData || tableData.length === 0) continue;
+          const validRows = tableData.filter((r): r is string[] => Array.isArray(r) && r.length > 0);
+          if (validRows.length === 0) continue;
+          const colCount = Math.max(...validRows.map(r => r.length));
           const tableRows: Array<Array<{ text: string; options: Record<string, unknown> }>> = [];
-          const headerCells = tableData[0]!.map(cell => ({
+          const headerCells = validRows[0]!.map(cell => ({
             text: cell || "",
             options: { fontSize: 10, bold: true, color: "FFFFFF", fill: { color: "16213e" }, align: "center" as const, valign: "middle" as const },
           }));
@@ -635,7 +641,7 @@ export async function generatePowerPoint(title: string, sections: ExportSection[
             headerCells.push({ text: "", options: { fontSize: 10, bold: true, color: "FFFFFF", fill: { color: "16213e" }, align: "center" as const, valign: "middle" as const } });
           }
           tableRows.push(headerCells);
-          for (const row of tableData.slice(1)) {
+          for (const row of validRows.slice(1)) {
             const cells = row.map(cell => ({
               text: cell || "",
               options: { fontSize: 9, color: "333333", fill: { color: "F8F9FA" }, valign: "middle" as const },
@@ -662,7 +668,9 @@ export async function generatePowerPoint(title: string, sections: ExportSection[
       if (hasCharts) {
         for (const chartSpec of section.chartSpecs!) {
           try {
-            const chartData = chartSpec.series.map((s) => ({
+            const validSeries = chartSpec.series.filter((s) => s && Array.isArray(s.values) && s.values.length > 0);
+            if (validSeries.length === 0) continue;
+            const chartData = validSeries.map((s) => ({
               name: s.name,
               labels: chartSpec.categories,
               values: s.values,
@@ -704,14 +712,16 @@ export async function generatePowerPoint(title: string, sections: ExportSection[
       fill: { color: "16213e" },
     });
 
-    const citeText = citations.map(c => {
-      const urlPart = c.url ? ` ${c.url}` : "";
-      return `[${c.index}] ${c.title}${urlPart}`;
-    }).join("\n");
-
-    citeSlide.addText(citeText, {
+    const citeRuns = citations.flatMap((c, i) => {
+      const prefix = { text: `[${c.index}] `, options: { fontSize: 14, color: "333333", fontFace: "Microsoft YaHei" } };
+      const titleRun = c.url
+        ? { text: c.title, options: { fontSize: 14, color: "2563EB", fontFace: "Microsoft YaHei", hyperlink: { url: c.url } } }
+        : { text: c.title, options: { fontSize: 14, color: "333333", fontFace: "Microsoft YaHei" } };
+      const newline = i < citations.length - 1 ? { text: "\n", options: { fontSize: 14, fontFace: "Microsoft YaHei" } } : { text: "", options: { fontSize: 14, fontFace: "Microsoft YaHei" } };
+      return [prefix, titleRun, newline];
+    });
+    citeSlide.addText(citeRuns, {
       x: 0.5, y: 1.4, w: "90%", h: 4.5,
-      fontSize: 14, color: "333333",
       fontFace: "Microsoft YaHei",
       valign: "top",
       lineSpacingMultiple: 1.5,
@@ -865,10 +875,13 @@ function renderTableOnSlide(
   tableData: string[][],
   x: number, y: number, w: number, h: number,
 ) {
-  const colCount = Math.max(...tableData.map(r => r.length));
+  if (!tableData || tableData.length === 0) return;
+  const validRows = tableData.filter((r): r is string[] => Array.isArray(r) && r.length > 0);
+  if (validRows.length === 0) return;
+  const colCount = Math.max(...validRows.map(r => r.length));
   const tableRows: Array<Array<{ text: string; options: Record<string, unknown> }>> = [];
   // header
-  const hdrRow = tableData[0]!;
+  const hdrRow = validRows[0]!;
   const headerCells = hdrRow.map(cell => ({
     text: cell || "",
     options: { fontSize: 9, bold: true, color: "FFFFFF", fill: { color: "16213e" }, align: "center" as const, valign: "middle" as const },
@@ -877,7 +890,7 @@ function renderTableOnSlide(
     headerCells.push({ text: "", options: { fontSize: 9, bold: true, color: "FFFFFF", fill: { color: "16213e" }, align: "center" as const, valign: "middle" as const } });
   }
   tableRows.push(headerCells);
-  for (const row of tableData.slice(1)) {
+  for (const row of validRows.slice(1)) {
     const cells = row.map(cell => ({
       text: cell || "",
       options: { fontSize: 8, color: "333333", fill: { color: "F8F9FA" }, valign: "middle" as const },
@@ -917,8 +930,13 @@ function renderChartOnSlide(
   }
 
   let chartData: Array<{ name: string; labels?: string[]; values: number[] }>;
+  const validSeries = chartSpec.series.filter((s) => s && Array.isArray(s.values) && s.values.length > 0);
+  if (validSeries.length === 0) {
+    logger.warn('[DocExporter] 跳过无效 chart（无有效 series）');
+    return;
+  }
   if (chartSpec.type === "scatter") {
-    chartData = chartSpec.series.map((s) => {
+    chartData = validSeries.map((s) => {
       const vals: unknown[] = s.values as unknown[];
       if (vals.length > 0 && Array.isArray(vals[0])) {
         const xs = (vals as unknown[][]).map((v) => String(v[0] ?? ""));
@@ -928,7 +946,7 @@ function renderChartOnSlide(
       return { name: s.name, labels: chartSpec.categories, values: s.values };
     });
   } else {
-    chartData = chartSpec.series.map((s) => ({
+    chartData = validSeries.map((s) => ({
       name: s.name,
       labels: chartSpec.categories,
       values: s.values,
@@ -1140,14 +1158,16 @@ export async function generatePowerPointFromLayout(
       fill: { color: "16213e" },
     });
 
-    const citeText = citations.map(c => {
-      const urlPart = c.url ? ` ${c.url}` : "";
-      return `[${c.index}] ${c.title}${urlPart}`;
-    }).join("\n");
-
-    citeSlide.addText(citeText, {
+    const citeRuns = citations.flatMap((c, i) => {
+      const prefix = { text: `[${c.index}] `, options: { fontSize: 14, color: "333333", fontFace: "Microsoft YaHei" } };
+      const titleRun = c.url
+        ? { text: c.title, options: { fontSize: 14, color: "2563EB", fontFace: "Microsoft YaHei", hyperlink: { url: c.url } } }
+        : { text: c.title, options: { fontSize: 14, color: "333333", fontFace: "Microsoft YaHei" } };
+      const newline = i < citations.length - 1 ? { text: "\n", options: { fontSize: 14, fontFace: "Microsoft YaHei" } } : { text: "", options: { fontSize: 14, fontFace: "Microsoft YaHei" } };
+      return [prefix, titleRun, newline];
+    });
+    citeSlide.addText(citeRuns, {
       x: 0.5, y: 1.4, w: "90%", h: 4.5,
-      fontSize: 14, color: "333333",
       fontFace: "Microsoft YaHei",
       valign: "top",
       lineSpacingMultiple: 1.5,
@@ -1232,8 +1252,10 @@ export async function generatePowerPointFromHtml(
             lineSpacingMultiple: 1.1,
           });
         } else if (el.type === "table" && el.tableData) {
-          const colCount = Math.max(...el.tableData.map(r => r.length));
-          const rows = el.tableData.map((row, ri) =>
+          const validRows = el.tableData.filter((r): r is string[] => Array.isArray(r) && r.length > 0);
+          if (validRows.length === 0) continue;
+          const colCount = Math.max(...validRows.map(r => r.length));
+          const rows = validRows.map((row, ri) =>
             row.map(cell => ({
               text: cell || "",
               options: ri === 0
@@ -1263,8 +1285,16 @@ export async function generatePowerPointFromHtml(
     const cs = pptx.addSlide();
     cs.addText("参考来源", { x: 0.5, y: 0.3, w: "90%", h: 0.8, fontSize: 28, color: "1a1a2e", bold: true, fontFace: "Microsoft YaHei" });
     cs.addShape(pptx.ShapeType.rect, { x: 0.5, y: 1.1, w: 9.0, h: 0.05, fill: { color: "16213E" } });
-    cs.addText(citations.map(c => `[${c.index}] ${c.title}${c.url ? " " + c.url : ""}`).join("\n"), {
-      x: 0.5, y: 1.4, w: "90%", h: 4.5, fontSize: 14, color: "333333", fontFace: "Microsoft YaHei", valign: "top", lineSpacingMultiple: 1.5,
+    const citeRuns = citations.flatMap((c, i) => {
+      const prefix = { text: `[${c.index}] `, options: { fontSize: 14, color: "333333", fontFace: "Microsoft YaHei" } };
+      const titleRun = c.url
+        ? { text: c.title, options: { fontSize: 14, color: "2563EB", fontFace: "Microsoft YaHei", hyperlink: { url: c.url } } }
+        : { text: c.title, options: { fontSize: 14, color: "333333", fontFace: "Microsoft YaHei" } };
+      const newline = i < citations.length - 1 ? { text: "\n", options: { fontSize: 14, fontFace: "Microsoft YaHei" } } : { text: "", options: { fontSize: 14, fontFace: "Microsoft YaHei" } };
+      return [prefix, titleRun, newline];
+    });
+    cs.addText(citeRuns, {
+      x: 0.5, y: 1.4, w: "90%", h: 4.5, fontFace: "Microsoft YaHei", valign: "top", lineSpacingMultiple: 1.5,
     });
   }
 
@@ -1342,13 +1372,21 @@ export async function exportDocument(
         const buffer = await generatePowerPointFromHtml(title, sections, citations);
         return { buffer, contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", extension: ".pptx" };
       } catch (err1) {
-        logger.warn(`[DocExporter] HTML 方案失败，回退 layout engine: ${err1}`);
+        const stack1 = err1 instanceof Error ? err1.stack : String(err1);
+        logger.warn(`[DocExporter] HTML 方案失败，回退 layout engine: ${err1}\n  stack: ${stack1}`);
         try {
           const buffer = await generatePowerPointFromLayout(title, sections, citations);
           return { buffer, contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", extension: ".pptx" };
         } catch (err2) {
-          logger.warn(`[DocExporter] Layout engine 也失败，回退 legacy: ${err2}`);
-          return { buffer: await generatePowerPoint(title, sections, citations), contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", extension: ".pptx" };
+          const stack2 = err2 instanceof Error ? err2.stack : String(err2);
+          logger.warn(`[DocExporter] Layout engine 也失败，回退 legacy: ${err2}\n  stack: ${stack2}`);
+          try {
+            return { buffer: await generatePowerPoint(title, sections, citations), contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", extension: ".pptx" };
+          } catch (err3) {
+            const stack3 = err3 instanceof Error ? err3.stack : String(err3);
+            logger.error(`[DocExporter] Legacy 也失败: ${err3}\n  stack: ${stack3}`);
+            throw err3;
+          }
         }
       }
     }

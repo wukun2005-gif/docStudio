@@ -564,6 +564,21 @@ export function autoResolveConflicts(
 
     let resolution: ConflictResolutionItem | null = null;
 
+    // 只对 severity=high 的冲突强制解决，medium/low 的冲突不自动删除源
+    if (conflict.severity !== "high") {
+      unresolved.push({
+        topic: conflict.topic,
+        conflictType: conflict.conflictType,
+        severity: conflict.severity,
+        resolution: "unresolvable",
+        winningSource: "",
+        losingSources: conflict.claims.map((c) => c.source),
+        reason: `非 high 严重度冲突，保留所有来源供用户判断`,
+      });
+      logger.info(`[ConflictResolution] 跳过非 high 严重度冲突: topic="${conflict.topic}", severity="${conflict.severity}", sides=${conflict.claims.map(c => c.source).join(", ")}`);
+      continue;
+    }
+
     // ── 优先级 1：LLM winner_source（检测阶段已裁决，零额外延迟）──
     if (conflict.winnerSource) {
       const winnerClaim = conflict.claims.find(

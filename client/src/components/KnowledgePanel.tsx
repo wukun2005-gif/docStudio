@@ -3,11 +3,11 @@ import PeoplePanel from "./PeoplePanel";
 
 type TabId = "sources" | "code" | "remote" | "people";
 
-const tabs: { id: TabId; label: string }[] = [
-  { id: "sources", label: "本地文档" },
-  { id: "code", label: "远程 GitHub Repo" },
-  { id: "remote", label: "远程文档" },
-  { id: "people", label: "People Graph" },
+const tabs: { id: TabId; label: string; demoId: string }[] = [
+  { id: "sources", label: "本地文档", demoId: "demo-kb-tab-sources" },
+  { id: "code", label: "远程 GitHub Repo", demoId: "demo-kb-tab-code" },
+  { id: "remote", label: "远程文档", demoId: "demo-kb-tab-remote" },
+  { id: "people", label: "People Graph", demoId: "demo-kb-tab-people" },
 ];
 
 interface KnowledgeSource {
@@ -76,7 +76,7 @@ export default function KnowledgePanel() {
   const [onedriveFiles, setOnedriveFiles] = useState<any[]>([]);
   const [onedriveLoading, setOnedriveLoading] = useState(false);
   const [onedriveError, setOnedriveError] = useState<string | null>(null);
-  const [cacheStats, setCacheStats] = useState({ size: 0, entries: 0 });
+
   const [msGraphStatus, setMsGraphStatus] = useState<{ connected: boolean; userDisplayName?: string; userEmail?: string; hasAppConfig: boolean } | null>(null);
 
   useEffect(() => {
@@ -453,13 +453,8 @@ export default function KnowledgePanel() {
     }
   }
 
-  async function loadCacheStats() {
-    // TODO: 实现缓存统计 API
-    setCacheStats({ size: 0, entries: 0 });
-  }
-
   return (
-    <div className="max-w-4xl mx-auto">
+    <div className={activeTab === "people" ? "w-full" : "max-w-4xl mx-auto"}>
       <h2 className="text-2xl font-bold mb-6">知识库管理</h2>
 
       {/* Tab 切换 */}
@@ -467,6 +462,7 @@ export default function KnowledgePanel() {
         {tabs.map((tab) => (
           <button
             key={tab.id}
+            id={tab.demoId}
             onClick={() => setActiveTab(tab.id)}
             className={`px-6 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
               activeTab === tab.id
@@ -796,37 +792,6 @@ export default function KnowledgePanel() {
           </div>
         )}
 
-        {/* 缓存统计 */}
-        <div className="bg-white rounded-lg shadow-sm border p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <span className="text-lg">💾</span>
-            <span className="font-medium">本地缓存</span>
-          </div>
-          <div className="grid grid-cols-2 gap-4 mb-3">
-            <div className="text-center">
-              <div className="text-2xl font-bold text-blue-600">{cacheStats.entries}</div>
-              <div className="text-xs text-gray-500">缓存文件</div>
-            </div>
-            <div className="text-center">
-              <div className="text-2xl font-bold text-green-600">{cacheStats.size}</div>
-              <div className="text-xs text-gray-500">缓存 chunks</div>
-            </div>
-          </div>
-          <p className="text-xs text-gray-400">
-            远程文件会缓存到本地，默认 24 小时过期。缓存命中时检索速度约 100ms，未命中时需 2-5 秒。
-          </p>
-        </div>
-
-        {/* 使用说明 */}
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-          <div className="font-medium text-blue-800 mb-2">💡 工作原理</div>
-          <ul className="text-sm text-blue-700 space-y-1">
-            <li>• <strong>Phase 1</strong>: 使用 Graph Search API 做关键词粗筛，快速找到候选文件</li>
-            <li>• <strong>Phase 2</strong>: 对 top-10 候选拉取内容 → 切片 → 向量化 → 语义匹配</li>
-            <li>• 文件内容会缓存到本地，避免重复拉取</li>
-            <li>• 检索结果与本地知识库融合，通过 RRF 算法排序</li>
-          </ul>
-        </div>
       </div>
       )}
 
@@ -877,7 +842,7 @@ export default function KnowledgePanel() {
           <div className="px-4 py-3 border-b flex items-center justify-between">
             <span className="font-medium">已索引文档 ({sources.length})</span>
           </div>
-          <div className="divide-y">
+          <div className="divide-y max-h-[400px] overflow-y-auto" id="demo-kb-sources-list">
             {sources.map((s) => (
               <div key={s.id} className="px-4 py-3">
                 <div className="flex items-center justify-between">

@@ -191,7 +191,9 @@ function markdownToHtml(text: string): string {
     }
     // Find separator row (e.g. |---|:---:|---|)
     const sepIdx = tableBuffer.findIndex((r) => /^\|[\s\-:|]+\|$/.test(r.trim()));
-    if (sepIdx < 0) {
+    if (sepIdx < 0 || sepIdx === 0) {
+      // 无分隔行，或分隔行是首行（无表头）→ 不是有效表格，当 <p> 输出
+      // 不以 | 开头的表头行留给 extractMarkdownTables fallback 处理
       for (const row of tableBuffer) {
         htmlLines.push(`<p>${inlineMarkdown(row)}</p>`);
       }

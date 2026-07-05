@@ -1,18 +1,17 @@
 import { useEffect, useState } from "react";
 
-interface Person {
+interface OrgNode {
   id: string;
   name: string;
   title?: string;
-  department?: string;
   email?: string;
-  attributes?: { relationships?: Array<{ targetPersonId: string; type: string }>; isCurrentUser?: boolean };
-  createdAt: string;
+  department?: string;
+  children: OrgNode[];
 }
 
 export default function PeoplePanel() {
-  const [people, setPeople] = useState<Person[]>([]);
-  const [orgTree, setOrgTree] = useState<Record<string, Array<{ id: string; name: string; title?: string; email?: string }>>>({});
+  const [hierarchy, setHierarchy] = useState<OrgNode[]>([]);
+  const [peopleCount, setPeopleCount] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasAppConfig, setHasAppConfig] = useState(false);
@@ -22,7 +21,6 @@ export default function PeoplePanel() {
   useEffect(() => {
     checkConfig();
     loadData();
-    // 加载当前用户身份
     fetch("/api/settings/sender_profile")
       .then(r => r.json())
       .then(data => { if (data.value?.name) setCurrentUserName(data.value.name); })
@@ -41,28 +39,18 @@ export default function PeoplePanel() {
 
   async function loadData() {
     try {
-      const [peopleRes, treeRes] = await Promise.all([
+      const [peopleRes, hierRes] = await Promise.all([
         fetch("/api/people").then((r) => r.json()),
-        fetch("/api/people/org-tree").then((r) => r.json()),
+        fetch("/api/people/org-hierarchy").then((r) => r.json()),
       ]);
       if (peopleRes.ok) {
-        // 过滤掉外部来宾用户（邮箱含 #EXT#），但始终保留当前用户
         const filtered = peopleRes.people.filter(
-          (p: Person) => !p.email?.includes("#EXT#") && (p.department || p.title || p.attributes?.isCurrentUser),
+          (p: any) => !p.email?.includes("#EXT#") && (p.department || p.title || p.attributes?.isCurrentUser),
         );
-        setPeople(filtered);
+        setPeopleCount(filtered.length);
       }
-      if (treeRes.ok) {
-        // 过滤掉空部门和外部用户
-        const tree: Record<string, typeof treeRes.tree[string]> = {};
-        for (const [dept, members] of Object.entries(treeRes.tree)) {
-          if (!dept || dept === "未分配") continue; // 跳过空部门和未分配
-          const filtered = (members as typeof treeRes.tree[string]).filter(
-            (m: any) => !m.email?.includes("#EXT#"),
-          );
-          if (filtered.length > 0) tree[dept] = filtered;
-        }
-        setOrgTree(tree);
+      if (hierRes.ok) {
+        setHierarchy(hierRes.hierarchy);
       }
     } catch (err) {
       console.error("Failed to load people data:", err);
@@ -91,111 +79,126 @@ export default function PeoplePanel() {
     }
   }
 
-  const departments = Object.keys(orgTree);
-  const peopleCount = people.length;
+  const depts = new Set<string>();
+  let allCount = 0;
+  let relCount = 0;
+  function walk(nodes: OrgNode[]) {
+    for (const n of nodes) {
+      allCount++;
+      if (n.department) depts.add(n.department);
+      relCount += n.children.length;
+      walk(n.children);
+    }
+  }
+  walk(hierarchy);
+
+  function OrgNodeCard({ node }: { node: OrgNode }) {
+    const isCurrentUser = currentUserName && node.name === currentUserName;
+    const hasChildren = node.children.length > 0;
+
+    return (
+      <li>
+        <div
+          className={`border rounded-lg px-3 py-1.5 bg-white shadow-sm text-center min-w-[90px] max-w-[140px] cursor-default transition-shadow hover:shadow-md ${
+            isCurrentUser ? "border-blue-400 ring-2 ring-blue-200" : "border-gray-200"
+          }`}
+        >
+          <div
+            className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold mx-auto mb-1 ${
+              isCurrentUser ? "bg-blue-500 text-white" : "bg-blue-100 text-blue-600"
+            }`}
+          >
+            {node.name[0]}
+          </div>
+          <div className="text-xs font-semibold leading-tight flex items-center justify-center gap-0.5 flex-wrap">
+            {node.name}
+            {isCurrentUser && (
+              <span className="px-0.5 py-0 rounded text-[9px] bg-blue-500 text-white font-medium shrink-0">我</span>
+            )}
+          </div>
+          {node.title && <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{node.title}</div>}
+          {node.department && <div className="text-[9px] text-gray-400 mt-0.5">{node.department}</div>}
+        </div>
+        {hasChildren && (
+          <ul>
+            {node.children.map((child) => (
+              <OrgNodeCard key={child.id} node={child} />
+            ))}
+          </ul>
+        )}
+      </li>
+    );
+  }
+
+  const hasHierarchy = hierarchy.some((n) => n.children.length > 0);
 
   return (
     <div className="space-y-6">
       {/* Entra ID 连接卡片 */}
-      <div className="bg-white rounded-lg shadow-sm border p-4">
-        <div className="flex items-center gap-2 mb-3">
-          <span className="text-lg">🏢</span>
-          <span className="font-medium flex-1">Microsoft Entra ID</span>
-          {peopleCount > 0 && (
-            <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">已同步</span>
-          )}
-        </div>
-        <p className="text-sm text-gray-500 mb-3">
-          从 Microsoft Entra ID 同步组织架构。同步后，人员信息和上下级关系会在文档生成时自动引用。
-        </p>
-
+      <div className="bg-white rounded-lg shadow-sm border py-2 px-3">
         {!hasAppConfig && (
-          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-700">
-            ⚠️ 请先在 <strong>设置 → 知识库</strong> 中配置 Azure 应用信息（Tenant ID、Client ID、Client Secret）
+          <div className="bg-amber-50 border border-amber-200 rounded px-2 py-1 text-xs text-amber-700">
+            ⚠️ 请先在 <strong>设置 → 知识库</strong> 中配置 Azure 应用信息
           </div>
         )}
-
-        {hasAppConfig && (
-          <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-base">🏢</span>
+          <span className="font-medium text-sm">Microsoft Entra ID</span>
+          {allCount > 0 && (
+            <span className="px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700">已同步</span>
+          )}
+          <span className="text-xs text-gray-400">
+            {allCount > 0 ? `${allCount} 人 · ${relCount} 关系` : "从 Entra ID 同步组织架构"}
+          </span>
+          {hasAppConfig && (
             <button
               onClick={handleSync}
               disabled={syncing}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
+              className="ml-auto px-3 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50"
             >
-              {syncing ? "同步中..." : "🔗 同步组织架构"}
+              {syncing ? "同步中..." : "🔗 同步"}
             </button>
-            {lastSyncCount !== null && !syncing && (
-              <span className="text-sm text-gray-500">
-                上次同步: {lastSyncCount} 人
-              </span>
-            )}
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {/* 错误提示 */}
       {error && (
-        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
-          {error}
-        </div>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">{error}</div>
       )}
 
-      {/* 统计卡片 */}
-      {peopleCount > 0 && (
-        <div className="grid grid-cols-3 gap-4">
-          <div className="bg-white rounded-lg p-4 shadow-sm border text-center">
-            <div className="text-3xl font-bold text-blue-600">{peopleCount}</div>
-            <div className="text-sm text-gray-500">人员</div>
-          </div>
-          <div className="bg-white rounded-lg p-4 shadow-sm border text-center">
-            <div className="text-3xl font-bold text-green-600">{departments.length}</div>
-            <div className="text-sm text-gray-500">部门</div>
-          </div>
-          <div className="bg-white rounded-lg p-4 shadow-sm border text-center">
-            <div className="text-3xl font-bold text-purple-600">
-              {people.reduce((n, p) => n + (p.attributes?.relationships?.length ?? 0), 0)}
-            </div>
-            <div className="text-sm text-gray-500">关系</div>
-          </div>
-        </div>
-      )}
-
-      {/* 组织架构树 */}
-      {departments.length > 0 && (
+      {/* 组织架构图 */}
+      {allCount > 0 && (
         <div className="bg-white rounded-lg shadow-sm border">
-          <div className="px-4 py-3 border-b font-medium">组织架构</div>
-          <div className="p-4 space-y-4">
-            {departments.map((dept) => (
-              <div key={dept} className="border rounded-lg p-3">
-                <h4 className="font-medium text-gray-700 mb-2">{dept || "未分配"}</h4>
-                <div className="flex flex-wrap gap-3">
-                  {orgTree[dept].map((p) => {
-                    const isCurrentUser = currentUserName && p.name === currentUserName;
-                    return (
-                      <div key={p.id} className={`flex items-center gap-2 rounded-lg px-3 py-2 ${isCurrentUser ? "bg-blue-50 border border-blue-300 ring-1 ring-blue-200" : "bg-gray-50"}`}>
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${isCurrentUser ? "bg-blue-500 text-white" : "bg-blue-100 text-blue-600"}`}>
-                          {p.name[0]}
-                        </div>
-                        <div>
-                          <div className="text-sm font-medium flex items-center gap-1.5">
-                            {p.name}
-                            {isCurrentUser && <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-500 text-white font-medium">我</span>}
-                          </div>
-                          {p.title && <div className="text-xs text-gray-500">{p.title}</div>}
-                          {p.email && <div className="text-xs text-gray-400">{p.email}</div>}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+          <div className="px-4 py-3 border-b font-medium flex items-center gap-3">
+            <span>组织架构</span>
+            <span className="font-normal text-xs text-gray-400">·</span>
+            <span className="text-xs text-blue-500 font-normal">{allCount} 人</span>
+            <span className="font-normal text-xs text-gray-400">·</span>
+            <span className="text-xs text-green-500 font-normal">{depts.size} 部门</span>
+            <span className="font-normal text-xs text-gray-400">·</span>
+            <span className="text-xs text-purple-500 font-normal">{relCount} 关系</span>
+          </div>
+          <div className="p-6 overflow-y-auto max-h-[60vh] text-center" id="demo-people-org-tree">
+            {hasHierarchy ? (
+              <div className="org-chart">
+                <ul>
+                  {hierarchy.map((root) => (
+                    <OrgNodeCard key={root.id} node={root} />
+                  ))}
+                </ul>
               </div>
-            ))}
+            ) : (
+              <div className="text-center text-gray-400 py-10 text-sm">
+                暂无汇报关系数据，"同步组织架构"后将展示层级架构图
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {/* 空状态 */}
-      {peopleCount === 0 && hasAppConfig && !syncing && (
+      {allCount === 0 && hasAppConfig && !syncing && (
         <div className="text-center text-gray-400 py-12">
           点击"同步组织架构"从 Entra ID 拉取人员数据
         </div>

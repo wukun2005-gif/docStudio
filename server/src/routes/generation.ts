@@ -822,8 +822,11 @@ export function parseHtmlSectionsForPPT(html: string, title: string): ExportSect
             const obj = JSON.parse(s);
             const items = Array.isArray(obj) ? obj : [obj];
             for (const item of items) {
-              if (item && item.type && item.categories && item.series) {
-                parsed.push(item as ChartSpec);
+              if (item && item.type && item.categories && item.series && Array.isArray(item.series)) {
+                const validSeries = item.series.filter((s: any) => s && Array.isArray(s.values) && s.values.length > 0);
+                if (validSeries.length > 0) {
+                  parsed.push({ ...item, series: validSeries } as ChartSpec);
+                }
               }
             }
           } catch { /* skip */ }
@@ -837,6 +840,14 @@ export function parseHtmlSectionsForPPT(html: string, title: string): ExportSect
     innerHtml = innerHtml.replace(/<div class="charts">[\s\S]*?<\/div>/gi, "");
     // 移除 xlsx-script
     innerHtml = innerHtml.replace(/<script\s+type="application\/x-python"[\s\S]*?<\/script>/gi, "");
+
+    // 预处理：拆分"段落。表格行"复合 <p>
+    // LLM 有时将段落文本和表格行写在同一行（如"说明文字。列1 | 列2 | 列3"），
+    // markdownToHtml 将其转为单个 <p>。这会导致：
+    // 1. 表头吞没段落文字（段落成为表头的一部分）
+    // 2. 相邻表格合并（段落中的 | 使 buffer 连续）
+    // 在此拆分为两个独立 <p>，让后续 extractMarkdownTables 正确识别表格边界。
+    innerHtml = splitParagraphAndTableRows(innerHtml);
 
     // 提取 HTML 表格（与 parseHtmlSections 逻辑相同）
     const extractedTables: Array<string[][]> = [];
@@ -856,6 +867,19 @@ export function parseHtmlSectionsForPPT(html: string, title: string): ExportSect
         if (cells.length > 0) rows.push(cells);
       }
       if (rows.length > 0) extractedTables.push(rows);
+    }
+
+    // Fallback: 如果没提取到 HTML 表格，尝试从 <p> 中解析 markdown 表格
+    // LLM 有时输出不带前导 | 的表格行（如 "风险项 | 发生概率 | 影响程度"），
+    // markdownToHtml 不会将其转为 <table>，而是留作 <p>。
+    // 提取为表格的同时，把对应的 <p> 源文本从内容中移除，
+    // 否则会出现"markdown 表格文字 + 渲染表格"同时显示、互相挤压的问题。
+    if (extractedTables.length === 0) {
+      const { tables: mdTables, cleanedHtml } = extractMarkdownTables(innerHtml);
+      if (mdTables.length > 0) {
+        extractedTables.push(...mdTables);
+        innerHtml = cleanedHtml;
+      }
     }
 
     // 保留内层 HTML（去除 script/svg/footer 但保留结构和表格）
@@ -975,6 +999,121 @@ generationRouter.get("/:id/export/:format", async (req, res) => {
     res.status(500).json({ ok: false, error: msg });
   }
 });
+
+/**
+ * 拆分"段落。表格行"复合 <p>
+ *
+ * LLM 有时将段落和表格行写在同一行，例如：
+ *   <p>Q3 完成了多项演进。变更项 | 类型 | 影响范围 | 上线时间</p>
+ *
+ * 拆分为：
+ *   <p>Q3 完成了多项演进。</p>
+ *   <p>变更项 | 类型 | 影响范围 | 上线时间</p>
+ *
+ * 拆分条件：
+ * - <p> 内同时包含 CJK 句末标点（。！？；）和至少 2 个 |（表格行特征）
+ * - 标点后的部分不含 <（纯文本表格行）
+ * - 使用 tempered greedy token ((?!<\/p>)[\s\S]) 确保不跨 <p> 边界匹配
+ * - 使用贪婪匹配在最后一个标点处拆分（避免在段落中间误拆）
+ *
+ * 只使用 CJK 标点（不使用 ASCII . ! ;）以避免在数字（如 "v1.0 | v2.0"）上误拆。
+ */
+function splitParagraphAndTableRows(html: string): string {
+  return html.replace(
+    /<p\b[^>]*>((?:(?!<\/p>)[\s\S])*[。！？；])\s*([^<]*\|[^<]*\|[^<]*)<\/p>/g,
+    (_m, p1: string, p2: string) => `<p>${p1}</p>\n<p>${p2}</p>`
+  );
+}
+
+/**
+ * 从 HTML 内容中提取 markdown 格式的表格（如 | col1 | col2 | 或 col1 | col2 |）
+ * 作为 HTML <table> 提取失败时的 fallback
+ */
+function extractMarkdownTables(html: string): { tables: Array<string[][]>; cleanedHtml: string } {
+  const tables: Array<string[][]> = [];
+  const consumedRaw: string[] = [];
+
+  // 提取所有 <p> 标签中的文本，同时保留原始 <p>...</p> 串，便于后续从内容中移除
+  const pRegex = /<p>([^<]*)<\/p>/gi;
+  const entries: { raw: string; text: string }[] = [];
+  let pm: RegExpExecArray | null;
+  while ((pm = pRegex.exec(html)) !== null) {
+    entries.push({ raw: pm[0]!, text: pm[1]!.trim() });
+  }
+
+  // 也提取裸文本行（不在 <p> 标签中但包含 | 的行）
+  // 裸文本不被 parseContentHtml 渲染（它只读 <p>/<h3>），因此无需移除，仅用于表格识别
+  const textOnly = html.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+  const bareLines = textOnly.split("\n").map(l => l.trim()).filter(Boolean);
+  for (const bl of bareLines) {
+    if (!entries.some(e => e.text === bl) && bl.includes("|")) {
+      entries.push({ raw: "", text: bl });
+    }
+  }
+
+  // 在 entries 中查找连续的表格行组
+  let buffer: { raw: string; text: string }[] = [];
+  const flush = () => {
+    if (buffer.length < 2) { buffer = []; return; }
+    // 查找分隔行（|---|:---:| 或 ---|:---:|---）
+    const sepIdx = buffer.findIndex((e) => {
+      return /^[\s\-:|]+$/.test(e.text) && e.text.includes("-") && e.text.includes("|");
+    });
+    if (sepIdx < 0) { buffer = []; return; }
+
+    const headerRows = buffer.slice(0, sepIdx);
+    const dataRows = buffer.slice(sepIdx + 1);
+    const allRows = [...headerRows, ...dataRows];
+    const parsedRows: string[][] = [];
+
+    for (const e of allRows) {
+      const cells = e.text.split("|").map(c => c.trim()).filter(Boolean);
+      if (cells.length > 0) parsedRows.push(cells);
+    }
+
+    if (parsedRows.length > 0) {
+      // 补齐缺列行：LLM 有时输出 "指标名 | 数值" 遗漏其他列，补空串保持列数一致
+      const maxCols = Math.max(...parsedRows.map(r => r.length));
+      for (const row of parsedRows) {
+        while (row.length < maxCols) row.push("");
+      }
+      tables.push(parsedRows);
+      // 标记被消费的 <p> 源标签，便于从内容中移除，避免"表格文字 + 渲染表格"重复
+      for (const e of buffer) {
+        if (e.raw) consumedRaw.push(e.raw);
+      }
+    }
+    buffer = [];
+  };
+
+  for (const e of entries) {
+    // 表格行：以 | 开头 或 包含至少 2 个 |
+    const verticalCount = (e.text.match(/\|/g) || []).length;
+    if (verticalCount >= 2) {
+      buffer.push(e);
+    } else if (verticalCount === 1 && buffer.length >= 2) {
+      // 1 竖行：可能是缺列的表格数据行（LLM 有时输出 "指标名 | 数值" 遗漏其他列）
+      // 仅当 buffer 已有分隔行（处于表格上下文）时纳入，避免误吞普通段落
+      const hasSep = buffer.some(b => /^[\s\-:|]+$/.test(b.text) && b.text.includes("-") && b.text.includes("|"));
+      if (hasSep) {
+        buffer.push(e);
+      } else {
+        flush();
+      }
+    } else {
+      flush();
+    }
+  }
+  flush();
+
+  // 从原 HTML 中移除已被提取为表格的 <p> 源文本（按字面量移除，避免正则转义问题）
+  let cleanedHtml = html;
+  for (const raw of consumedRaw) {
+    cleanedHtml = cleanedHtml.split(raw).join("");
+  }
+
+  return { tables, cleanedHtml };
+}
 
 /** POST /api/generation/:runId/regenerate-section — 重新生成单个章节 */
 generationRouter.post("/:runId/regenerate-section", async (req, res) => {

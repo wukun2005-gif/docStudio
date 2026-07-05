@@ -33,6 +33,8 @@ export interface ToolExecutorInput {
     tools?: ToolDefinition[];
     tool_choice?: "auto" | "none" | "required";
     timeoutMs?: number;
+    /** temperature 覆盖；不传时使用 buildLLMCall 的默认值 */
+    temperature?: number;
   }) => Promise<{ text: string; toolCalls?: ToolCall[]; error?: { code: string; message: string } }>;
   query: string;
   rerankerConfig?: { baseUrl: string; apiKey: string; modelId: string };
@@ -345,6 +347,10 @@ export async function executeWithTools(input: ToolExecutorInput): Promise<ToolEx
       if (!result.toolCalls || result.toolCalls.length === 0) {
         logger.info(`[ToolExecutor] LLM returned direct answer (web_search_results: ${webSearchResults.length})`);
         finalAnswer = result.text;
+        // [DEBUG-CITATION] 追踪 LLM call #1 direct answer 的 [N] 数量
+        const directCitations = [...finalAnswer.matchAll(/\[(\d+)\]/g)].map(m => parseInt(m[1]));
+        const directUnique = [...new Set(directCitations)].sort((a, b) => a - b);
+        logger.info(`[DEBUG-CITATION] LLM call #${round + 1} direct answer: [${directUnique.join(",") || "NONE"}](${directCitations.length}), len=${finalAnswer.length}`);
         break;
       }
 
@@ -509,8 +515,13 @@ export async function executeWithTools(input: ToolExecutorInput): Promise<ToolEx
       });
     }
 
-    const finalResult = await callLLM({ messages, timeoutMs });
+    const finalResult = await callLLM({ messages, timeoutMs, temperature: 0 });
     finalAnswer = finalResult.text;
+
+    // [DEBUG-CITATION] 追踪 re-inject 后 LLM 输出的 [N] 数量
+    const reInjectCitations = [...finalAnswer.matchAll(/\[(\d+)\]/g)].map(m => parseInt(m[1]));
+    const reInjectUnique = [...new Set(reInjectCitations)].sort((a, b) => a - b);
+    logger.info(`[DEBUG-CITATION] Re-inject LLM output: [${reInjectUnique.join(",") || "NONE"}](${reInjectCitations.length}), len=${finalAnswer.length}, prevAnswerLen=${finalAnswer === finalResult.text ? "same" : "diff"}`);
 
     // 立即校验并移除超出有效范围的 [N] 引用标记（防止 LLM 幻觉）
     // 必须在 re-inject 之后做，此时 LLM 已知有效编号范围

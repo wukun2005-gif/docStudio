@@ -10,6 +10,7 @@ import {
   deletePerson,
   getPeopleByDepartment,
   getOrgTree,
+  getOrgHierarchy,
   getRelationships,
   getPersonContext,
   addRelationship,
@@ -40,6 +41,17 @@ peopleRouter.get("/org-tree", (_req, res) => {
       result[dept] = people.map((p) => ({ id: p.id, name: p.name, title: p.title, email: p.email }));
     }
     res.json({ ok: true, tree: result });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** GET /api/people/org-hierarchy — 组织架构层级（基于汇报关系） */
+peopleRouter.get("/org-hierarchy", (_req, res) => {
+  try {
+    const hierarchy = getOrgHierarchy();
+    res.json({ ok: true, hierarchy });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ ok: false, error: msg });

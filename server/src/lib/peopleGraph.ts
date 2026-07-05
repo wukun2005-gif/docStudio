@@ -218,7 +218,7 @@ export function getRelationships(personId: string): Array<{
     .filter((r): r is NonNullable<typeof r> => r !== null);
 }
 
-/** 获取组织架构树 */
+/** 获取组织架构树（按部门分组） */
 export function getOrgTree(): Map<string, Person[]> {
   const people = getAllPeople();
   const tree = new Map<string, Person[]>();
@@ -228,6 +228,72 @@ export function getOrgTree(): Map<string, Person[]> {
     tree.get(dept)!.push(p);
   }
   return tree;
+}
+
+export interface OrgNode {
+  id: string;
+  name: string;
+  title?: string;
+  email?: string;
+  department?: string;
+  children: OrgNode[];
+}
+
+/** 获取组织架构层级树（基于 manager/direct_report 关系） */
+export function getOrgHierarchy(): OrgNode[] {
+  const allPeople = getAllPeople();
+  const personMap = new Map(allPeople.map((p) => [p.id, p]));
+
+  const hasManager = new Set<string>();
+  for (const p of allPeople) {
+    for (const rel of p.attributes?.relationships || []) {
+      if (rel.type === "manager") {
+        hasManager.add(p.id);
+      }
+    }
+  }
+
+  const visited = new Set<string>();
+
+  function buildNode(person: Person): OrgNode {
+    if (visited.has(person.id)) {
+      return { id: person.id, name: person.name, title: person.title, email: person.email, department: person.department, children: [] };
+    }
+    visited.add(person.id);
+
+    const children: OrgNode[] = [];
+    // 方式1：该人员的 direct_report 关系 → 直接下属
+    for (const rel of person.attributes?.relationships || []) {
+      if (rel.type === "direct_report") {
+        const child = personMap.get(rel.targetPersonId);
+        if (child && !visited.has(child.id)) {
+          children.push(buildNode(child));
+        }
+      }
+    }
+    // 方式2：反向推断 — 找出所有 manager 关系指向本人员的人
+    for (const p of allPeople) {
+      if (p.id === person.id) continue;
+      for (const rel of p.attributes?.relationships || []) {
+        if (rel.type === "manager" && rel.targetPersonId === person.id) {
+          if (!children.some((c) => c.id === p.id) && !visited.has(p.id)) {
+            children.push(buildNode(p));
+          }
+        }
+      }
+    }
+
+    return {
+      id: person.id,
+      name: person.name,
+      title: person.title,
+      email: person.email,
+      department: person.department,
+      children,
+    };
+  }
+
+  return (hasManager.size === 0 ? allPeople : allPeople.filter((p) => !hasManager.has(p.id))).map(buildNode).filter((n) => n.children.length > 0 || hasManager.size === 0);
 }
 
 /** 获取某人的上下文信息（用于文档生成） */

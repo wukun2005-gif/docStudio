@@ -376,6 +376,17 @@ export async function ingestFile(options: IngestOptions): Promise<IngestResult> 
   const buffer = typeof content === "string" ? Buffer.from(content, "utf-8") : content;
   const rawHash = customHash ?? computeTextHash(buffer.toString("utf-8"));
 
+  // 过滤测试文件：不会向知识库中摄入测试/固件/脚本文件
+  const normalizedPath = (filePath ?? fileName).replace(/\\/g, "/");
+  if (
+    /\/tests?\//i.test(normalizedPath) ||
+    /[\/\\]__tests?__[\/\\]/i.test(normalizedPath) ||
+    /\.(test|spec)\.(ts|tsx|js|jsx|py|go|rs|java)$/i.test(fileName)
+  ) {
+    logger.info(`[Ingest] 跳过测试/固件文件: ${fileName}`);
+    return { sourceId: customSourceId ?? crypto.randomUUID(), status: "empty", chunkCount: 0, embeddedCount: 0 };
+  }
+
   // 重复检查（非稳定 sourceId 时用 content hash 去重）
   if (!skipDuplicateCheck && !customSourceId) {
     const existingId = findDuplicateByHash(rawHash);

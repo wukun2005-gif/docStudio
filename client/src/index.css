@@ -50,6 +50,9 @@ body {
 .doc-content footer.citations .citation-list { padding-left: 0; }
 .doc-content footer.citations .citation-item { margin-bottom: 0.375rem; }
 .doc-content footer.citations .citation-num { font-weight: 500; color: #374151; margin-right: 0.25rem; }
+.doc-content table { width: 100%; border-collapse: collapse; margin-bottom: 0.75rem; table-layout: fixed; }
+.doc-content th, .doc-content td { padding: 4px 8px; border: 1px solid #e5e7eb; text-align: left; }
+.doc-content th { background: #f3f4f6; font-weight: 600; }
 
 /* Provider 配置面板样式 */
 .drag-handle {
@@ -77,4 +80,84 @@ tr[draggable="true"]:hover {
 tr[draggable="true"]:active {
   background-color: #f3f4f6;
   transform: scale(1.01);
+}
+
+/* ── 组织架构树图 ──────────────────────────────── */
+.org-chart {
+  display: inline-flex;
+  justify-content: center;
+}
+.org-chart ul {
+  display: flex;
+  justify-content: center;
+  padding-top: 20px;
+  position: relative;
+}
+
+.org-chart li {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  padding: 20px 6px 0 6px;
+}
+
+/* 水平连接线：连接同级兄弟节点 */
+.org-chart li::before,
+.org-chart li::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  height: 20px;
+  border-top: 1.5px solid #d1d5db;
+  width: calc(50% + 1px);
+}
+
+.org-chart li::before {
+  right: 50%;
+}
+.org-chart li::after {
+  left: 50%;
+}
+
+/* 第一个兄弟节点：不需要左半边线 */
+.org-chart li:first-child::before {
+  border-top: none;
+}
+
+/* 最后一个兄弟节点：不需要右半边线 */
+.org-chart li:last-child::after {
+  border-top: none;
+}
+
+/* 唯一子节点：纵向直线连接，不需要水平线 */
+.org-chart li:only-child {
+  padding-top: 0;
+}
+.org-chart li:only-child::before,
+.org-chart li:only-child::after {
+  display: none;
+}
+
+/* 父节点纵向垂直线 */
+.org-chart ul::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 0;
+  height: 20px;
+  border-left: 1.5px solid #d1d5db;
+}
+
+/* 根层级：不需要连接线 */
+.org-chart > ul::before {
+  display: none;
+}
+.org-chart > ul > li {
+  padding-top: 0;
+}
+.org-chart > ul > li::before,
+.org-chart > ul > li::after {
+  display: none;
 }

@@ -10,39 +10,8 @@
  */
 import { useState, useRef, useMemo, useCallback, useEffect } from "react";
 import DOMPurify from "dompurify";
-import DocumentAudit from "./DocumentAudit";
+import UnifiedEvaluationCard from "./UnifiedEvaluationCard";
 import type { OutlineSection } from "../../../shared/src/types/generation.js";
-
-/** 热力图颜色计算（nf2）— 基于 section sources 和 groundingScore */
-export function computeHeatmapColors(
-  sections: SectionData[],
-): Record<number, { color: string; label: string }> {
-  const colors: Record<number, { color: string; label: string }> = {};
-  let globalIdx = 0;
-  for (const s of sections) {
-    const uniqueSources = new Set(s.sources.map((src) => src.sourceId).filter(Boolean));
-    const sourceCount = uniqueSources.size;
-    const gs = s.groundingScore;
-    let color: string;
-    let label: string;
-    if (gs < 0.5) {
-      color = "rgba(239,68,68,0.25)";
-      label = "AI 推断";
-    } else if (sourceCount >= 2) {
-      color = "rgba(34,197,94,0.25)";
-      label = "多源验证";
-    } else {
-      color = "rgba(234,179,8,0.25)";
-      label = "单源支撑";
-    }
-    const paraCount = Math.max((s.content.match(/<(p|h[1-6]|li)\b/gi) || []).length, 1);
-    for (let i = 0; i < paraCount; i++) {
-      colors[globalIdx + 1] = { color, label };
-      globalIdx++;
-    }
-  }
-  return colors;
-}
 
 export interface SectionData {
   title: string;
@@ -107,61 +76,28 @@ export default function DocPreview({
   const [activeSection, setActiveSection] = useState<number | null>(null);
   const [dragOverSection, setDragOverSection] = useState<number | null>(null);
   const [pendingDrop, setPendingDrop] = useState<PendingDrop | null>(null);
-  const [showMetrics, setShowMetrics] = useState(false);
-  const [showHeatmap, setShowHeatmap] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [showHeatmap, setShowHeatmap] = useState(false);
   const [editedContent, setEditedContent] = useState("");
   const [saving, setSaving] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // 当没有文档内容时，自动关闭评估面板（避免"新建文档后显示评估"的问题）
-  useEffect(() => {
-    if (content === null) {
-      setShowMetrics(false);
-    }
-  }, [content]);
-
-  // 评估开始时自动展开 metrics 面板
-  useEffect(() => {
-    if (evaluating) {
-      setShowMetrics(true);
-    }
-  }, [evaluating]);
-
-  // 评估指标到达时自动展开 metrics 面板
-  useEffect(() => {
-    if (evaluationMetrics) {
-      setShowMetrics(true);
-    }
-  }, [evaluationMetrics]);
-
-  // ── 置信度热力图（nf2）──
-
+  // 置信度热力图（nf2）
   const heatmapColors = useMemo(() => {
-    return computeHeatmapColors(showHeatmap ? sections : []);
-  }, [showHeatmap, sections]);
-
-  // 热力图 DOM 注入
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    const allParas = container.querySelectorAll<HTMLElement>("[id^='para-']");
-    allParas.forEach((el) => {
-      const match = el.id.match(/^para-(\d+)$/);
-      if (!match) return;
-      const idx = parseInt(match[1], 10);
-      const hc = heatmapColors[idx];
-      if (hc) {
-        el.style.boxShadow = `inset 4px 0 0 ${hc.color}`;
-        el.style.paddingLeft = "8px";
-        el.style.borderRadius = "0 4px 4px 0";
-      } else {
-        el.style.boxShadow = "";
-        el.style.paddingLeft = "";
-        el.style.borderRadius = "";
+    try {
+      if (!showHeatmap || !sections?.length) return {};
+      const m: Record<number, string> = {};
+      let idx = 0;
+      for (const s of sections) {
+        const n = new Set((s.sources ?? []).map((x) => x.sourceId).filter(Boolean)).size;
+        const c = (s.groundingScore ?? 0.5) < 0.5 ? "rgba(239,68,68,0.15)" :
+          n >= 2 ? "rgba(34,197,94,0.15)" : "rgba(234,179,8,0.15)";
+        for (let i = 0; i < Math.max(((s.content ?? "").match(/<(p|h[1-6]|li)/gi) || []).length, 1); i++)
+          m[++idx] = c;
       }
-    });
-  }, [heatmapColors, sanitizedContent]);
+      return m;
+    } catch { return {}; }
+  }, [showHeatmap, sections]);
 
   // DOMPurify 净化 + 段落标记
   const sanitizedContent = useMemo(() => {
@@ -177,9 +113,11 @@ export default function DocPreview({
       .replace(/(<(?:p|h[1-6]|li|div|section)\s[^>]*?)\s*id\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "$1")
       .replace(/<(p|h[1-6]|li|div|section)(\s|>)/gi, (match, tag, after) => {
         paraIdx++;
-        return `<${tag} id="para-${paraIdx}"${after}`;
+        const c = heatmapColors[paraIdx];
+        const s = c ? ` style="background:${c};padding:6px 8px;border-radius:4px"` : "";
+        return `<${tag} id="para-${paraIdx}"${s}${after}`;
       });
-  }, [content]);
+  }, [content, heatmapColors]);
 
   function handleSectionClick(idx: number) {
     setActiveSection(activeSection === idx ? null : idx);
@@ -388,7 +326,7 @@ export default function DocPreview({
             {evaluating && (
               <span className="text-xs px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200 flex items-center gap-1">
                 <span className="animate-spin w-3 h-3 border-2 border-purple-500 border-t-transparent rounded-full" />
-                🧪 评估中...
+                🧪 最终评估中...
                 {evaluationProgress && (
                   <span className="text-purple-500">
                     ({Object.values(evaluationProgress.tasks).filter((t) => t.status === "done").length}/{evaluationProgress.totalTasks})
@@ -435,6 +373,7 @@ export default function DocPreview({
                   📄 Word
                 </button>
                 <button
+                  id="demo-export-pptx"
                   onClick={() => handleExport("pptx")}
                   className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100 transition-colors"
                   title="导出 PPT"
@@ -457,233 +396,22 @@ export default function DocPreview({
                 </button>
               </div>
             )}
-          {content !== null && trustScore !== null && (
-            <button
-              onClick={() => setShowMetrics(!showMetrics)}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors hover:opacity-80 ${
-                trustScore >= 0.8 ? "bg-green-100 text-green-700" :
-                trustScore >= 0.5 ? "bg-yellow-100 text-yellow-700" :
-                "bg-red-100 text-red-700"
-              }`}
-            >
-              有据可查度 {(trustScore * 100).toFixed(0)}%
-              <span className="text-[10px]">{showMetrics ? "▲" : "▼"}</span>
-            </button>
-          )}
-          {sections.length > 0 && (
+            {sections.length > 0 && (
             <button
               id="demo-heatmap-toggle"
               onClick={() => setShowHeatmap(!showHeatmap)}
               className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-                showHeatmap
-                  ? "bg-purple-100 text-purple-700 border border-purple-300"
-                  : "bg-white text-gray-500 border border-gray-300 hover:bg-gray-50"
+                showHeatmap ? "bg-purple-100 text-purple-700 border border-purple-300"
+                : "bg-white text-gray-500 border border-gray-300 hover:bg-gray-50"
               }`}
-            >
-              🔥 热力图
-            </button>
-          )}
+            >🔥 热力图</button>
+            )}
           </div>
         </div>
-        {content !== null && showMetrics && (
-          <div className="px-5 pb-4 border-t bg-gray-50 max-h-[50vh] overflow-y-auto">
-            <div className="pt-3">
-              {/* 三维度指标说明 */}
-              <div className="mb-3 px-3 py-2 rounded-lg bg-blue-50 border border-blue-200">
-                <p className="text-[11px] text-blue-700 font-medium mb-1">📊 文档质量评估（3 个核心指标）</p>
-                <p className="text-[10px] text-blue-600">
-                  按照 RAGAS/FActScore 业界标准，从三个维度评估文档质量：
-                  <br />
-                  • 有据可查度：内容是否有来源支撑（我能信任吗？）
-                  <br />
-                  • 内容相关度：内容是否与需求相关（这回答了我的问题吗？）
-                  <br />
-                  • 内容完整度：是否覆盖需求的所有要点（有遗漏吗？）
-                </p>
-              </div>
-
-              {/* 三维度指标卡片 */}
-              <div className="grid grid-cols-3 gap-3 mb-3">
-                {/* 有据可查度 */}
-                <div className="px-3 py-2 rounded-lg bg-white border">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[11px] text-gray-500">有据可查度</span>
-                    <span className={`text-sm font-bold ${
-                      trustScore !== null && trustScore >= 0.8 ? "text-green-600" :
-                      trustScore !== null && trustScore >= 0.5 ? "text-yellow-600" :
-                      "text-red-600"
-                    }`}>
-                      {trustScore !== null ? `${(trustScore * 100).toFixed(0)}%` : "—"}
-                    </span>
-                  </div>
-                  <div className="w-full bg-gray-200 rounded-full h-1.5">
-                    <div
-                      className={`h-1.5 rounded-full ${
-                        trustScore !== null && trustScore >= 0.8 ? "bg-green-500" :
-                        trustScore !== null && trustScore >= 0.5 ? "bg-yellow-500" :
-                        "bg-red-500"
-                      }`}
-                      style={{ width: `${(trustScore ?? 0) * 100}%` }}
-                    />
-                  </div>
-                  <p className="text-[10px] text-gray-400 mt-1">内容是否有来源支撑</p>
-                </div>
-
-                {/* 内容相关度 */}
-                <div className="px-3 py-2 rounded-lg bg-white border">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[11px] text-gray-500">内容相关度</span>
-                    <span className={`text-sm font-bold ${
-                      evaluationMetrics?.relevance?.score != null && evaluationMetrics?.relevance?.score >= 0.8 ? "text-green-600" :
-                      evaluationMetrics?.relevance?.score != null && evaluationMetrics?.relevance?.score >= 0.5 ? "text-yellow-600" :
-                      "text-gray-400"
-                    }`}>
-                      {evaluationMetrics?.relevance?.score != null ? `${(evaluationMetrics?.relevance?.score * 100).toFixed(0)}%` : "待评估"}
-                    </span>
-                  </div>
-                  <div className="w-full bg-gray-200 rounded-full h-1.5">
-                    <div
-                      className={`h-1.5 rounded-full ${
-                        evaluationMetrics?.relevance?.score != null && evaluationMetrics?.relevance?.score >= 0.8 ? "bg-green-500" :
-                        evaluationMetrics?.relevance?.score != null && evaluationMetrics?.relevance?.score >= 0.5 ? "bg-yellow-500" :
-                        "bg-gray-300"
-                      }`}
-                      style={{ width: `${(evaluationMetrics?.relevance?.score ?? 0) * 100}%` }}
-                    />
-                  </div>
-                  <p className="text-[10px] text-gray-400 mt-1">内容是否与需求相关</p>
-                </div>
-
-                {/* 内容完整度 */}
-                <div className="px-3 py-2 rounded-lg bg-white border">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[11px] text-gray-500">内容完整度</span>
-                    <span className={`text-sm font-bold ${
-                      evaluationMetrics?.completeness?.score != null && evaluationMetrics?.completeness?.score >= 0.8 ? "text-green-600" :
-                      evaluationMetrics?.completeness?.score != null && evaluationMetrics?.completeness?.score >= 0.5 ? "text-yellow-600" :
-                      "text-gray-400"
-                    }`}>
-                      {evaluationMetrics?.completeness?.score != null ? `${(evaluationMetrics?.completeness?.score * 100).toFixed(0)}%` : "待评估"}
-                    </span>
-                  </div>
-                  <div className="w-full bg-gray-200 rounded-full h-1.5">
-                    <div
-                      className={`h-1.5 rounded-full ${
-                        evaluationMetrics?.completeness?.score != null && evaluationMetrics?.completeness?.score >= 0.8 ? "bg-green-500" :
-                        evaluationMetrics?.completeness?.score != null && evaluationMetrics?.completeness?.score >= 0.5 ? "bg-yellow-500" :
-                        "bg-gray-300"
-                      }`}
-                      style={{ width: `${(evaluationMetrics?.completeness?.score ?? 0) * 100}%` }}
-                    />
-                  </div>
-                  <p className="text-[10px] text-gray-400 mt-1">是否覆盖需求的所有要点</p>
-                </div>
-              </div>
-
-              {/* 评估按钮 */}
-              {onEvaluate && (
-                <button
-                  onClick={onEvaluate}
-                  disabled={evaluating}
-                  className="w-full px-3 py-2 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 text-xs font-medium hover:bg-blue-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {evaluating ? "⏳ 评估中..." : evaluationMetrics ? "🔄 重新评估" : "🔍 评估内容相关度和完整度"}
-                </button>
-              )}
-
-              {/* 详细信息 */}
-              {evaluationMetrics && (
-                <div className="space-y-2">
-
-                  {/* 遗漏要点 */}
-                  {evaluationMetrics.completeness?.missingPoints && evaluationMetrics.completeness.missingPoints.length > 0 && (
-                    <div className="px-3 py-2 rounded-lg bg-orange-50 border border-orange-200">
-                      <p className="text-[11px] text-orange-700 font-medium mb-1">⚠️ 以下需求要点可能未覆盖：</p>
-                      <ul className="text-[10px] text-orange-600 space-y-0.5">
-                        {evaluationMetrics.completeness.missingPoints.slice(0, 3).map((s, i) => (
-                          <li key={i}>• {s}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {/* 内容冲突（过滤已 resolved 的，只展示 unresolved/new） */}
-                  {(() => {
-                    const visibleItems = (evaluationMetrics.conflicts?.items ?? []).filter(
-                      (i) => (i as any).status !== "resolved",
-                    );
-                    if (visibleItems.length === 0) return null;
-                    return (
-                      <div className="px-3 py-2 rounded-lg bg-red-50 border border-red-200">
-                        <p className="text-[11px] text-red-700 font-medium mb-1">🔴 发现 {visibleItems.length} 处内容冲突：</p>
-                        <div className="space-y-2">
-                          {visibleItems.slice(0, 2).map((conflict, i) => (
-                            <div key={i} className="ml-2">
-                              <p className="text-[10px] text-red-600 font-medium">
-                                {(conflict as any).severity === "high" ? "🔴" : (conflict as any).severity === "medium" ? "🟡" : "🟢"} {(conflict as any).topic}
-                              </p>
-                              <ul className="text-[10px] text-red-500 ml-3 space-y-0.5">
-                                {((conflict as any).claims ?? []).slice(0, 2).map((claim: any, j: number) => (
-                                  <li key={j} className="cursor-pointer hover:underline" onClick={() => scrollToParagraph(claim.text)}>• {claim.source}: {String(claim.text).substring(0, 50)}...</li>
-                                ))}
-                              </ul>
-                              {(conflict as any).recommendation && (
-                                <p className="text-[10px] text-red-400 ml-3 mt-0.5">💡 {(conflict as any).recommendation}</p>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })()}
-                </div>
-              )}
-
-              {/* 推荐操作 */}
-              {trustScore !== null && trustScore < 0.8 && (
-                <div className={`mt-3 px-3 py-2 rounded-lg text-xs ${
-                  trustScore >= 0.5 ? "bg-yellow-50 text-yellow-800 border border-yellow-200" :
-                  "bg-red-50 text-red-800 border border-red-200"
-                }`}>
-                  {trustScore >= 0.5
-                    ? "⚠️ 文档整体可用，但建议补充知识源提高有据可查度"
-                    : "❌ 有据可查度较低，建议补充知识源或重新生成后再使用"
-                  }
-                </div>
-              )}
-
-              {/* 章节级详情 */}
-              {sections.length > 0 && (
-                <div className="mt-3">
-                  <p className="text-xs text-gray-500 mb-2">各章节有据可查度：</p>
-                  <div className="space-y-1.5">
-                    {sections.map((s, idx) => (
-                      <div key={idx} className="flex items-center gap-2">
-                        <span className="text-xs text-gray-600 w-24 truncate">{s.title}</span>
-                        <div className="flex-1 bg-gray-200 rounded-full h-1.5">
-                          <div
-                            className={`h-1.5 rounded-full ${
-                              s.groundingScore >= 0.8 ? "bg-green-500" :
-                              s.groundingScore >= 0.5 ? "bg-yellow-500" :
-                              "bg-red-500"
-                            }`}
-                            style={{ width: `${s.groundingScore * 100}%` }}
-                          />
-                        </div>
-                        <span className={`text-xs font-medium w-8 text-right ${
-                          s.groundingScore >= 0.8 ? "text-green-600" :
-                          s.groundingScore >= 0.5 ? "text-yellow-600" :
-                          "text-red-600"
-                        }`}>
-                          {(s.groundingScore * 100).toFixed(0)}%
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
+        {sections.length > 0 && (
+        <div className="px-5 pb-3">
+          <UnifiedEvaluationCard evaluationMetrics={evaluationMetrics} trustScore={trustScore} />
+        </div>
         )}
       </div>
 
@@ -695,7 +423,7 @@ export default function DocPreview({
               <div className="doc-content max-w-none" dangerouslySetInnerHTML={{ __html: sanitizedContent }} />
               {sections.length > 0 && (
                 <div className="mt-8 pt-6 border-t">{/* 章节来源占位 */}</div>
-              )}
+            )}
             </div>
           ) : (
             <div className="flex items-center justify-center h-full">
@@ -706,24 +434,15 @@ export default function DocPreview({
               </div>
             </div>
           )
-            ) : sanitizedContent ? (
+        ) : sanitizedContent ? (
           <div className="p-6" ref={containerRef}>
             {showHeatmap && (
-              <div className="fixed bottom-4 right-4 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-20 text-xs">
-                <div className="font-medium mb-1.5 text-gray-700">置信度热力图</div>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="w-3 h-3 rounded" style={{ background: "rgba(34,197,94,0.6)" }} />
-                  <span className="text-gray-600">多源交叉验证（≥2 源）</span>
-                </div>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="w-3 h-3 rounded" style={{ background: "rgba(234,179,8,0.6)" }} />
-                  <span className="text-gray-600">单源支撑（1 源）</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded" style={{ background: "rgba(239,68,68,0.6)" }} />
-                  <span className="text-gray-600">AI 推断（无直接来源）</span>
-                </div>
-              </div>
+            <div className="fixed bottom-4 right-4 bg-white border rounded-lg shadow-lg p-3 z-20 text-xs">
+              <div className="font-medium mb-1.5 text-gray-700">置信度热力图</div>
+              <div className="flex items-center gap-2 mb-1"><span className="w-3 h-3 rounded" style={{background:"rgba(34,197,94,0.3)"}}/><span>多源交叉验证（≥2 源）</span></div>
+              <div className="flex items-center gap-2 mb-1"><span className="w-3 h-3 rounded" style={{background:"rgba(234,179,8,0.3)"}}/><span>单源支撑（1 源）</span></div>
+              <div className="flex items-center gap-2"><span className="w-3 h-3 rounded" style={{background:"rgba(239,68,68,0.3)"}}/><span>AI 推断</span></div>
+            </div>
             )}
             {/* 编辑模式：textarea */}
             {editing ? (
@@ -759,21 +478,12 @@ export default function DocPreview({
                         onDrop={(e) => handleDrop(e, idx)}
                       >
                         <button
+                          id={`demo-source-toggle-${idx}`}
                           onClick={() => handleSectionClick(idx)}
                           className="w-full px-4 py-2 flex items-center justify-between hover:bg-gray-50 text-left"
                         >
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-medium text-gray-700">{s.title}</span>
-                            <span
-                              className={`text-[10px] px-1.5 py-0.5 rounded ${
-                                s.groundingScore >= 0.8 ? "bg-green-100 text-green-700" :
-                                s.groundingScore >= 0.5 ? "bg-yellow-100 text-yellow-700" :
-                                "bg-red-100 text-red-700"
-                              }`}
-                              title="引用覆盖率：本章节可追溯到具体来源段落的声明比例（逐句验证，最严格指标）"
-                            >
-                              引用覆盖 {(s.groundingScore * 100).toFixed(0)}%
-                            </span>
                             {isDirty && (
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-100 text-orange-700">已修改</span>
                             )}
@@ -873,6 +583,7 @@ export default function DocPreview({
                             {isDirty && (
                               <div className="mt-3 pt-2 border-t border-gray-200">
                                 <button
+                                  id="demo-regenerate-section"
                                   onClick={() => onRegenerateSection?.(idx)}
                                   disabled={isRegenerating}
                                   className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
@@ -893,15 +604,7 @@ export default function DocPreview({
                 </div>
               </div>
             )}
-
-          {/* 🔍 AI 文档自审 / 压力测试（nf3） */}
-          {sections.length > 0 && (
-            <div className="mt-6">
-              <DocumentAudit />
-            </div>
-          )}
           </div>
-
         ) : (
           <div className="flex items-center justify-center h-full text-gray-400">
             <div className="text-center">

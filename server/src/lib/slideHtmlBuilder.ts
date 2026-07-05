@@ -53,10 +53,10 @@ h2 { font-size: 22px; color: #1a1a2e; margin-bottom: 10px; flex-shrink: 0; }
 .ip-header p { font-size: 9px; color: #333; line-height: 1.3; margin-bottom: 2px; }
 .ip-body { display: flex; gap: 8px; flex: 1; min-height: 0; }
 .ip-table { flex: 1; min-width: 0; }
-.ip-table table { width: 100%; border-collapse: collapse; font-size: 7px; }
+.ip-table table { width: 100%; border-collapse: collapse; font-size: 7px; table-layout: fixed; }
 .ip-table th { background: #16213e; color: #fff; padding: 2px 3px; text-align: center; }
 .ip-table td { padding: 1px 3px; border: 0.5px solid #ddd; text-align: center; }
-.ip-chart { flex: 1; min-width: 0; min-height: 40px; border: 1px dashed #ccc; background: #fafafa; display: flex; align-items: center; justify-content: center; color: #999; font-size: 9px; }
+.ip-chart { flex: 1; min-width: 0; min-height: 80px; border: 1px dashed #ccc; background: #fafafa; display: flex; align-items: center; justify-content: center; color: #999; font-size: 9px; }
 </style></head><body><div class="slide">
 <h2>${title}</h2>
 <div class="sep"></div>`;
@@ -88,7 +88,11 @@ h2 { font-size: 22px; color: #1a1a2e; margin-bottom: 10px; flex-shrink: 0; }
     // Table
     if (i < tables.length && tables[i]) {
       const t = tables[i]!;
+      const colCount = Math.max(...t.map(r => r.length));
       html += `<div class="ip-table"><table>`;
+      if (colCount > 0) {
+        html += `<colgroup>${Array(colCount).fill(`<col style="width:${(100 / colCount).toFixed(1)}%">`).join("")}</colgroup>`;
+      }
       for (let ri = 0; ri < t.length; ri++) {
         const tag = ri === 0 ? "th" : "td";
         html += "<tr>";
@@ -120,7 +124,8 @@ function parseContentHtml(html: string): ContentPart[] {
   const regex = /<(h3|p)\b[^>]*>(.*?)<\/\1>/gi;
   let m;
   while ((m = regex.exec(html)) !== null) {
-    const text = m[2]!.replace(/<[^>]+>/g, "").trim();
+    // 保留 <sup> 和 <a> 引用标记，只剥离其他 HTML 标签
+    const text = m[2]!.replace(/<(?!\/?(?:sup|a)\b)[^>]+>/g, "").trim();
     if (text) parts.push({ tag: m[1]!.toLowerCase(), text });
   }
   return parts;
@@ -141,5 +146,12 @@ function groupIntoInfoPoints(parts: ContentPart[]): ContentPart[][] {
 }
 
 function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  // 保留 <sup> / <a> 引用标记（由 cleanContent 生成），其余 HTML 字符转义
+  const preserved: string[] = [];
+  const safe = s.replace(/<\/?(?:sup|a)\b[^>]*>/gi, (match) => {
+    preserved.push(match);
+    return `\x00PRESERVE${preserved.length - 1}\x00`;
+  });
+  const escaped = safe.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return escaped.replace(/\x00PRESERVE(\d+)\x00/g, (_, i) => preserved[parseInt(i)]!);
 }

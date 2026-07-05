@@ -189,13 +189,17 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
 
     try {
       console.log("[ChatBox] Sending request to /api/chat");
+      const fetchBody: any = {
+        message: userInput,
+        conversationHistory: sessionMessages.map((m) => ({ role: m.role, content: m.content })),
+      };
+      if ((window as any).__DEMO_MODE__) {
+        fetchBody.providerPreference = ["demo"];
+      }
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: userInput,
-          conversationHistory: sessionMessages.map((m) => ({ role: m.role, content: m.content })),
-        }),
+        body: JSON.stringify(fetchBody),
       });
       const data = await res.json();
       console.log("[ChatBox] Received response", { ok: data.ok, type: data.type, hasOutline: !!data.suggestedOutline, contentLength: data.content?.length });

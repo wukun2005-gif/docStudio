@@ -5,12 +5,14 @@
  * 集成：向量检索 + Web Search (MCP tool calling) + Groundedness Check
  */
 import { registry, startNewTaskEpoch } from "../providers/registry.js";
+import { getModelCapabilities } from "../providers/model-capabilities-registry.js";
 import { getApiKey } from "../security/keyStore.js";
 import { hybridSearch, hybridSearchWithRemote, type CrossSourceSearchResult } from "./hybridSearch.js";
 import { getValidAccessToken } from "./connectors/msGraphOAuth.js";
 import { readSettingsFromDb, readSenderProfile } from "./settingsReader.js";
 import { executeWithTools } from "./toolExecutor.js";
 import { checkGroundedness, type GroundingDoc } from "./groundednessCheck.js";
+import { DEMO_FIXTURES } from "../providers/fixtures/demo-fixtures.js";
 import { checkFidelity } from "./fidelityCheck.js";
 import { cleanContent, type CitationLink } from "./contentCleaner.js";
 import { logger } from "./logger.js";
@@ -23,6 +25,9 @@ import * as cheerio from "cheerio";
 import type { OutlineSection } from "./narrativeEngine.js";
 import type { ChatRequest, ToolDefinition, ToolCall } from "../providers/openai.js";
 import type { DocumentMetadata, StyleTemplate, FormatTemplate, AudienceProfile } from "../../../shared/src/types/generation.js";
+
+// nf1: demo mode — 跳过所有外部 API（RAG/embedding/remote/reranker）
+let _isDemoMode = false;
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 
@@ -199,6 +204,18 @@ async function retrieveForSection(
   description?: string,
   excludeChunkIds?: Set<string>,
 ): Promise<Array<{ chunkId: string; content: string; score: number; sourceId: string; sourceName?: string; sourceUrl?: string }>> {
+  if (_isDemoMode) {
+    // Match section title against fixture outline to find index
+    const demoSrcs = DEMO_FIXTURES.demoSources;
+    try {
+      const outline = JSON.parse(DEMO_FIXTURES.outline).outline as Array<{ title: string }>;
+      const idx = outline.findIndex((s) => s.title === sectionTitle);
+      return (demoSrcs[idx >= 0 ? idx : 0] ?? demoSrcs[0]) as any;
+    } catch {
+      return demoSrcs[0] as any;
+    }
+  }
+
   const query = description ? `${sectionTitle} ${description}` : sectionTitle;
 
   // 尝试获取 query embedding
@@ -276,6 +293,8 @@ function flattenOutline(outline: OutlineSection[]): OutlineSection[] {
 async function batchRetrieveForOutline(
   outline: OutlineSection[],
 ): Promise<Map<string, Array<{ chunkId: string; content: string; score: number; sourceId: string; sourceName?: string; sourceUrl?: string; indexedAt?: string }>>> {
+  if (_isDemoMode) return new Map();
+
   const flatSections = flattenOutline(outline).slice(0, 20);
   const sectionRetrievals = new Map<string, Array<{ chunkId: string; content: string; score: number; sourceId: string; sourceName?: string; sourceUrl?: string; indexedAt?: string }>>();
 
@@ -779,7 +798,8 @@ ${sourceText || "（无参考信息）"}
 6. 如果需要补充最新的行业动态、市场信息或外部数据，必须调用 web_search 工具搜索网络
 7. 【重要】引用参考信息时，必须用 [N] 标记来源编号。系统会自动提供带编号的参考文档，请直接复用这些编号。
 8. 【禁止】只允许引用系统提供的参考文档中的编号，绝对不要引用不存在的编号。如果某句话没有对应的参考来源，直接写出该句，不要添加任何引用标记。
-9. 【最重要】这是最终输出阶段。禁止输出"让我分析..."、"我需要搜索..."、"用户要求..."、"前文已经涵盖..."、"参考信息："、"现在需要写..."等任何思考过程或规划性文字。只能输出章节正文。${toneRule}`;
+9. 【表格格式】输出表格时，必须使用标准 markdown 表格格式：每行以 | 开头和结尾，列之间用 | 分隔，第二行为分隔行（如 |---|---|）。绝对不要将表格单元格直接拼接为一行文字（如"任务优先级负责人"），必须用 | 分隔每个单元格。
+10. 【最重要】这是最终输出阶段。禁止输出"让我分析..."、"我需要搜索..."、"用户要求..."、"前文已经涵盖..."、"参考信息："、"现在需要写..."等任何思考过程或规划性文字。只能输出章节正文。${toneRule}`;
 
   const userPrompt = `请为"${section.title}"章节撰写内容。${section.description ? `该章节要写：${section.description}` : ""}`;
 
@@ -798,22 +818,34 @@ ${sourceText || "（无参考信息）"}
   // 90s 足以完成普通章节（通常 30-60s），超过则 fallback 到下一 model。
   const SECTION_TIMEOUT_MS = 90_000;
 
+  // 内容生成 temperature 默认 0.4：忠实知识库为主，适度保留表达多样性
+  const CONTENT_TEMPERATURE = 0.4;
+
   const buildLLMCall = (overrides?: {
     messages?: Array<{ role: string; content: string; tool_call_id?: string; name?: string }>;
     tools?: ToolDefinition[];
     tool_choice?: "auto" | "none" | "required";
     timeoutMs?: number;
+    temperature?: number;
   }) => {
+    const effectiveModelId = config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro";
+    const caps = getModelCapabilities(effectiveModelId);
+    // 查询模型能力：不支持 temperature 的模型不发送该字段；支持的模型钳制到合法区间
+    const requestedTemp = overrides?.temperature ?? CONTENT_TEMPERATURE;
+    const clampedTemp = caps.temperature.supported
+      ? Math.max(caps.temperature.range[0], Math.min(caps.temperature.range[1], requestedTemp))
+      : undefined;
+
     return registry.runWithFallback(
       providers,
       {
-        modelId: config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro",
+        modelId: effectiveModelId,
         messages: (overrides?.messages ?? [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ]) as ChatRequest["messages"],
         apiKey: "",
-        temperature: 0.7,
+        ...(clampedTemp !== undefined ? { temperature: clampedTemp } : {}),
         signal: config.signal,
         timeoutMs: overrides?.timeoutMs ?? SECTION_TIMEOUT_MS,
         tools: overrides?.tools,
@@ -854,6 +886,14 @@ ${sourceText || "（无参考信息）"}
 
   let finalContent = result.answer || `[生成失败: ${section.title}]`;
 
+  // [DEBUG-CITATION] 追踪 [N] 标记在每个步骤的数量
+  const countCitations = (text: string): string => {
+    const nums = [...text.matchAll(/\[(\d+)\]/g)].map(m => parseInt(m[1]));
+    const unique = [...new Set(nums)].sort((a, b) => a - b);
+    return `[${unique.join(",") || "NONE"}](${nums.length})`;
+  };
+  logger.info(`[DEBUG-CITATION] S${sectionIndex + 1} "${section.title.substring(0, 20)}" LLM answer: ${countCitations(result.answer || "")}, len=${(result.answer || "").length}`);
+
   // ── 提取 LLM 输出中的 Python 脚本和 chart spec ──
   // 提取后必须用 cleanedText：Python 代码块不能显示给用户。
   // 代码块保存在 section meta 中供导出（Excel Tier 1），不进入页面展示。
@@ -879,6 +919,8 @@ ${sourceText || "（无参考信息）"}
     }
   }
 
+  logger.info(`[DEBUG-CITATION] S${sectionIndex + 1} after extractCodeBlocks: ${countCitations(finalContent)}, len=${finalContent.length}`);
+
   let groundingScore = 0.5; // 默认值
 
   if (groundingDocs.length > 0 && finalContent.length > 50) {
@@ -886,17 +928,51 @@ ${sourceText || "（无参考信息）"}
       const groundedness = await checkGroundedness(finalContent, groundingDocs, {
         signal: config.signal,
         timeoutMs: SECTION_TIMEOUT_MS,
+        providerPreference: config.providerPreference,
       });
       groundingScore = groundedness.groundingScore;
-      if (groundedness.verdict === "fail" && groundedness.removedClaims.length > 0 && groundedness.output.length > 0) {
-        // 只要真正移除了声明，就替换内容，避免冲突/无根据的声明进入文档
-        finalContent = groundedness.output;
-        logger.info(`[DocGenerator] Groundedness 过滤: ${groundedness.removedClaims.length} 个声明被移除`);
+      if (groundedness.verdict === "fail" && groundedness.removedClaims.length > 0) {
+        // 只删除无根据的句子，保留原始 HTML 结构、markdown 表格和 [N] 引用标记
+        // 避免用 groundedness.output（纯文本 join）替换，那样会丢失表格结构和引用编号
+        const originalLen = finalContent.length;
+        let cleanedContent = finalContent;
+        let actuallyRemoved = 0;
+        for (const claim of groundedness.removedClaims) {
+          const claimText = claim.text.trim();
+          if (claimText.length > 5 && cleanedContent.includes(claimText)) {
+            cleanedContent = cleanedContent.replace(claimText, "");
+            actuallyRemoved++;
+          }
+        }
+        // 安全阀：如果删除后内容保留率 < 30%，跳过替换（避免章节被掏空）
+        if (actuallyRemoved > 0 && cleanedContent.length >= originalLen * 0.3) {
+          cleanedContent = cleanedContent
+            .replace(/\n{3,}/g, "\n\n")
+            .replace(/^[。！？\s]+$/gm, "")
+            .trim();
+          finalContent = cleanedContent;
+          logger.info(`[DocGenerator] Groundedness 过滤: ${actuallyRemoved}/${groundedness.removedClaims.length} 个声明被移除 (保留 ${cleanedContent.length}/${originalLen} chars)`);
+        } else if (actuallyRemoved === 0) {
+          logger.warn(`[DocGenerator] Groundedness 过滤: 未匹配到任何声明文本，跳过替换`);
+        } else {
+          logger.warn(`[DocGenerator] Groundedness 过滤: 保留率过低 (${(cleanedContent.length / originalLen * 100).toFixed(0)}%)，跳过替换保留原始内容`);
+        }
       }
     } catch (err) {
       logger.warn(`[DocGenerator] Groundedness check 失败: ${err}`);
     }
   }
+
+  logger.info(`[DEBUG-CITATION] S${sectionIndex + 1} after groundedness: ${countCitations(finalContent)}, len=${finalContent.length}, validRange=[${globalCitationOffset + 1}-${globalCitationOffset + result.mergedCitations.length}]`);
+
+  // 内容清洗：移除元信息、处理 citation、markdown→HTML
+  // 照搬 patentExaminator：使用 mergedCitations（与 re-inject 相同的数组）确保编号一致
+  const citationLinks: CitationLink[] = result.mergedCitations.map((c, i) => ({
+    index: globalCitationOffset + i + 1,
+    title: c.title,
+    url: c.url || "",
+    sourceId: c.sourceId || "",
+  }));
 
   // 校验：移除 LLM 生成的超出有效范围的 [N] 引用标记（防止幻觉编号）
   // 在 cleanContent 之前做（纯文本阶段 regex 最可靠）
@@ -913,15 +989,11 @@ ${sourceText || "（无参考信息）"}
     }
   }
 
-  // 内容清洗：移除元信息、处理 citation、markdown→HTML
-  // 照搬 patentExaminator：使用 mergedCitations（与 re-inject 相同的数组）确保编号一致
-  const citationLinks: CitationLink[] = result.mergedCitations.map((c, i) => ({
-    index: globalCitationOffset + i + 1,
-    title: c.title,
-    url: c.url || "",
-    sourceId: c.sourceId || "",
-  }));
+  logger.info(`[DEBUG-CITATION] S${sectionIndex + 1} after rangeCheck: ${countCitations(finalContent)}, len=${finalContent.length}, citationLinks=[${citationLinks.map(c=>c.index).join(",")}]`);
+
   finalContent = cleanContent(finalContent, config.format, citationLinks, effectiveStyleId);
+
+  logger.info(`[DEBUG-CITATION] S${sectionIndex + 1} after cleanContent: ${countCitations(finalContent)}, len=${finalContent.length}`);
 
   return {
     content: finalContent,
@@ -1135,7 +1207,8 @@ ${subSectionPrompt}
 7. 内容要与前文自然衔接，承上启下
 8. 如果需要补充最新的行业动态、市场信息或外部数据，必须调用 web_search 工具搜索网络
 9. 【重要】引用参考信息时，必须用 [N] 标记来源编号。系统会自动提供带编号的参考文档，请直接复用这些编号。
-10. 【禁止】只允许引用系统提供的参考文档中的编号，绝对不要引用不存在的编号。如果某句话没有对应的参考来源，直接写出该句，不要添加任何引用标记。${toneRule}`;
+10. 【禁止】只允许引用系统提供的参考文档中的编号，绝对不要引用不存在的编号。如果某句话没有对应的参考来源，直接写出该句，不要添加任何引用标记。
+11. 【表格格式】输出表格时，必须使用标准 markdown 表格格式：每行以 | 开头和结尾，列之间用 | 分隔，第二行为分隔行（如 |---|---|）。绝对不要将表格单元格直接拼接为一行文字（如"任务优先级负责人"），必须用 | 分隔每个单元格。${toneRule}`;
 
   const userPrompt = `请一次性撰写上述 ${subSectionList.length} 个子章节的完整内容。请确保每个子章节都以 <h3>子章节标题</h3> 开头标记。`;
 
@@ -1152,22 +1225,33 @@ ${subSectionPrompt}
 
   const SECTION_TIMEOUT_MS = 180_000; // 合并调用：一次生成父+子章节，需要更多时间但比分别生成快
 
+  // 内容生成 temperature 默认 0.4：忠实知识库为主，适度保留表达多样性
+  const CONTENT_TEMPERATURE = 0.4;
+
   const buildLLMCall = (overrides?: {
     messages?: Array<{ role: string; content: string; tool_call_id?: string; name?: string }>;
     tools?: ToolDefinition[];
     tool_choice?: "auto" | "none" | "required";
     timeoutMs?: number;
+    temperature?: number;
   }) => {
+    const effectiveModelId = config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro";
+    const caps = getModelCapabilities(effectiveModelId);
+    const requestedTemp = overrides?.temperature ?? CONTENT_TEMPERATURE;
+    const clampedTemp = caps.temperature.supported
+      ? Math.max(caps.temperature.range[0], Math.min(caps.temperature.range[1], requestedTemp))
+      : undefined;
+
     return registry.runWithFallback(
       providers,
       {
-        modelId: config.modelId ?? dbSettings.modelId ?? "mimo-v2-pro",
+        modelId: effectiveModelId,
         messages: (overrides?.messages ?? [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ]) as ChatRequest["messages"],
         apiKey: "",
-        temperature: 0.7,
+        ...(clampedTemp !== undefined ? { temperature: clampedTemp } : {}),
         signal: config.signal,
         timeoutMs: overrides?.timeoutMs ?? SECTION_TIMEOUT_MS,
         tools: overrides?.tools,
@@ -1236,11 +1320,33 @@ ${subSectionPrompt}
       const groundedness = await checkGroundedness(finalContent, groundingDocs, {
         signal: config.signal,
         timeoutMs: SECTION_TIMEOUT_MS,
+        providerPreference: config.providerPreference,
       });
       groundingScore = groundedness.groundingScore;
-      if (groundedness.verdict === "fail" && groundedness.removedClaims.length > 0 && groundedness.output.length > 0) {
-        finalContent = groundedness.output;
-        logger.info(`[DocGenerator] 合并章节 Groundedness 过滤: ${groundedness.removedClaims.length} 个声明被移除`);
+      if (groundedness.verdict === "fail" && groundedness.removedClaims.length > 0) {
+        // 只删除无根据的句子，保留原始 HTML 结构、markdown 表格和 [N] 引用标记
+        const originalLen = finalContent.length;
+        let cleanedContent = finalContent;
+        let actuallyRemoved = 0;
+        for (const claim of groundedness.removedClaims) {
+          const claimText = claim.text.trim();
+          if (claimText.length > 5 && cleanedContent.includes(claimText)) {
+            cleanedContent = cleanedContent.replace(claimText, "");
+            actuallyRemoved++;
+          }
+        }
+        if (actuallyRemoved > 0 && cleanedContent.length >= originalLen * 0.3) {
+          cleanedContent = cleanedContent
+            .replace(/\n{3,}/g, "\n\n")
+            .replace(/^[。！？\s]+$/gm, "")
+            .trim();
+          finalContent = cleanedContent;
+          logger.info(`[DocGenerator] 合并章节 Groundedness 过滤: ${actuallyRemoved}/${groundedness.removedClaims.length} 个声明被移除 (保留 ${cleanedContent.length}/${originalLen} chars)`);
+        } else if (actuallyRemoved === 0) {
+          logger.warn(`[DocGenerator] 合并章节 Groundedness 过滤: 未匹配到任何声明文本，跳过替换`);
+        } else {
+          logger.warn(`[DocGenerator] 合并章节 Groundedness 过滤: 保留率过低 (${(cleanedContent.length / originalLen * 100).toFixed(0)}%)，跳过替换保留原始内容`);
+        }
       }
     } catch (err) {
       logger.warn(`[DocGenerator] 合并章节 Groundedness check 失败: ${err}`);
@@ -1483,6 +1589,14 @@ async function generateSections(
         section, rollingSummary, config, userRequest, fullOutline, documentStyle, globalIndex, currentCitationOffset, isLastSection, excludeChunkIds
       );
       const newSection = { title: section.title, content, sources, webCitations, groundingScore, citationLinks, ...(pythonScript && { pythonScript }), ...(chartSpecsRaw && { chartSpecsRaw }) };
+
+      // nf1: demo mode — 按 section index 分配不同的 groundingScore，让热力图呈现绿/黄/红
+      if (_isDemoMode) {
+        const idx = sections.length;
+        const demoGS = [0.97, 0.85, 0.42, 0.78, 0.96];
+        newSection.groundingScore = demoGS[idx] ?? 0.5;
+      }
+
       sections.push(newSection);
       // 流式回调：章节生成后立即推送
       if (onSection) onSection(newSection, "done");
@@ -1985,6 +2099,16 @@ export async function generateDocument(
 ): Promise<GenerateDocResult> {
   logger.info(`[DocGenerator] 开始生成: ${config.title}`);
 
+  // nf1: demo mode — 跳过所有外部 API（RAG/embedding/remote/reranker），DemoProvider 返回 fixture 内容
+  const isDemo = config.providerPreference?.length === 1 && config.providerPreference[0] === "demo";
+  const prevIsDemo = _isDemoMode;
+  _isDemoMode = isDemo;
+  if (isDemo) {
+    logger.info(`[DocGenerator] Demo mode: 跳过 RAG 检索，使用 DemoProvider fixture`);
+  }
+
+  try {
+
   // 开始新的任务周期：断路器在此任务期间已 OPEN 的模型不会被探测
   startNewTaskEpoch();
 
@@ -2006,7 +2130,7 @@ export async function generateDocument(
   // 两道防线确保 LLM 不会基于冲突数据生成内容。
   let excludeChunkIds: Set<string> | undefined;
   let conflictResolution: ConflictResolutionResult | null = null;
-  const shouldPreFilter = config.preFilter !== false; // 默认 true，显式 false 才关闭
+  const shouldPreFilter = !_isDemoMode && config.preFilter !== false; // demo mode 跳过 pre-filter
   if (shouldPreFilter) {
     try {
       // pre-filter 超时保护：超过 90s 降级到 post-filter 兜底，不阻塞章节生成。
@@ -2151,6 +2275,9 @@ export async function generateDocument(
   logger.info(`[DocGenerator] 生成完成: ${sections.length} 章节, trustScore=${trustScore.toFixed(2)} (groundedness), style=${documentStyle}, title="${title}"`);
 
   return { content, sections, trustScore, documentStyle, title, ...(conflictResolution ? { conflictResolution } : {}) };
+  } finally {
+    _isDemoMode = prevIsDemo;
+  }
 }
 
 // ── 格式转换 ──────────────────────────────────────────

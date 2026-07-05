@@ -1001,6 +1001,66 @@ export default function Settings() {
           <div className="mt-6 border-t pt-6">
             <h3 className="text-lg font-semibold mb-4">远程知识源</h3>
             <div className="space-y-4">
+              {/* Microsoft Entra ID (Azure AD) 配置 */}
+              <div className="border rounded-lg bg-white p-4">
+                <div className="flex items-center mb-3">
+                  <span className="text-lg mr-2">🏢</span>
+                  <span className="font-medium flex-1">Microsoft Entra ID (Azure AD)</span>
+                  {msGraphConfigured && (
+                    <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">已配置</span>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500 mb-3">
+                  Azure AD 应用凭据，用于 <strong>People Graph</strong>（同步组织架构）和 <strong>OneDrive / SharePoint</strong>（远程文档搜索）。
+                </p>
+                <div className="space-y-3 ml-1">
+                  <div>
+                    <label className="block text-sm text-gray-600 mb-1">Tenant ID</label>
+                    <input
+                      type="text"
+                      value={msGraphConfig.tenantId}
+                      onChange={e => setMsGraphConfig(prev => ({ ...prev, tenantId: e.target.value }))}
+                      placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                      className="w-full border rounded px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-600 mb-1">Client ID</label>
+                    <input
+                      type="text"
+                      value={msGraphConfig.clientId}
+                      onChange={e => setMsGraphConfig(prev => ({ ...prev, clientId: e.target.value }))}
+                      placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                      className="w-full border rounded px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-600 mb-1">Client Secret</label>
+                    <input
+                      type="password"
+                      value={msGraphConfig.clientSecret}
+                      onChange={e => setMsGraphConfig(prev => ({ ...prev, clientSecret: e.target.value }))}
+                      placeholder={msGraphConfigured ? "••••••••（已配置，留空则不更新）" : "Client Secret Value"}
+                      className="w-full border rounded px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleSaveMsGraphConfig}
+                      disabled={msGraphSaving || !msGraphConfig.clientId || !msGraphConfig.tenantId}
+                      className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50"
+                    >
+                      {msGraphSaving ? "保存中..." : "保存配置"}
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-400">
+                    在 <a href="https://portal.azure.com/" target="_blank" rel="noopener" className="text-blue-500 hover:underline">Azure Portal</a> 注册应用获取。
+                    需配置重定向 URI：<code className="bg-gray-100 px-1 rounded">http://localhost:3000/api/connectors/msgraph/callback</code>。
+                    配置后可在「知识库 → People Graph」同步组织架构，在「知识库 → 远程文档」连接 OneDrive。
+                  </p>
+                </div>
+              </div>
+
               {/* GitHub 配置 */}
               <div className="border rounded-lg bg-white p-4">
                 <div className="flex items-center mb-3">
@@ -1048,76 +1108,6 @@ export default function Settings() {
                     需要 repo 权限。配置后在「知识库 → 代码」tab 选择 Repo 并索引。
                   </p>
                 </div>
-              </div>
-
-              {/* OneDrive / Azure 应用配置 */}
-              <div className="border rounded-lg bg-white p-4">
-                <div className="flex items-center mb-3">
-                  <span className="text-lg mr-2">☁️</span>
-                  <span className="font-medium flex-1">OneDrive / SharePoint</span>
-                  {msGraphConfigured && (
-                    <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">已配置</span>
-                  )}
-                </div>
-                <p className="text-xs text-gray-500 mb-3">
-                  连接 OneDrive 后，文档生成时自动搜索远程文档。使用两阶段检索（关键词粗筛 + 语义精排）。
-                </p>
-                <div className="space-y-3 ml-1">
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Tenant ID</label>
-                    <input
-                      type="text"
-                      value={msGraphConfig.tenantId}
-                      onChange={e => setMsGraphConfig(prev => ({ ...prev, tenantId: e.target.value }))}
-                      placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                      className="w-full border rounded px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Client ID</label>
-                    <input
-                      type="text"
-                      value={msGraphConfig.clientId}
-                      onChange={e => setMsGraphConfig(prev => ({ ...prev, clientId: e.target.value }))}
-                      placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                      className="w-full border rounded px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">Client Secret</label>
-                    <input
-                      type="password"
-                      value={msGraphConfig.clientSecret}
-                      onChange={e => setMsGraphConfig(prev => ({ ...prev, clientSecret: e.target.value }))}
-                      placeholder={msGraphConfigured ? "••••••••（已配置，留空则不更新）" : "Client Secret Value"}
-                      className="w-full border rounded px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={handleSaveMsGraphConfig}
-                      disabled={msGraphSaving || !msGraphConfig.clientId || !msGraphConfig.tenantId}
-                      className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50"
-                    >
-                      {msGraphSaving ? "保存中..." : "保存配置"}
-                    </button>
-                  </div>
-                  <p className="text-xs text-gray-400">
-                    在 <a href="https://portal.azure.com/" target="_blank" rel="noopener" className="text-blue-500 hover:underline">Azure Portal</a> 注册应用获取。
-                    需要配置重定向 URI：<code className="bg-gray-100 px-1 rounded">http://localhost:3000/api/connectors/msgraph/callback</code>
-                  </p>
-                </div>
-              </div>
-
-              {/* 检索策略说明 */}
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                <div className="font-medium text-blue-800 mb-2">🔍 检索策略</div>
-                <ul className="text-sm text-blue-700 space-y-1">
-                  <li>• <strong>本地知识库</strong>: BM25 + 向量搜索 + RRF 融合（已有）</li>
-                  <li>• <strong>GitHub Repo</strong>: 本地 clone → 代码分块 → 向量化 → 混合检索</li>
-                  <li>• <strong>OneDrive</strong>: Graph Search 粗筛 → 拉取 top-K → 实时向量化 → 语义重排</li>
-                  <li>• <strong>跨源融合</strong>: 所有来源的结果通过 RRF 算法统一排序</li>
-                </ul>
               </div>
             </div>
           </div>

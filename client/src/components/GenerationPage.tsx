@@ -228,16 +228,20 @@ export default function GenerationPage() {
     // 用 userRequest 作为标题（如"写邮件给苏楠"），而非大纲第一章节名
     const docTitle = currentCase?.userRequest?.trim() || localOutline[0]?.title || "文档";
 
-    const requestBody = JSON.stringify({
+    const requestBody: any = {
       title: docTitle,
       outline: localOutline,
       format: "html",
       userRequest: currentCase?.userRequest ?? localOutline[0]?.title ?? "",
-      // Composable Prompt Layers: 传递用户选择的维度
       ...(selectedStyle ? { styleId: selectedStyle } : {}),
       ...(selectedFormat ? { outputFormatId: selectedFormat } : {}),
       ...(selectedAudience ? { audienceId: selectedAudience } : {}),
-    });
+    };
+    if ((window as any).__DEMO_MODE__) {
+      requestBody.providerPreference = ["demo"];
+    }
+
+    const reqJson = JSON.stringify(requestBody);
 
     // 累积流式章节内容
     let receivedSections: Array<{ title: string; content: string; groundingScore: number; sources: any[]; webCitations: any[] }> = [];
@@ -290,7 +294,7 @@ export default function GenerationPage() {
       const res = await fetch(`${apiBase}/api/generation/generate/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: requestBody,
+        body: reqJson,
       });
 
       if (!res.ok) {
@@ -513,12 +517,17 @@ export default function GenerationPage() {
 
     try {
       const apiBase = import.meta.env.DEV ? "http://localhost:3000" : "";
+      const evalBody: any = {
+        userRequest: currentCase?.userRequest ?? localOutline[0]?.title ?? "",
+      };
+      if ((window as any).__DEMO_MODE__) {
+        evalBody.providerPreference = ["demo"];
+        evalBody.providerId = "demo";
+      }
       const res = await fetch(`${apiBase}/api/generation/${targetRunId}/evaluate/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userRequest: currentCase?.userRequest ?? localOutline[0]?.title ?? "",
-        }),
+        body: JSON.stringify(evalBody),
         signal: controller.signal,
       });
 
@@ -753,6 +762,7 @@ export default function GenerationPage() {
           </div>
         )}
         <div
+          id="demo-outline-toggle"
           className="px-4 py-2 flex items-center justify-between cursor-pointer hover:bg-gray-50"
           onClick={() => setOutlineCollapsed(!outlineCollapsed)}
         >
