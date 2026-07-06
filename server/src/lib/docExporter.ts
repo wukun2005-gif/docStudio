@@ -516,8 +516,9 @@ export async function generatePowerPoint(title: string, sections: ExportSection[
     const hasCharts = section.chartSpecs && section.chartSpecs.length > 0;
 
     // 紧凑布局：同时有表格和图表时减小文字区域，为 side-by-side 布局腾空间
+    // 0.7" 对任何有意义的文字内容都不够，会导致文字溢出到下方表格区域
     const bothTablesAndCharts = hasTables && hasCharts;
-    const textHeight = bothTablesAndCharts ? 0.7 : (hasTables || hasCharts ? 2.0 : 4.5);
+    const textHeight = bothTablesAndCharts ? 1.5 : (hasTables || hasCharts ? 2.5 : 4.5);
 
     if (textRuns.length > 0) {
       slide.addText(textRuns, {
@@ -586,15 +587,25 @@ export async function generatePowerPoint(title: string, sections: ExportSection[
           try {
             const validSeries = chartSpec.series.filter((s) => s && Array.isArray(s.values) && s.values.length > 0);
             if (validSeries.length === 0) { /* skip chart with no valid series */ break; }
-            let chartData: Array<{ name: string; labels?: string[]; values: number[] | Array<{ x: number; y: number }> }>;
+            let chartData: Array<Record<string, unknown>>;
             if (chartSpec.type === "scatter") {
               chartData = validSeries.map((s) => {
                 const vals: unknown[] = s.values as unknown[];
                 if (vals.length > 0 && Array.isArray(vals[0])) {
-                  const flatY = (vals as unknown[][]).map((v) => Number(v[1]) || 0);
-                  return { name: s.name, labels: chartSpec.categories, values: flatY };
+                  const points = (vals as unknown[][]).map((v) => ({
+                    x: Number(v[0]) || 0,
+                    y: Number(v[1]) || 0,
+                  }));
+                  return { name: s.name, values: points };
                 }
-                return { name: s.name, labels: chartSpec.categories, values: vals as number[] };
+                const cats = chartSpec.categories ?? [];
+                const points = (vals as unknown[]).map((v, i) => {
+                  const c = cats[i];
+                  const n = Number(c);
+                  const x = isNaN(n) ? i + 1 : n;
+                  return { x, y: Number(v) || 0 };
+                });
+                return { name: s.name, values: points };
               });
             } else {
               chartData = validSeries.map((s) => ({
@@ -929,7 +940,7 @@ function renderChartOnSlide(
     }
   }
 
-  let chartData: Array<{ name: string; labels?: string[]; values: number[] }>;
+  let chartData: Array<Record<string, unknown>>;
   const validSeries = chartSpec.series.filter((s) => s && Array.isArray(s.values) && s.values.length > 0);
   if (validSeries.length === 0) {
     logger.warn('[DocExporter] 跳过无效 chart（无有效 series）');
@@ -939,11 +950,22 @@ function renderChartOnSlide(
     chartData = validSeries.map((s) => {
       const vals: unknown[] = s.values as unknown[];
       if (vals.length > 0 && Array.isArray(vals[0])) {
-        const xs = (vals as unknown[][]).map((v) => String(v[0] ?? ""));
-        const ys = (vals as unknown[][]).map((v) => Number(v[1]) || 0);
-        return { name: s.name, labels: xs, values: ys };
+        // [[x,y], ...] 格式
+        const points = (vals as unknown[][]).map((v) => ({
+          x: Number(v[0]) || 0,
+          y: Number(v[1]) || 0,
+        }));
+        return { name: s.name, values: points };
       }
-      return { name: s.name, labels: chartSpec.categories, values: s.values };
+      // [y1, y2, ...] 格式：用 categories 作为 x 值（如果是数字）或用索引
+      const cats = chartSpec.categories ?? [];
+      const points = (vals as unknown[]).map((v, i) => {
+        const c = cats[i];
+        const n = Number(c);
+        const x = isNaN(n) ? i + 1 : n;
+        return { x, y: Number(v) || 0 };
+      });
+      return { name: s.name, values: points };
     });
   } else {
     chartData = validSeries.map((s) => ({

@@ -50,7 +50,8 @@ export default function UnifiedEvaluationCard({ evaluationMetrics, trustScore }:
   const issues = useMemo(() => {
     const list: Array<{ t: string; d: string; s: string }> = [];
     if (trustScore != null && trustScore < 0.8) list.push({ t: "unsupported", d: `综合有据可查度仅 ${Math.round(trustScore * 100)}%，部分内容缺少来源支撑。`, s: "拖拽来源重生成低分段落，或补充知识源后重新生成" });
-    if (m.relevance?.irrelevantSentences?.length) list.push({ t: "unsupported", d: `发现 ${m.relevance.irrelevantSentences.length} 句与需求无关的内容。`, s: "手动编辑删除或修改无关内容" });
+    // 展开每一条无关句子，让用户看到具体内容并可在文档中定位
+    if (m.relevance?.irrelevantSentences?.length) for (const sentence of m.relevance.irrelevantSentences) list.push({ t: "irrelevant", d: `与需求无关：${sentence.length > 120 ? sentence.substring(0, 120) + "…" : sentence}`, s: "在文档中搜索此句并手动编辑删除或修改" });
     if (m.completeness?.missingPoints?.length) for (const p of m.completeness.missingPoints) list.push({ t: "uncovered", d: `需求要点未覆盖：${p}`, s: "补充相关知识源后重新生成" });
     if (m.conflicts?.items?.length) for (const c of m.conflicts.items) {
       const claimsDesc = c.claims.map(cl => {
@@ -65,6 +66,7 @@ export default function UnifiedEvaluationCard({ evaluationMetrics, trustScore }:
 
   const META: Record<string, { i: string; l: string }> = {
     unsupported: { i: "🔴", l: "未支撑断言" },
+    irrelevant: { i: "🟠", l: "与需求无关的内容" },
     uncovered: { i: "🟡", l: "需求要点未覆盖" },
     blocked: { i: "🟢", l: "已拦截冲突（未进入文档）" },
   };

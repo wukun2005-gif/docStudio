@@ -113,3 +113,84 @@ export async function rerank(
 ): Promise<RerankOutput[]> {
   return localRerank(results, query);
 }
+
+// ── 远程 Reranker API（统一入口） ────────────────────────────
+
+export interface RerankerConfig {
+  baseUrl: string;
+  apiKey: string;
+  modelId: string;
+}
+
+/**
+ * 统一的 reranker 调用入口：
+ *   1. 如果配置了远程 reranker API → 调用远程 API（cross-encoder 语义重排序）
+ *   2. 如果远程 API 失败或未配置 → fallback 到本地启发式（localRerank）
+ *
+ * 所有需要 reranking 的场景都必须调用此函数，确保：
+ *   - 远程 reranker API 优先
+ *   - 本地启发式仅作为 fallback
+ *
+ * @param query  检索 query
+ * @param items  候选项（含 id 和 text）
+ * @param config reranker 配置（可选，未配置则直接用本地启发式）
+ * @param topN   返回的 top-N 数量
+ * @returns 按 reranker 分数降序排列的结果，每项含 { id, score }
+ */
+export async function remoteRerank(
+  query: string,
+  items: Array<{ id: string; text: string; score?: number }>,
+  config?: RerankerConfig,
+  topN?: number,
+): Promise<Array<{ id: string; score: number }>> {
+  if (items.length <= 1) {
+    return items.map((i) => ({ id: i.id, score: i.score ?? 0 }));
+  }
+
+  const limit = topN ?? items.length;
+
+  // 优先级 1：远程 reranker API
+  if (config) {
+    try {
+      const rerankUrl = config.baseUrl.endsWith("/v1")
+        ? `${config.baseUrl}/rerank`
+        : `${config.baseUrl}/v1/rerank`;
+      const documents = items.map((r) => r.text);
+      logger.info(`[Rerank] 远程 Rerank: ${documents.length} 候选, model=${config.modelId}, topN=${limit}`);
+      const res = await fetch(rerankUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.apiKey}` },
+        body: JSON.stringify({ model: config.modelId, query, documents, top_n: limit }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (res.ok) {
+        const data = await res.json() as { results?: Array<{ index: number; relevance_score: number }> };
+        const results = data.results ?? [];
+        const reranked = results
+          .filter((r) => r.index >= 0 && r.index < items.length)
+          .map((r) => ({ id: items[r.index]!.id, score: r.relevance_score }))
+          .filter((r): r is { id: string; score: number } => !!r.id);
+        logger.info(`[Rerank] 远程 Rerank 完成: ${reranked.length} 结果, top score=${reranked[0]?.score?.toFixed(4) ?? "N/A"}`);
+        return reranked.slice(0, limit);
+      }
+      logger.warn(`[Rerank] 远程 Rerank 失败 (${res.status})，降级到本地启发式`);
+    } catch (err) {
+      logger.warn(`[Rerank] 远程 Rerank 错误，降级到本地启发式: ${err}`);
+    }
+  }
+
+  // 优先级 2：本地启发式算法
+  try {
+    const rerankInput: RerankInput[] = items.map((i) => ({
+      chunkId: i.id,
+      text: i.text,
+      score: i.score ?? 0,
+    }));
+    const reranked = localRerank(rerankInput, query);
+    logger.info(`[Rerank] 本地启发式完成: ${reranked.length} 结果, top score=${reranked[0]?.score?.toFixed(4) ?? "N/A"}`);
+    return reranked.slice(0, limit).map((r) => ({ id: r.chunkId, score: r.score }));
+  } catch (err) {
+    logger.warn(`[Rerank] 本地启发式失败，按原始顺序返回: ${err}`);
+    return items.slice(0, limit).map((i) => ({ id: i.id, score: i.score ?? 0 }));
+  }
+}

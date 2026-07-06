@@ -37,6 +37,10 @@ export function cleanContent(
   // LLM 有时生成完整 HTML 文档，<body> 和 <style> 标签会泄漏 CSS 到整个页面
   text = stripFullHtmlDocument(text);
 
+  // Step 0.5: 修复 LLM 输出的字面量 h3/h4 标题（如 "h3 架构变更总览" → "### 架构变更总览"）
+  // 原因：PPT 模板之前用 "用 h3 标记标题" 指令，LLM 误解为输出字面量 h3 而非 markdown ###
+  text = text.replace(/^h([1-6])\s+(.+)$/gm, (_, level, content) => "#".repeat(parseInt(level)) + " " + content);
+
   // Step 1: 移除 LLM 元信息
   text = removeMetaContent(text);
 

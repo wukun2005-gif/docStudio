@@ -19,8 +19,11 @@ import { logger } from "./logger.js";
 import { dbGet, dbAll } from "./dbQuery.js";
 import { getAllPeople, getPersonById, getPersonContext, findPersonByTitle, type Person } from "./peopleGraph.js";
 import { detectStyle, detectFormat, detectAudience, getStyle, getFormat, getAudience } from "./promptTemplates.js";
+import { analyzeQuery, buildRagQueryFromAnalysis, type QueryAnalysis } from "./queryAnalyzer.js";
 import { getRulesForContext } from "./writingRules.js";
 import { detectConflicts, autoResolveConflicts, type ConflictResolutionResult } from "./conflictDetection.js";
+import { jsonrepair } from "jsonrepair";
+import { remoteRerank, type RerankerConfig } from "./reranker.js";
 import * as cheerio from "cheerio";
 import type { OutlineSection } from "./narrativeEngine.js";
 import type { ChatRequest, ToolDefinition, ToolCall } from "../providers/openai.js";
@@ -28,6 +31,15 @@ import type { DocumentMetadata, StyleTemplate, FormatTemplate, AudienceProfile }
 
 // nf1: demo mode — 跳过所有外部 API（RAG/embedding/remote/reranker）
 let _isDemoMode = false;
+
+/** Query Analysis 缓存：当前生成任务的 NLU 分析结果（内容要点 vs 格式要求） */
+let _queryAnalysis: QueryAnalysis | null = null;
+
+/** 获取当前生成任务的 Query Analysis 结果（供完整度检查等外部模块使用） */
+export function getQueryAnalysis(): QueryAnalysis | null {
+  return _queryAnalysis;
+}
+
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 
@@ -199,10 +211,24 @@ function getEmbeddingConfig(): EmbeddingConfig | null {
 
 // ── RAG 检索（带向量） ──────────────────────────────────
 
+/**
+ * 从 section description 中提取知识点关键词，去除生成指令。
+ * 避免生成指令（如"每项包括说明文字、数据表格和可视化图表"）匹配到不相关文档。
+ *
+ * 策略：先删除纯指令短语（不含知识点），再删除知识点周围的包装词（"包含"、"三个信息点"等）。
+ */
+function buildRagQuery(sectionTitle: string, description?: string): string {
+  // bug5 fix: 使用 LLM Query Analysis 的内容要点替代 regex 清理
+  // 如果 _queryAnalysis 有值，用 buildRagQueryFromAnalysis 构建检索 query
+  // 如果 _queryAnalysis 为 null（LLM 失败或 demo mode），fallback 到原始 title + description
+  return buildRagQueryFromAnalysis(sectionTitle, description, _queryAnalysis);
+}
+
 async function retrieveForSection(
   sectionTitle: string,
   description?: string,
   excludeChunkIds?: Set<string>,
+  rerankerConfig?: { baseUrl: string; apiKey: string; modelId: string },
 ): Promise<Array<{ chunkId: string; content: string; score: number; sourceId: string; sourceName?: string; sourceUrl?: string }>> {
   if (_isDemoMode) {
     // Match section title against fixture outline to find index
@@ -216,14 +242,17 @@ async function retrieveForSection(
     }
   }
 
-  const query = description ? `${sectionTitle} ${description}` : sectionTitle;
+  // 构建 RAG 检索 query：从 description 中提取知识点关键词，去除生成指令
+  // 避免生成指令（如"每项包括说明文字、数据表格和可视化图表"）匹配到不相关文档
+  const ragQuery = buildRagQuery(sectionTitle, description);
+  logger.info(`[DocGenerator] RAG query: title="${sectionTitle}" desc="${(description ?? "").substring(0, 60)}..." → query="${ragQuery.substring(0, 100)}"`);
 
   // 尝试获取 query embedding
   let queryEmbedding: number[] | undefined;
   const embConfig = getEmbeddingConfig();
   if (embConfig) {
     try {
-      const vectors = await embedBatch([query], embConfig);
+      const vectors = await embedBatch([ragQuery], embConfig);
       queryEmbedding = vectors[0];
     } catch (err) {
       logger.warn(`[DocGenerator] Query embedding failed, falling back to BM25: ${err}`);
@@ -241,14 +270,44 @@ async function retrieveForSection(
     logger.warn("[DocGenerator] MS Graph token 获取异常，OneDrive 远程检索已跳过");
   }
 
+  // 扩大候选池到 top-20，让 reranker 有足够候选做语义重排序
+  // 旧设计 limit=5 直接由 RRF+MMR 选出 top-5，reranker 看不到被 MMR 排除的相关 chunk
+  const CANDIDATE_POOL = 20;
+  const FINAL_TOP_K = 5;
+
   const searchConfig: Parameters<typeof hybridSearchWithRemote>[1] = {
-    limit: 5,
+    limit: CANDIDATE_POOL,
     useQueryExpansion: false,
     queryEmbedding,
     ...(msAccessToken ? { msAccessToken } : {}),
     ...(embConfig ? { embedding: embConfig } : {}),
   };
-  const results: CrossSourceSearchResult[] = await hybridSearchWithRemote(query, searchConfig);
+  const candidates: CrossSourceSearchResult[] = await hybridSearchWithRemote(ragQuery, searchConfig);
+
+  // Reranker 阶段：对候选池做 cross-encoder 语义重排序，选 top-5
+  // 远程 reranker API 优先，失败 fallback 到本地启发式
+  let results: CrossSourceSearchResult[];
+  if (candidates.length > FINAL_TOP_K) {
+    const rerankItems = candidates.map((r) => ({
+      id: r.chunkId,
+      text: r.content, // bge-reranker-v2-m3 支持 8192 tokens，传完整内容避免截断导致语义丢失
+      score: r.score,
+    }));
+    // DEBUG: 记录候选池中是否包含 people-graph
+    const pgCandidate = candidates.find(c => c.chunkId?.includes("81531c3b"));
+    logger.info(`[DocGenerator] Rerank candidates: ${candidates.length} 个, people-graph=${pgCandidate ? `YES(${pgCandidate.score?.toFixed(4)})` : "NO"}, top3=${candidates.slice(0, 3).map(c => `${c.chunkId?.substring(0, 12)}:${c.score?.toFixed(4)}`).join(", ")}`);
+    const reranked = await remoteRerank(ragQuery, rerankItems, rerankerConfig, FINAL_TOP_K);
+    const rerankMap = new Map(reranked.map((r) => [r.id, r.score]));
+    results = reranked
+      .map((r) => {
+        const c = candidates.find((c) => c.chunkId === r.id);
+        return c ? { ...c, score: r.score } : null;
+      })
+      .filter((c): c is CrossSourceSearchResult => c !== null);
+    logger.info(`[DocGenerator] Rerank in retrieval: ${candidates.length} 候选 → top${FINAL_TOP_K}=${results.length}, selected=${results.map(r => `${r.chunkId?.substring(0, 12)}:${r.score?.toFixed(4)}`).join(", ")}`);
+  } else {
+    results = candidates;
+  }
 
   // 批量查询 source 信息（文件名、URL）
   // bug3: 远程结果（OneDrive）没有 kb_sources 条目，用 remoteInfo 预填充
@@ -299,7 +358,8 @@ async function batchRetrieveForOutline(
   const sectionRetrievals = new Map<string, Array<{ chunkId: string; content: string; score: number; sourceId: string; sourceName?: string; sourceUrl?: string; indexedAt?: string }>>();
 
   const embConfig = getEmbeddingConfig();
-  const queries = flatSections.map((s) => s.description ? `${s.title} ${s.description}` : s.title);
+  // bug5 fix: batchRetrieveForOutline 也要用 buildRagQuery，避免格式词污染检索
+  const queries = flatSections.map((s) => buildRagQuery(s.title, s.description));
 
   let embeddings: number[][] = [];
   if (embConfig && queries.length > 0) {
@@ -548,6 +608,10 @@ function extractCodeBlocksFromText(rawText: string): {
     // 清理多余空行
     cleanedText = cleanedText.replace(/\n{3,}/g, "\n\n").trim();
 
+    // 兜底：清理残留的 /chart 标记（旧格式或 LLM 未按格式输出时）
+    // 防止 /chart 字面量出现在最终 HTML 中
+    cleanedText = cleanedText.replace(/^\/chart\s*$/gm, "").replace(/\n{3,}/g, "\n\n").trim();
+
     const pythonScript = pythonScripts.length > 0
       ? pythonScripts.join("\n\n# ═══ Next Section ═══\n\n")
       : undefined;
@@ -609,7 +673,10 @@ async function generateSection(
   pythonScript?: string;
   chartSpecsRaw?: string[];
 }> {
-  const sources = await retrieveForSection(section.title, section.description, excludeChunkIds);
+  // 读取 reranker 配置（用于检索阶段的 cross-encoder 重排序）
+  const _dbSettings = readSettingsFromDb();
+  const _rerankerConfig = _dbSettings.knowledgeReranker;
+  const sources = await retrieveForSection(section.title, section.description, excludeChunkIds, _rerankerConfig);
   // 照搬 patentExaminator：显示来源标签和相似度分数，帮助 LLM 判断引用权重
   // 注意：不在此处添加 [N] 编号，由 toolExecutor re-inject 统一提供编号
   const sourceText = sources.map((s, i) => {
@@ -884,6 +951,14 @@ ${sourceText || "（无参考信息）"}
     ...result.webSearchCitations.map((c) => ({ source: `Web Search: ${c.title}`, excerpt: c.snippet })),
   ];
 
+  // [DEBUG-GROUNDEDNESS] 打印 grounding docs 的 excerpt 前 100 字符，确认内容质量
+  logger.info(`[DEBUG-GROUNDEDNESS] S${sectionIndex + 1} "${section.title.substring(0, 20)}" groundingDocs: ${groundingDocs.length} docs`);
+  groundingDocs.forEach((d, i) => {
+    const excerptLen = d.excerpt?.length ?? 0;
+    const excerptPreview = (d.excerpt || "").substring(0, 100).replace(/\n/g, " ");
+    logger.info(`[DEBUG-GROUNDEDNESS]   doc[${i}] source="${d.source?.substring(0, 30)}" score=${d.score?.toFixed(2)} excerptLen=${excerptLen} excerpt="${excerptPreview}..."`);
+  });
+
   let finalContent = result.answer || `[生成失败: ${section.title}]`;
 
   // [DEBUG-CITATION] 追踪 [N] 标记在每个步骤的数量
@@ -925,6 +1000,10 @@ ${sourceText || "（无参考信息）"}
 
   if (groundingDocs.length > 0 && finalContent.length > 50) {
     try {
+      // [DEBUG-GROUNDEDNESS] 打印送检内容的前 200 字符
+      const contentPreview = finalContent.substring(0, 200).replace(/\n/g, " ");
+      logger.info(`[DEBUG-GROUNDEDNESS] S${sectionIndex + 1} 送检内容 (len=${finalContent.length}): "${contentPreview}..."`);
+
       const groundedness = await checkGroundedness(finalContent, groundingDocs, {
         signal: config.signal,
         timeoutMs: SECTION_TIMEOUT_MS,
@@ -937,15 +1016,29 @@ ${sourceText || "（无参考信息）"}
         const originalLen = finalContent.length;
         let cleanedContent = finalContent;
         let actuallyRemoved = 0;
+        const rescuedCitations: string[] = []; // 从被删除句子中抢救的 [N] 标记
         for (const claim of groundedness.removedClaims) {
           const claimText = claim.text.trim();
           if (claimText.length > 5 && cleanedContent.includes(claimText)) {
+            // 抢救被删除句子中的 [N] 引用标记，避免引用编号丢失
+            const claimCitations = claimText.match(/\[\d+\]/g);
+            if (claimCitations) {
+              rescuedCitations.push(...claimCitations);
+            }
             cleanedContent = cleanedContent.replace(claimText, "");
             actuallyRemoved++;
           }
         }
         // 安全阀：如果删除后内容保留率 < 30%，跳过替换（避免章节被掏空）
         if (actuallyRemoved > 0 && cleanedContent.length >= originalLen * 0.3) {
+          // 将抢救的 [N] 标记追加到保留内容的最后一个段落的末尾
+          // 而非作为独立的裸行（避免被 relevance check 误判为"与需求无关"）
+          if (rescuedCitations.length > 0) {
+            const uniqueRescued = [...new Set(rescuedCitations)];
+            // 追加到最后一个非空行的末尾，而非新起一行
+            cleanedContent = cleanedContent.trimEnd() + " " + uniqueRescued.join(" ");
+            logger.info(`[DocGenerator] Groundedness 过滤: 抢救 ${uniqueRescued.length} 个引用标记: ${uniqueRescued.join(" ")}`);
+          }
           cleanedContent = cleanedContent
             .replace(/\n{3,}/g, "\n\n")
             .replace(/^[。！？\s]+$/gm, "")
@@ -967,12 +1060,22 @@ ${sourceText || "（无参考信息）"}
 
   // 内容清洗：移除元信息、处理 citation、markdown→HTML
   // 照搬 patentExaminator：使用 mergedCitations（与 re-inject 相同的数组）确保编号一致
-  const citationLinks: CitationLink[] = result.mergedCitations.map((c, i) => ({
+  // 但仅保留 LLM 在正文中实际引用 [N] 的来源，未引用的不进入参考来源列表
+  const allCitationLinks: CitationLink[] = result.mergedCitations.map((c, i) => ({
     index: globalCitationOffset + i + 1,
     title: c.title,
     url: c.url || "",
     sourceId: c.sourceId || "",
   }));
+  // 从正文中提取实际被引用的编号
+  const actuallyCitedNums = new Set<number>();
+  let _citeMatch: RegExpExecArray | null;
+  const _citeRe = /\[(\d+)\]/g;
+  while ((_citeMatch = _citeRe.exec(finalContent)) !== null) {
+    actuallyCitedNums.add(parseInt(_citeMatch[1], 10));
+  }
+  const citationLinks: CitationLink[] = allCitationLinks.filter(c => actuallyCitedNums.has(c.index));
+  logger.info(`[DEBUG-CITATION] S${sectionIndex + 1} citationLinks filter: mergedCitations=${result.mergedCitations.length}, actuallyCited=[${[...actuallyCitedNums].sort((a,b)=>a-b).join(",")}], kept=${citationLinks.length}`);
 
   // 校验：移除 LLM 生成的超出有效范围的 [N] 引用标记（防止幻觉编号）
   // 在 cleanContent 之前做（纯文本阶段 regex 最可靠）
@@ -1026,7 +1129,9 @@ async function generateMergedSection(
   // ── 1. 合并关键词: 一次检索覆盖所有子章节 ─────────────────────────
   const allTitles = [parentSection.title, ...childSections.map((s) => s.title)].join(" ");
   const allDescriptions = [parentSection.description, ...childSections.map((s) => s.description)].filter(Boolean).join(" ");
-  const sources = await retrieveForSection(allTitles, allDescriptions || undefined, excludeChunkIds);
+  const _dbSettingsMerged = readSettingsFromDb();
+  const _rerankerConfigMerged = _dbSettingsMerged.knowledgeReranker;
+  const sources = await retrieveForSection(allTitles, allDescriptions || undefined, excludeChunkIds, _rerankerConfigMerged);
   const sourceText = sources.map((s, i) => {
     const sourceLabel = s.sourceName ? `《${s.sourceName}》` : '';
     return `${sourceLabel}（相似度: ${s.score.toFixed(2)}）\n${s.content}`;
@@ -1328,14 +1433,26 @@ ${subSectionPrompt}
         const originalLen = finalContent.length;
         let cleanedContent = finalContent;
         let actuallyRemoved = 0;
+        const rescuedCitations: string[] = []; // 从被删除句子中抢救的 [N] 标记
         for (const claim of groundedness.removedClaims) {
           const claimText = claim.text.trim();
           if (claimText.length > 5 && cleanedContent.includes(claimText)) {
+            // 抢救被删除句子中的 [N] 引用标记，避免引用编号丢失
+            const claimCitations = claimText.match(/\[\d+\]/g);
+            if (claimCitations) {
+              rescuedCitations.push(...claimCitations);
+            }
             cleanedContent = cleanedContent.replace(claimText, "");
             actuallyRemoved++;
           }
         }
         if (actuallyRemoved > 0 && cleanedContent.length >= originalLen * 0.3) {
+          // 将抢救的 [N] 标记追加到保留内容末尾（不新起一行，避免被 relevance check 误判）
+          if (rescuedCitations.length > 0) {
+            const uniqueRescued = [...new Set(rescuedCitations)];
+            cleanedContent = cleanedContent.trimEnd() + " " + uniqueRescued.join(" ");
+            logger.info(`[DocGenerator] 合并章节 Groundedness 过滤: 抢救 ${uniqueRescued.length} 个引用标记: ${uniqueRescued.join(" ")}`);
+          }
           cleanedContent = cleanedContent
             .replace(/\n{3,}/g, "\n\n")
             .replace(/^[。！？\s]+$/gm, "")
@@ -2114,6 +2231,24 @@ export async function generateDocument(
 
   const userRequest = config.userRequest ?? config.title;
 
+  // ── Query Analysis：LLM 分离内容要点和格式要求（bug5 + Bug4）──
+  // 一次 LLM 调用，结果缓存在模块级变量中，供 buildRagQuery 和完整度检查复用
+  if (!_isDemoMode && userRequest) {
+    // provider 选择逻辑与章节生成保持一致：config.providerPreference → dbSettings.providerPreference → "mimo"
+    const dbSettings = readSettingsFromDb();
+    const defaultProviders = dbSettings.providerPreference?.length ? dbSettings.providerPreference : ["mimo"];
+    const providers = config.providerPreference ?? defaultProviders;
+    const providerId = providers[0] ?? "mimo";
+    try {
+      _queryAnalysis = await analyzeQuery(
+        userRequest, config.outline, providerId, config.apiKey, config.modelId,
+      );
+    } catch (err) {
+      logger.warn(`[DocGenerator] Query analysis 失败（不影响生成，fallback 到 regex）: ${err}`);
+      _queryAnalysis = null;
+    }
+  }
+
   // 如果没有提供元数据，自动提取
   if (!config.metadata) {
     config.metadata = extractDocumentMetadata(userRequest, config.outline);
@@ -2350,41 +2485,90 @@ function renderChartSpecsToSvg(rawSpecs: string[] | undefined, _sectionTitle: st
   const parts: string[] = [];
   for (const raw of rawSpecs) {
     try {
-      const parsed = JSON.parse(raw);
+      // 先尝试直接 parse，失败后用 jsonrepair 修复（截断、多余括号、数学表达式等）
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        // jsonrepair 可以修复：截断的 JSON、多余的闭合括号、缺失的逗号等
+        const repaired = jsonrepair(raw);
+        parsed = JSON.parse(repaired);
+        logger.info(`[DocGenerator/renderChart] jsonrepair 修复成功: type=${parsed?.[0]?.type ?? parsed?.type}`);
+      }
       // chartSpecsRaw 元素可能是单个对象或对象数组
       const specs = Array.isArray(parsed) ? parsed : [parsed];
       for (const item of specs) {
         if (!item || typeof item !== "object") continue;
-        const spec = item as { type: string; title: string; categories: string[]; series: Array<{ name: string; values: number[] }> };
-        if (!spec.categories?.length || !spec.series?.length) continue;
+        const spec: any = item;
+        if (!spec.type || !spec.title) {
+          logger.warn(`[DocGenerator/renderChart] 跳过: 缺少 type 或 title, spec=${JSON.stringify(spec).substring(0, 200)}`);
+          continue;
+        }
         const svg = renderSingleChart(spec);
-        if (svg) parts.push(svg);
+        if (svg) {
+          parts.push(svg);
+        } else {
+          logger.warn(`[DocGenerator/renderChart] 渲染返回空: type=${spec.type}, title=${spec.title}`);
+        }
       }
-    } catch { /* skip */ }
+    } catch (e) {
+      logger.warn(`[DocGenerator/renderChart] JSON parse 失败: ${(e as Error).message}, raw=${raw.substring(0, 200)}`);
+    }
   }
   return parts.length > 0 ? `<div class="charts">${parts.join("")}</div>` : "";
 }
 
-function renderSingleChart(spec: { type: string; title: string; categories: string[]; series: Array<{ name: string; values: number[] }> }): string {
+function renderSingleChart(spec: any): string {
   switch (spec.type) {
     case "pie":
     case "doughnut":
       return renderPieChart(spec);
+    case "line":
+      return renderLineChart(spec);
+    case "scatter":
+      return renderScatterChart(spec);
     case "bar":
     case "column":
+      return renderColumnChart(spec);
+    case "timeline":
+      // timeline 没有原生渲染器，转换为 column 图（用 events 的 date 作为 category）
+      return renderTimelineAsColumn(spec);
+    case "stacked_area":
+    case "area":
+      // area 图近似为 line 图
+      return renderLineChart(spec);
     default:
+      // 未知类型：尝试 column 渲染，如果数据格式不兼容会返回空字符串
+      logger.warn(`[DocGenerator/renderChart] 未知 chart type: ${spec.type}, 尝试 column 渲染`);
       return renderColumnChart(spec);
   }
 }
 
-function renderColumnChart(spec: { title: string; categories: string[]; series: Array<{ name: string; values: number[] }> }): string {
+/** 将 timeline spec 转换为 column 图渲染 */
+function renderTimelineAsColumn(spec: any): string {
+  const events = spec.events ?? [];
+  if (events.length === 0) return "";
+  // 用 event 的 title 作为 category，用序号作为 value（展示时间线上的里程碑）
+  const categories = events.map((e: any) => e.title ?? e.date ?? "");
+  const values = events.map((_: any, i: number) => i + 1);
+  return renderColumnChart({
+    title: spec.title,
+    categories,
+    series: [{ name: "里程碑", values }],
+  });
+}
+
+function renderColumnChart(spec: { title: string; categories?: string[]; series?: Array<{ name: string; values: number[] }> }): string {
+  const cats: string[] = spec.categories ?? [];
+  const series: Array<{ name: string; values: number[] }> = spec.series ?? [];
+  if (cats.length === 0 || series.length === 0) return "";
   const W = 600, H = 280, PAD = { top: 30, right: 20, bottom: 60, left: 50 };
   const plotW = W - PAD.left - PAD.right, plotH = H - PAD.top - PAD.bottom;
   // Merge all values across series to find max
-  const allVals = spec.series.flatMap((s) => s.values);
+  const allVals = series.flatMap((s) => s.values);
   const maxVal = Math.max(...allVals, 1);
-  const catCount = spec.categories.length;
-  const serCount = spec.series.length;
+  const catCount = cats.length;
+  const serCount = series.length;
   const groupW = plotW / catCount;
   const barW = Math.max(8, Math.min(30, (groupW * 0.7) / serCount));
 
@@ -2404,15 +2588,15 @@ function renderColumnChart(spec: { title: string; categories: string[]; series: 
   for (let ci = 0; ci < catCount; ci++) {
     const catX = PAD.left + ci * groupW + groupW / 2;
     for (let si = 0; si < serCount; si++) {
-      const val = spec.series[si]!.values[ci] ?? 0;
+      const val = series[si]!.values[ci] ?? 0;
       const barH = (val / maxVal) * plotH;
       const x = catX - (serCount * barW) / 2 + si * barW;
       const y = PAD.top + plotH - barH;
       const color = CHART_COLORS[si % CHART_COLORS.length]!;
-      svg += `<rect x="${x}" y="${y}" width="${barW-1}" height="${barH}" fill="${color}" rx="2"><title>${escapeXml(spec.series[si]!.name)}: ${val}</title></rect>`;
+      svg += `<rect x="${x}" y="${y}" width="${barW-1}" height="${barH}" fill="${color}" rx="2"><title>${escapeXml(series[si]!.name)}: ${val}</title></rect>`;
     }
     // X-axis label
-    const label = spec.categories[ci]!.length > 6 ? spec.categories[ci]!.slice(0,6)+"…" : spec.categories[ci]!;
+    const label = cats[ci]!.length > 6 ? cats[ci]!.slice(0,6)+"…" : cats[ci]!;
     svg += `<text x="${catX}" y="${H-PAD.bottom+16}" text-anchor="middle" font-size="10" fill="#374151">${escapeXml(label)}</text>`;
   }
 
@@ -2420,7 +2604,7 @@ function renderColumnChart(spec: { title: string; categories: string[]; series: 
   if (serCount > 1) {
     let legendX = W - PAD.right - 10;
     for (let si = serCount - 1; si >= 0; si--) {
-      const name = spec.series[si]!.name.length > 12 ? spec.series[si]!.name.slice(0,12)+"…" : spec.series[si]!.name;
+      const name = series[si]!.name.length > 12 ? series[si]!.name.slice(0,12)+"…" : series[si]!.name;
       const textW = name.length * 8 + 20;
       legendX -= textW;
       svg += `<rect x="${legendX}" y="4" width="10" height="10" fill="${CHART_COLORS[si]}" rx="2"/>`;
@@ -2432,9 +2616,10 @@ function renderColumnChart(spec: { title: string; categories: string[]; series: 
   return svg;
 }
 
-function renderPieChart(spec: { title: string; categories: string[]; series: Array<{ name: string; values: number[] }> }): string {
-  const vals = spec.series[0]?.values ?? [];
-  if (vals.length === 0) return "";
+function renderPieChart(spec: { title: string; categories?: string[]; series?: Array<{ name: string; values: number[] }> }): string {
+  const cats: string[] = spec.categories ?? [];
+  const vals = spec.series?.[0]?.values ?? [];
+  if (vals.length === 0 || cats.length === 0) return "";
   const total = vals.reduce((a, b) => a + b, 0);
   if (total === 0) return "";
   const W = 420, H = 300, cx = 160, cy = 150, r = 110;
@@ -2450,14 +2635,14 @@ function renderPieChart(spec: { title: string; categories: string[]; series: Arr
     const y2 = cy + r * Math.sin(angle + sliceAngle);
     const large = sliceAngle > Math.PI ? 1 : 0;
     const color = CHART_COLORS[i % CHART_COLORS.length]!;
-    svg += `<path d="M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${large},1 ${x2},${y2} Z" fill="${color}" stroke="#fff" stroke-width="1.5"><title>${escapeXml(spec.categories[i]!)}: ${vals[i]} (${Math.round(vals[i]!/total*100)}%)</title></path>`;
+    svg += `<path d="M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${large},1 ${x2},${y2} Z" fill="${color}" stroke="#fff" stroke-width="1.5"><title>${escapeXml(cats[i]!)}: ${vals[i]} (${Math.round(vals[i]!/total*100)}%)</title></path>`;
     angle += sliceAngle;
   }
 
   // Legend
   let ly = 40;
   for (let i = 0; i < vals.length; i++) {
-    const name = spec.categories[i]!.length > 14 ? spec.categories[i]!.slice(0,14)+"…" : spec.categories[i]!;
+    const name = cats[i]!.length > 14 ? cats[i]!.slice(0,14)+"…" : cats[i]!;
     const pct = Math.round(vals[i]! / total * 100);
     svg += `<rect x="280" y="${ly}" width="10" height="10" fill="${CHART_COLORS[i]}" rx="2"/>`;
     svg += `<text x="295" y="${ly+10}" font-size="10" fill="#374151">${escapeXml(name)} (${pct}%)</text>`;
@@ -2472,6 +2657,159 @@ function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/** 折线图：categories 为 X 轴标签，series 为多组数值 */
+function renderLineChart(spec: any): string {
+  const cats: string[] = spec.categories ?? [];
+  const series: Array<{ name: string; values: number[] }> = spec.series ?? [];
+  if (cats.length === 0 || series.length === 0) return "";
+  const W = 600, H = 280, PAD = { top: 30, right: 20, bottom: 60, left: 50 };
+  const plotW = W - PAD.left - PAD.right, plotH = H - PAD.top - PAD.bottom;
+  const allVals = series.flatMap(s => s.values);
+  const maxVal = Math.max(...allVals, 1);
+  const minVal = Math.min(...allVals, 0);
+  const range = maxVal - minVal || 1;
+  const catCount = cats.length;
+  const stepX = plotW / Math.max(catCount - 1, 1);
+
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" style="max-width:100%;height:auto;font-family:-apple-system,BlinkMacSystemFont,sans-serif">`;
+  svg += `<text x="${W/2}" y="20" text-anchor="middle" font-size="13" font-weight="bold" fill="#1F2937">${escapeXml(spec.title)}</text>`;
+
+  // Y-axis grid
+  const gridLines = 5;
+  for (let i = 0; i <= gridLines; i++) {
+    const y = PAD.top + (plotH * i) / gridLines;
+    const val = maxVal - (range * i) / gridLines;
+    svg += `<line x1="${PAD.left}" y1="${y}" x2="${W-PAD.right}" y2="${y}" stroke="#E5E7EB" stroke-width="1"/>`;
+    svg += `<text x="${PAD.left-6}" y="${y+4}" text-anchor="end" font-size="10" fill="#6B7280">${Math.round(val)}</text>`;
+  }
+
+  // Lines + points
+  for (let si = 0; si < series.length; si++) {
+    const s = series[si];
+    const color = CHART_COLORS[si % CHART_COLORS.length]!;
+    const points = s.values.map((v, ci) => {
+      const x = PAD.left + ci * stepX;
+      const y = PAD.top + plotH - ((v - minVal) / range) * plotH;
+      return `${x},${y}`;
+    });
+    svg += `<polyline points="${points.join(" ")}" fill="none" stroke="${color}" stroke-width="2"/>`;
+    for (let ci = 0; ci < s.values.length; ci++) {
+      const x = PAD.left + ci * stepX;
+      const y = PAD.top + plotH - ((s.values[ci]! - minVal) / range) * plotH;
+      svg += `<circle cx="${x}" cy="${y}" r="3" fill="${color}"><title>${escapeXml(s.name)}: ${s.values[ci]}</title></circle>`;
+    }
+  }
+
+  // X-axis labels
+  for (let ci = 0; ci < catCount; ci++) {
+    const x = PAD.left + ci * stepX;
+    const label = cats[ci]!.length > 6 ? cats[ci]!.slice(0, 6) + "…" : cats[ci]!;
+    svg += `<text x="${x}" y="${H-PAD.bottom+16}" text-anchor="middle" font-size="10" fill="#374151">${escapeXml(label)}</text>`;
+  }
+
+  // Legend
+  if (series.length > 1) {
+    let legendX = W - PAD.right - 10;
+    for (let si = series.length - 1; si >= 0; si--) {
+      const name = series[si]!.name.length > 12 ? series[si]!.name.slice(0, 12) + "…" : series[si]!.name;
+      const textW = name.length * 8 + 20;
+      legendX -= textW;
+      svg += `<rect x="${legendX}" y="4" width="10" height="10" fill="${CHART_COLORS[si]}" rx="2"/>`;
+      svg += `<text x="${legendX+14}" y="13" font-size="10" fill="#6B7280">${escapeXml(name)}</text>`;
+    }
+  }
+
+  svg += `</svg>`;
+  return svg;
+}
+
+/** 散点图：data 为 [{name, x, y}] 或 series[{name, values:[[x,y],...]}] */
+function renderScatterChart(spec: any): string {
+  const W = 600, H = 280, PAD = { top: 30, right: 20, bottom: 60, left: 50 };
+  const plotW = W - PAD.left - PAD.right, plotH = H - PAD.top - PAD.bottom;
+
+  // 收集所有点
+  let points: Array<{ name: string; x: number; y: number }> = [];
+  if (Array.isArray(spec.data)) {
+    points = spec.data.map((d: any) => ({ name: d.name || "", x: Number(d.x), y: Number(d.y) }));
+  } else if (Array.isArray(spec.series)) {
+    for (const s of spec.series) {
+      const vals = s.values ?? [];
+      if (Array.isArray(vals[0])) {
+        // [[x,y], ...]
+        for (const v of vals) points.push({ name: s.name || "", x: Number(v[0]), y: Number(v[1]) });
+      } else {
+        // [y1, y2, ...] with categories as x labels → use index as x
+        for (let i = 0; i < vals.length; i++) {
+          const cats = spec.categories ?? [];
+          const xVal = cats[i] ? Number(cats[i]) || i + 1 : i + 1;
+          points.push({ name: s.name || "", x: xVal, y: Number(vals[i]) });
+        }
+      }
+    }
+  }
+  if (points.length === 0) return "";
+  const xs = points.map(p => p.x), ys = points.map(p => p.y);
+  const maxX = Math.max(...xs, 1), minX = Math.min(...xs, 0);
+  const maxY = Math.max(...ys, 1), minY = Math.min(...ys, 0);
+  const rangeX = maxX - minX || 1, rangeY = maxY - minY || 1;
+
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" style="max-width:100%;height:auto;font-family:-apple-system,BlinkMacSystemFont,sans-serif">`;
+  svg += `<text x="${W/2}" y="20" text-anchor="middle" font-size="13" font-weight="bold" fill="#1F2937">${escapeXml(spec.title)}</text>`;
+
+  // Grid
+  const gridLines = 5;
+  for (let i = 0; i <= gridLines; i++) {
+    const y = PAD.top + (plotH * i) / gridLines;
+    const val = maxY - (rangeY * i) / gridLines;
+    svg += `<line x1="${PAD.left}" y1="${y}" x2="${W-PAD.right}" y2="${y}" stroke="#E5E7EB" stroke-width="1"/>`;
+    svg += `<text x="${PAD.left-6}" y="${y+4}" text-anchor="end" font-size="10" fill="#6B7280">${Math.round(val)}</text>`;
+  }
+
+  // Axis labels
+  const xLabel = spec.xAxisLabel || spec.xLabel || "X";
+  const yLabel = spec.yAxisLabel || spec.yLabel || "Y";
+  svg += `<text x="${W/2}" y="${H-10}" text-anchor="middle" font-size="10" fill="#6B7280">${escapeXml(xLabel)}</text>`;
+  svg += `<text x="14" y="${H/2}" text-anchor="middle" font-size="10" fill="#6B7280" transform="rotate(-90 14 ${H/2})">${escapeXml(yLabel)}</text>`;
+
+  // Points
+  const names = [...new Set(points.map(p => p.name))];
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i]!;
+    const x = PAD.left + ((p.x - minX) / rangeX) * plotW;
+    const y = PAD.top + plotH - ((p.y - minY) / rangeY) * plotH;
+    const colorIdx = names.length > 1 ? names.indexOf(p.name) : 0;
+    const color = CHART_COLORS[colorIdx % CHART_COLORS.length]!;
+    svg += `<circle cx="${x}" cy="${y}" r="${names.length > 1 ? 5 : 4}" fill="${color}" opacity="0.8"><title>${escapeXml(p.name || `(${p.x}, ${p.y})`)}: (${p.x}, ${p.y})</title></circle>`;
+    // 点旁标注名称
+    if (p.name && names.length > 1) {
+      svg += `<text x="${x+6}" y="${y-6}" font-size="9" fill="#6B7280">${escapeXml(p.name.length > 8 ? p.name.slice(0, 8) + "…" : p.name)}</text>`;
+    }
+  }
+
+  // X-axis tick labels
+  for (let i = 0; i <= gridLines; i++) {
+    const x = PAD.left + (plotW * i) / gridLines;
+    const val = minX + (rangeX * i) / gridLines;
+    svg += `<text x="${x}" y="${H-PAD.bottom+16}" text-anchor="middle" font-size="10" fill="#374151">${Math.round(val)}</text>`;
+  }
+
+  // Legend (only if multiple names)
+  if (names.length > 1) {
+    let legendX = W - PAD.right - 10;
+    for (let ni = names.length - 1; ni >= 0; ni--) {
+      const name = names[ni]!.length > 12 ? names[ni]!.slice(0, 12) + "…" : names[ni]!;
+      const textW = name.length * 8 + 20;
+      legendX -= textW;
+      svg += `<circle cx="${legendX+5}" cy="9" r="4" fill="${CHART_COLORS[ni % CHART_COLORS.length]}"/>`;
+      svg += `<text x="${legendX+14}" y="13" font-size="10" fill="#6B7280">${escapeXml(name)}</text>`;
+    }
+  }
+
+  svg += `</svg>`;
+  return svg;
+}
+
 // ═══════════════════════════════════════════════════════════
 
 export function toHtml(result: GenerateDocResult, baseUrl?: string): string {
@@ -2484,6 +2822,7 @@ export function toHtml(result: GenerateDocResult, baseUrl?: string): string {
     if (s.pythonScript) {
       scriptTags.push(`<script type="application/x-python" class="xlsx-script">\n${s.pythonScript}\n</script>`);
     }
+    logger.info(`[DocGenerator/toHtml] S${idx + 1} "${s.title.substring(0, 20)}": chartSpecsRaw=${s.chartSpecsRaw?.length || 0}个, pythonScript=${s.pythonScript?.length || 0}chars`);
     if (s.chartSpecsRaw && s.chartSpecsRaw.length > 0) {
       scriptTags.push(`<script type="application/json" class="chart-spec">\n${JSON.stringify(s.chartSpecsRaw)}\n</script>`);
     }
@@ -2588,9 +2927,26 @@ export function toHtml(result: GenerateDocResult, baseUrl?: string): string {
   }
 
   // 照搬 patentExaminator：只保留被引用的 citationLinks，按编号排序
-  const citedSources = allCitationLinks
+  const citedSourcesRaw = allCitationLinks
     .filter((c) => citedIndices.has(c.index))
     .sort((a, b) => a.index - b.index);
+
+  // 按 index 去重：LLM 可能在不同章节对不同物理来源分配了相同的全局编号
+  // （如 S2 的 [4] 指向 docx-A，S4 的 [4] 指向 docx-B）。
+  // 保留第一个，丢弃后续同编号项，避免参考来源列表出现重复编号。
+  const seenIndices = new Set<number>();
+  const dupIndexCount: number[] = [];
+  const citedSources = citedSourcesRaw.filter((c) => {
+    if (seenIndices.has(c.index)) {
+      dupIndexCount.push(c.index);
+      return false;
+    }
+    seenIndices.add(c.index);
+    return true;
+  });
+  if (dupIndexCount.length > 0) {
+    logger.warn(`[DocGenerator] Citation index 冲突: 同编号不同来源 [${dupIndexCount.join(", ")}]，保留首个来源，丢弃 ${dupIndexCount.length} 个重复项`);
+  }
 
   // 重新编号：将 citation 编号从头顺序排列（1, 2, 3, ...）
   // post-filter 和 dedup 可能导致编号不连续（如 [1], [2], [5], [7]），

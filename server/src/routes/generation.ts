@@ -5,13 +5,14 @@
  */
 import { Router } from "express";
 import crypto from "crypto";
-import { generateDocument, toHtml, sanitizeCitationHtml, type GenerateDocResult } from "../lib/docGenerator.js";
+import { generateDocument, toHtml, sanitizeCitationHtml, getQueryAnalysis, type GenerateDocResult } from "../lib/docGenerator.js";
 import { exportDocument, type ExportFormat, type ExportSection, type ChartSpec } from "../lib/docExporter.js";
 import { extractChartSpecs } from "../lib/chartSpecParser.js";
 import { buildProvenanceTree, getProvenanceByRunId } from "../lib/provenanceTree.js";
 import { dbRun, dbGet, dbAll, dbTransaction } from "../lib/dbQuery.js";
 import { logger } from "../lib/logger.js";
 import type { OutlineSection } from "../lib/narrativeEngine.js";
+import type { QueryAnalysis } from "../lib/queryAnalyzer.js";
 
 export const generationRouter = Router();
 
@@ -92,7 +93,7 @@ generationRouter.post("/generate", async (req, res) => {
         idx: sIdx,
         title: s.title,
         groundingScore: s.groundingScore,
-        sources: s.sources.map((src) => ({ chunkId: src.chunkId, score: src.score })),
+        sources: s.sources.map((src) => ({ chunkId: src.chunkId, score: src.score, sourceId: src.sourceId, sourceName: src.sourceName, sourceUrl: src.sourceUrl })),
         webCitations: s.webCitations?.length ? s.webCitations : undefined,
       }));
       if (paragraphs.length > 0) {
@@ -214,7 +215,7 @@ generationRouter.post("/generate/stream", async (req, res) => {
             title: doneSection.title,
             content: doneSection.content,
             groundingScore: doneSection.groundingScore,
-            sources: doneSection.sources.map((s) => ({ chunkId: s.chunkId, score: s.score, sourceName: s.sourceName, sourceUrl: s.sourceUrl })),
+            sources: doneSection.sources.map((s) => ({ chunkId: s.chunkId, score: s.score, sourceId: s.sourceId, sourceName: s.sourceName, sourceUrl: s.sourceUrl })),
             webCitations: doneSection.webCitations,
             pythonScript: (doneSection as any).pythonScript,
             chartSpecsRaw: (doneSection as any).chartSpecsRaw,
@@ -238,7 +239,7 @@ generationRouter.post("/generate/stream", async (req, res) => {
         idx: sIdx,
         title: s.title,
         groundingScore: s.groundingScore,
-        sources: s.sources.map((src) => ({ chunkId: src.chunkId, score: src.score })),
+        sources: s.sources.map((src) => ({ chunkId: src.chunkId, score: src.score, sourceId: src.sourceId, sourceName: src.sourceName, sourceUrl: src.sourceUrl })),
         webCitations: s.webCitations?.length ? s.webCitations : undefined,
       }));
       if (paragraphs.length > 0) {
@@ -592,6 +593,54 @@ function isSubHeadingLine(line: string): boolean {
   return false;
 }
 
+/** 将 ExportSection 的 tables + chartSpecs 追加为文本，供完整度/相关度 LLM 检查使用 */
+/**
+ * 构建完整度检查用的 requirement 文本
+ * Bug4 fix: 如果有 Query Analysis 结果，只用内容要点；否则 fallback 到原始 requirement
+ */
+function buildContentRequirement(originalRequirement: string, analysis: QueryAnalysis | null): string {
+  if (!analysis || analysis.contentPoints.length === 0) {
+    return originalRequirement;
+  }
+  // 用内容要点构建简洁的 requirement，去掉格式要求
+  return `请生成一份文档，需要覆盖以下内容要点：\n${analysis.contentPoints.map((p, i) => `${i + 1}. ${p}`).join("\n")}`;
+}
+
+function sectionsWithExtras(sections: ExportSection[]): Array<{ title: string; content: string }> {
+  return sections.map((s) => {
+    const parts: string[] = [s.content];
+
+    // 表格内容
+    if (s.tables && s.tables.length > 0) {
+      const tableText = s.tables
+        .map((rows) => rows.map((cells) => cells.join(" | ")).join("\n"))
+        .join("\n\n");
+      parts.push(`[表格数据]\n${tableText}`);
+    }
+
+    // 图表内容
+    if (s.chartSpecs && s.chartSpecs.length > 0) {
+      const chartText = s.chartSpecs.map((c: any) => {
+        if (c.type === "gantt") {
+          const tasks = c.tasks ?? [];
+          return `[甘特图: ${c.title}]\n${tasks.map((t: any) => `${t.task} | ${t.start}~${t.end} | ${t.assignee ?? ""}`).join("\n")}`;
+        }
+        if (c.type === "scatter") {
+          const data = c.data ?? [];
+          return `[散点图: ${c.title}]\n${data.map((d: any) => `${d.name} (x=${d.x}, y=${d.y})`).join("\n")}`;
+        }
+        // 标准 chart: categories + series
+        const cats = c.categories ?? [];
+        const series = c.series ?? [];
+        return `[${c.type}图: ${c.title}]\n类别: ${cats.join(" | ")}\n${series.map((s2: any) => `${s2.name}: ${s2.values.join(", ")}`).join("\n")}`;
+      }).join("\n\n");
+      parts.push(`[图表数据]\n${chartText}`);
+    }
+
+    return { title: s.title, content: parts.join("\n\n") };
+  });
+}
+
 /** 从 HTML 内容中解析章节 */
 function parseHtmlSections(html: string, title: string): ExportSection[] {
   const sections: ExportSection[] = [];
@@ -645,7 +694,9 @@ function parseHtmlSections(html: string, title: string): ExportSection[] {
                 // LLM 可能输出单个对象或对象数组（如 [{"type":"column",...}, {"type":"pie",...}]）
                 const items = Array.isArray(obj) ? obj : [obj];
                 for (const item of items) {
-                  if (item && typeof item === "object" && item.type && item.categories && item.series) {
+                  // 接受所有图表类型：column/bar/pie/line/doughnut（有 categories+series）
+                  // 以及 gantt（有 tasks）、scatter（有 data）等非标准格式
+                  if (item && typeof item === "object" && item.type && item.title) {
                     parsed.push(item as ChartSpec);
                   }
                 }
@@ -670,6 +721,9 @@ function parseHtmlSections(html: string, title: string): ExportSection[] {
   while ((match = sectionRegex.exec(processedHtml)) !== null) {
     const sectionTitle = match[1].replace(/<[^>]+>/g, "").trim();
     let rawContent = match[2];
+
+    // 移除内联 SVG 图表（包括内部文本），防止图表标签文本被提取为 content
+    rawContent = rawContent.replace(/<svg[\s\S]*?<\/svg>/gi, "");
 
     // ── 提取 script 标签（pythonScript & chartSpec） ──
     const { cleanedContent, pythonScript, chartSpecs } = extractScriptTags(rawContent);
@@ -867,6 +921,11 @@ export function parseHtmlSectionsForPPT(html: string, title: string): ExportSect
         if (cells.length > 0) rows.push(cells);
       }
       if (rows.length > 0) extractedTables.push(rows);
+    }
+
+    // 从 content 中移除已提取的 HTML 表格（防止 PPTX 导出时表格 HTML 被当作文本处理，导致文字与表格重叠）
+    if (extractedTables.length > 0) {
+      innerHtml = innerHtml.replace(/<table\b[^>]*>[\s\S]*?<\/table\b[^>]*>/gi, "");
     }
 
     // Fallback: 如果没提取到 HTML 表格，尝试从 <p> 中解析 markdown 表格
@@ -1171,7 +1230,7 @@ generationRouter.post("/:runId/regenerate-section", async (req, res) => {
           idx: sectionIdx,
           title: newSectionData.title,
           groundingScore: newSectionData.groundingScore,
-          sources: newSectionData.sources.map((src) => ({ chunkId: src.chunkId, score: src.score })),
+          sources: newSectionData.sources.map((src) => ({ chunkId: src.chunkId, score: src.score, sourceId: src.sourceId, sourceName: src.sourceName, sourceUrl: src.sourceUrl })),
           webCitations: hasWebCitations ? newSectionData.webCitations : undefined,
         }]);
       }
@@ -1349,12 +1408,26 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
     // 3 个长推理请求并发会导致全部排队挂起，最终 180s 超时。串行更可靠。
     logger.info(`[Generation] 开始评估: runId=${req.params.id}, provider=${effectiveProvider}, model=${effectiveModel}, sections=${sections.length}`);
 
+    // parseHtmlSections 会把 <table> 和 chartSpecs 从 content 中移除并存储到各自字段
+    // 完整度检查需要看到表格和图表内容，否则会误判已覆盖的内容为 missing
+    // 但相关度检查只需要叙事文本，表格行和图表数据不是"声明"，不应作为 claim 判定
+    const evalSectionsForCompleteness = sectionsWithExtras(sections);
+    const evalSectionsForRelevance = sections.map(s => ({ title: s.title, content: s.content }));
+
+    // Bug4 fix: 用 Query Analysis 的内容要点替代原始 requirement
+    // 只检查内容要点是否覆盖，不检查格式要求（如"标题区分隔线页码统一风格"）
+    const queryAnalysis = getQueryAnalysis();
+    const contentRequirement = buildContentRequirement(requirement, queryAnalysis);
+    if (queryAnalysis) {
+      logger.info(`[Generation] 完整度检查使用 contentPoints (${queryAnalysis.contentPoints.length} 个) 替代原始 requirement`);
+    }
+
     const relevanceResult = await tryWithFallback(
-      (model) => checkDocumentRelevance(sections, requirement, apiKey, effectiveProvider, model),
+      (model) => checkDocumentRelevance(evalSectionsForRelevance, contentRequirement, apiKey, effectiveProvider, model),
       "内容相关度评估"
     );
     const completenessResult = await tryWithFallback(
-      (model) => checkDocumentCompleteness(sections, requirement, apiKey, effectiveProvider, model),
+      (model) => checkDocumentCompleteness(evalSectionsForCompleteness, contentRequirement, apiKey, effectiveProvider, model),
       "内容完整度评估"
     );
     const conflictResult = await tryWithFallback(
@@ -1502,6 +1575,7 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
           irrelevantSentences: relevanceResult.irrelevantSentences ?? [],
           coveredPoints: completenessResult.coveredPoints ?? [],
           missingPoints: completenessResult.missingPoints ?? [],
+          lackSourcePoints: completenessResult.lackSourcePoints ?? [],
           conflictItems: finalConflicts.conflicts ?? [],
         }),
       ], { table: "trust_evaluations", recordId: evalId, source: "generation" });
@@ -1531,6 +1605,7 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
           description: "是否覆盖需求的所有要点",
           coveredPoints: completenessResult.coveredPoints,
           missingPoints: completenessResult.missingPoints,
+          lackSourcePoints: completenessResult.lackSourcePoints,
         },
         conflicts: {
           hasConflicts: finalConflicts.hasConflicts,
@@ -1689,8 +1764,19 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
 
     // ── Task 1: Relevance ──
     writeSSE("evaluate-progress", { task: "relevance", taskIndex: 0, taskLabel: "内容相关度", status: "running" });
+    // 相关度检查只需要叙事文本；完整度检查需要表格和图表内容
+    const evalSectionsForRelevance = sections.map(s => ({ title: s.title, content: s.content }));
+    const evalSectionsForCompleteness = sectionsWithExtras(sections);
+
+    // Bug4 fix: 用 Query Analysis 的内容要点替代原始 requirement
+    const queryAnalysis = getQueryAnalysis();
+    const contentRequirement = buildContentRequirement(requirement, queryAnalysis);
+    if (queryAnalysis) {
+      logger.info(`[Generation] 流式评估使用 contentPoints (${queryAnalysis.contentPoints.length} 个) 替代原始 requirement`);
+    }
+
     const relevanceResult = await tryWithFallback(
-      (model) => checkDocumentRelevance(sections, requirement, apiKey, effectiveProvider, model),
+      (model) => checkDocumentRelevance(evalSectionsForRelevance, contentRequirement, apiKey, effectiveProvider, model),
       "内容相关度评估"
     );
     writeSSE("evaluate-progress", {
@@ -1702,7 +1788,7 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
     // ── Task 2: Completeness ──
     writeSSE("evaluate-progress", { task: "completeness", taskIndex: 1, taskLabel: "内容完整度", status: "running" });
     const completenessResult = await tryWithFallback(
-      (model) => checkDocumentCompleteness(sections, requirement, apiKey, effectiveProvider, model),
+      (model) => checkDocumentCompleteness(evalSectionsForCompleteness, contentRequirement, apiKey, effectiveProvider, model),
       "内容完整度评估"
     );
     writeSSE("evaluate-progress", {
@@ -1710,6 +1796,7 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
       score: completenessResult.score,
       coveredPoints: completenessResult.coveredPoints,
       missingPoints: completenessResult.missingPoints,
+      lackSourcePoints: completenessResult.lackSourcePoints,
     });
 
     // ── Task 3: Conflicts ──
@@ -1825,6 +1912,7 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
           irrelevantSentences: relevanceResult.irrelevantSentences ?? [],
           coveredPoints: completenessResult.coveredPoints ?? [],
           missingPoints: completenessResult.missingPoints ?? [],
+          lackSourcePoints: completenessResult.lackSourcePoints ?? [],
           conflictItems: finalConflicts.conflicts ?? [],
         }),
       ], { table: "trust_evaluations", recordId: evalId, source: "generation" });
@@ -1841,7 +1929,7 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
         faithfulness: { score: faithfulnessScore, label: "事实忠实度", description: "文档内容是否忠实于参考来源" },
         groundedness: { score: groundednessScore, label: "有据可查度", description: "内容是否有来源支撑" },
         relevance: { score: relevanceResult.score, label: "内容相关度", description: "内容是否与需求相关", irrelevantSentences: relevanceResult.irrelevantSentences },
-        completeness: { score: completenessResult.score, label: "内容完整度", description: "是否覆盖需求的所有要点", coveredPoints: completenessResult.coveredPoints, missingPoints: completenessResult.missingPoints },
+        completeness: { score: completenessResult.score, label: "内容完整度", description: "是否覆盖需求的所有要点", coveredPoints: completenessResult.coveredPoints, missingPoints: completenessResult.missingPoints, lackSourcePoints: completenessResult.lackSourcePoints },
         conflicts: { hasConflicts: finalConflicts.hasConflicts, conflictRate: finalConflicts.conflictRate, items: finalConflicts.conflicts, label: "内容冲突", description: "不同来源之间的矛盾信息" },
       },
     });

@@ -10,7 +10,7 @@
 import { logger } from "./logger.js";
 import { mcpClient } from "../mcp/mcpClient.js";
 import type { ToolDefinition, ToolCall } from "../providers/openai.js";
-import { localRerank, type RerankInput } from "./reranker.js";
+import { localRerank, remoteRerank, type RerankInput, type RerankerConfig } from "./reranker.js";
 import { dbAll } from "./dbQuery.js";
 
 const MAX_TOOL_ROUNDS = 3;
@@ -199,68 +199,27 @@ async function fuseAndRank(
   }
 
   // 转为 reranker 输入格式（base score 统一为 0，让 reranker 完全自主判断相关性）
-  const rerankInput: RerankInput[] = allResults.map((r, i) => ({
-    chunkId: `fusion_${i}`,
+  const rerankItems = allResults.map((r, i) => ({
+    id: `fusion_${i}`,
     text: `${r.title} ${r.snippet}`,
-    metadata: { engine: r.engine, url: r.url },
     score: 0,
   }));
 
-  // 优先级 1：远程 reranker API
-  if (rerankerConfig) {
-    try {
-      const rerankUrl = rerankerConfig.baseUrl.endsWith("/v1")
-        ? `${rerankerConfig.baseUrl}/rerank`
-        : `${rerankerConfig.baseUrl}/v1/rerank`;
-      const documents = rerankInput.map((r) => r.text);
-      logger.info(`[Rerank] 远程 Rerank: ${documents.length} 候选, model=${rerankerConfig.modelId}`);
-      const res = await fetch(rerankUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${rerankerConfig.apiKey}` },
-        body: JSON.stringify({ model: rerankerConfig.modelId, query, documents, top_n: TOP_K }),
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (res.ok) {
-        const data = await res.json() as { results?: Array<{ index: number; relevance_score: number }> };
-        const results = data.results ?? [];
-        // 照搬 patentExaminator：保存 reranker 分数到 FusedCitation
-        const reranked = results
-          .filter((r) => r.index >= 0 && r.index < allResults.length)
-          .map((r) => ({
-            ...allResults[r.index]!,
-            score: r.relevance_score,
-          }))
-          .filter((c): c is NonNullable<typeof c> => !!c);
-        const finalCitations: FusedCitation[] = reranked.slice(0, TOP_K);
-        logger.info(`[Rerank] 远程 Rerank 完成: ${reranked.length} → top${TOP_K}=${finalCitations.length} (${countSources(finalCitations)})`);
-        return { citations: finalCitations };
-      }
-      logger.warn(`[Rerank] 远程 Rerank 失败 (${res.status})，降级到本地`);
-    } catch (err) {
-      logger.warn(`[Rerank] 远程 Rerank 错误，降级到本地: ${err}`);
-    }
-  }
+  // 调用统一的 reranker 入口（远程 API 优先 → 本地启发式 fallback）
+  const reranked = await remoteRerank(query, rerankItems, rerankerConfig as RerankerConfig | undefined, TOP_K);
 
-  // 优先级 2：本地启发式算法
-  try {
-    const reranked = localRerank(rerankInput, query);
-    // 照搬 patentExaminator：保存 reranker 分数到 FusedCitation
-    const localCitations: FusedCitation[] = reranked
-      .slice(0, TOP_K)
-      .map((r) => {
-        const idx = parseInt(r.chunkId.replace("fusion_", ""));
-        return {
-          ...allResults[idx],
-          score: r.score,
-        };
-      })
-      .filter((c): c is NonNullable<typeof c> => !!c);
-    logger.info(`[Rerank] 本地启发式 完成: ${reranked.length} → top${TOP_K}=${localCitations.length} (${countSources(localCitations)})`);
-    return { citations: localCitations };
-  } catch (err) {
-    logger.warn(`[Rerank] 本地启发式失败，按原始顺序取 top${TOP_K}: ${err}`);
-    return { citations: allResults.slice(0, TOP_K) };
-  }
+  // 将 reranker 分数回写到 FusedCitation
+  const finalCitations: FusedCitation[] = reranked
+    .map((r) => {
+      const idx = parseInt(r.id.replace("fusion_", ""));
+      return {
+        ...allResults[idx],
+        score: r.score,
+      };
+    })
+    .filter((c): c is NonNullable<typeof c> => !!c);
+  logger.info(`[Rerank] fuseAndRank 完成: ${reranked.length} → top${TOP_K}=${finalCitations.length} (${countSources(finalCitations)})`);
+  return { citations: finalCitations };
 }
 
 // ── 主函数 ──────────────────────────────────────────
@@ -448,19 +407,24 @@ export async function executeWithTools(input: ToolExecutorInput): Promise<ToolEx
       "",
     ];
 
-    // 照搬 patentExaminator：所有格式都添加 citation 标记，保证内容真实性
+    // Citation 为内容真实性提供唯一保障：每个事实声明必须有文档支撑
+    // 显式列出所有可用编号，避免 LLM 把 [N] 当字面量输出而非替换为实际编号
+    const availableNumbers = citations.map((_, i) => `[${globalCitationOffset + i + 1}]`).join(", ");
     const validRange = `[${globalCitationOffset + 1}] 到 [${globalCitationOffset + citations.length}]`;
     citationInstructions.push(
-      "**重要：引用参考文档中的信息时，必须标注来源编号 [N]！**",
+      `**硬性要求：你必须基于上方参考文档撰写内容，每个事实声明、数据、具体描述后必须标注来源编号。**`,
       "",
-      `有效的引用编号为 ${validRange}，绝对不要使用此范围之外的任何编号！`,
+      `可用的引用编号是：${availableNumbers}`,
+      `（即 ${validRange}，不要使用此范围之外的任何编号！）`,
       "",
-      "规则：",
-      "1. 基于参考文档回答，不编造信息",
-      "2. 引用参考文档中的信息时，在句末用 [N] 标注来源",
-      "3. [N] 必须对应上方文档的序号，编号必须在上方参考文档中存在",
-      "4. 如果某句话没有对应文档支撑，直接写出该句，不要添加任何引用标记",
-      "5. 不要编造不存在的编号，宁可少引用也不要编造",
+      "⚠️ 注意：[N] 是占位符，你必须在正文中替换为上方列出的具体编号（如 [${globalCitationOffset + 1}]、[${globalCitationOffset + 2}] 等），不要原样输出 [N]！",
+      "",
+      "规则（违反任何一条，输出将被判定为幻觉并丢弃）：",
+      "1. 每个段落中至少有一个引用标记（如 [${globalCitationOffset + 1}]）",
+      "2. 所有具体数据（数字、日期、百分比、人名、指标）必须标注引用来源",
+      "3. 所有事实声明必须标注引用来源",
+      "4. 引用编号必须对应上方文档的序号，编号必须在上方参考文档中存在",
+      "5. 绝对不要编造事实或虚假编号",
       "6. 不要写「以下是...」「根据参考文档...」等引导语，直接输出内容",
       "7. 不要写补充说明、注意事项等元信息",
     );
@@ -508,7 +472,7 @@ export async function executeWithTools(input: ToolExecutorInput): Promise<ToolEx
           "- 禁止输出任何思考过程、分析步骤、规划性文字",
           "- 禁止输出\"让我...\"、\"我需要...\"、\"用户要求...\"、\"前文已经涵盖...\"等元说明",
           "- 禁止输出\"参考信息：\"、\"现在需要写...\"等过渡性文字",
-          "- 只输出章节正文本身，包括段落和引用标记 [N]",
+          "- 只输出章节正文本身，包括段落和引用标记（必须使用上方列出的具体编号如 [${globalCitationOffset + 1}]，不要写 [N]）",
           "",
           "请撰写章节内容：",
         ].join("\n"),
@@ -532,6 +496,46 @@ export async function executeWithTools(input: ToolExecutorInput): Promise<ToolEx
       finalAnswer = stripInvalidCitations(finalAnswer, validMin, validMax);
       if (finalAnswer.length !== beforeLen) {
         logger.info(`[ToolExecutor] 移除超出范围 [${validMin}-${validMax}] 的引用标记, text长度 ${beforeLen} → ${finalAnswer.length}`);
+      }
+
+      // 零引用重试：LLM 未生成任何 [N] 标记时，用更强的指令重试一次
+      const afterStripCitations = [...finalAnswer.matchAll(/\[(\d+)\]/g)];
+      if (afterStripCitations.length === 0) {
+        logger.warn(`[ToolExecutor] Re-inject LLM 未生成任何 [N] 引用标记 (len=${finalAnswer.length})，重试（从零生成模式）`);
+
+        // 用「从零生成」路径替换最后一条 user 消息，加入更强的引用要求
+        messages[messages.length - 1] = {
+          role: "user",
+          content: [
+            ...citationInstructions,
+            "",
+            "## 最终任务：撰写章节正文（必须包含引用标记）",
+            "",
+            `⚠️ 上次生成的内容完全没有引用标记，这是严重违规！`,
+            "你现在必须直接输出章节的完整正文内容，每个事实声明、数据、具体描述后必须有引用标记。",
+            `请使用上方列出的可用编号（${availableNumbers}），不要原样输出 [N]！`,
+            "",
+            "禁止事项（违反将导致输出被丢弃）：",
+            "- 禁止输出任何思考过程、分析步骤、规划性文字",
+            "- 禁止输出\"让我...\"、\"我需要...\"等元说明",
+            `- 每个段落中至少有一个引用标记（从 ${availableNumbers} 中选择）`,
+            "- 所有具体数据（数字、日期、百分比、人名、指标）必须标注引用来源",
+            "- 只输出章节正文本身，包括段落和引用标记",
+            "",
+            "请撰写章节内容：",
+          ].join("\n"),
+        };
+
+        const retryResult = await callLLM({ messages, timeoutMs, temperature: 0 });
+        finalAnswer = retryResult.text;
+
+        // 追踪重试后的 [N] 数量
+        const retryCitations = [...finalAnswer.matchAll(/\[(\d+)\]/g)].map(m => parseInt(m[1]));
+        const retryUnique = [...new Set(retryCitations)].sort((a, b) => a - b);
+        logger.info(`[DEBUG-CITATION] Re-inject retry output: [${retryUnique.join(",") || "NONE"}](${retryCitations.length}), len=${finalAnswer.length}`);
+
+        // 重试结果也要校验范围
+        finalAnswer = stripInvalidCitations(finalAnswer, validMin, validMax);
       }
     }
   }

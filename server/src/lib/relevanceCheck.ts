@@ -149,7 +149,11 @@ const RELEVANCE_JUDGE_USER = `## 用户原始需求
  * 拆分文档为句子/声明（先去除 HTML 标签，避免 LLM 看到标签碎片导致返回的文本与 DOM textContent 不匹配）
  */
 function stripHtml(html: string): string {
-  return html.replace(/<[^>]*>/g, '');
+  // 先移除整个 <svg>...</svg> 块（包括内部文本），防止图表标签文本被误判为 claim
+  let text = html.replace(/<svg[\s\S]*?<\/svg>/gi, '');
+  // 再移除其他 HTML 标签
+  text = text.replace(/<[^>]*>/g, '');
+  return text;
 }
 
 function splitIntoClaims(text: string): string[] {

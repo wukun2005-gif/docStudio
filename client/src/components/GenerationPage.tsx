@@ -34,6 +34,7 @@ export default function GenerationPage() {
   const [generating, setGenerating] = useState(false);
   const [trustScore, setTrustScore] = useState<number | null>(null);
   const [sections, setSections] = useState<SectionData[]>([]);
+  const [generationProgress, setGenerationProgress] = useState<{ current: number; total: number; title: string } | null>(null);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
   const [dirtySections, setDirtySections] = useState<Set<number>>(new Set());
@@ -352,12 +353,12 @@ export default function GenerationPage() {
             } else if (eventName === "section-start" && eventData) {
               const startInfo = JSON.parse(eventData);
               console.log("[SSE] section-start:", startInfo);
-              // 显示进度状态但不替换 document
-              const status = `<p style="color:#666;font-size:0.9em;padding:10px 0 0 0"><span style="color:#0078d4">●</span> 正在生成 ${startInfo.index + 1}/${startInfo.total}: <strong>${startInfo.title}</strong></p>`;
-              // 用当前已有内容 + 状态提示更新 document（只在还没有内容时显示）
-              const existingContent = receivedSections.map((s) => `<section><h2>${escapeHtml(s.title)}</h2>${s.content}</section>`).join("\n");
-              setDocument(existingContent + status);
-              console.log("[SSE] setDocument called with section-start status");
+              // 在顶部 header 显示生成进度，不污染 document 内容
+              setGenerationProgress({
+                current: startInfo.index + 1,
+                total: startInfo.total,
+                title: startInfo.title,
+              });
             } else if (eventName === "section" && eventData) {
               const sectionData = JSON.parse(eventData);
               console.log("[SSE] section:", { title: sectionData.section.title, contentLen: sectionData.section.content?.length });
@@ -388,6 +389,7 @@ export default function GenerationPage() {
               setDocument(`<p style="color:red">生成失败: ${safeError}</p>`);
               updateWorkflowState("error", errData.error);
               setGenerating(false);
+              setGenerationProgress(null);
               return;
             }
             eventName = "";
@@ -454,6 +456,7 @@ export default function GenerationPage() {
         setTrustScore(finalData.trustScore);
         updateWorkflowState("evaluating");
         setGenerating(false);
+        setGenerationProgress(null);
 
         // 生成完成后自动触发评估（SSE 流式）
         if (targetRunId) {
@@ -796,6 +799,7 @@ export default function GenerationPage() {
         evaluationMetrics={evaluationMetrics}
         evaluating={evaluating}
         evaluationProgress={evaluationProgress}
+        generationProgress={generationProgress}
         onSectionUpdate={handleSectionUpdate}
         onSourceMove={handleSourceMove}
         onRegenerateSection={handleRegenerateSection}

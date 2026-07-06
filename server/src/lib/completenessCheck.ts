@@ -66,7 +66,8 @@ function selectBestEvalModel(
 export interface RequirementPoint {
   point: string;
   covered: boolean;
-  evidence?: string;  // 文档中覆盖该要点的内容
+  reason?: "missing" | "lack_source";  // missing=内容未覆盖, lack_source=缺少来源支撑
+  evidence?: string;                   // 文档中覆盖该要点的内容或缺失说明
 }
 
 export interface CompletenessCheckResult {
@@ -74,6 +75,7 @@ export interface CompletenessCheckResult {
   requirementPoints: RequirementPoint[];
   coveredPoints: string[];
   missingPoints: string[];
+  lackSourcePoints: string[];       // 缺少来源支撑的要点
 }
 
 // ============ LLM Judge ============
@@ -86,7 +88,8 @@ COMPLETENESS RULES（严格执行）：
 
 EXTRACTION RULES：
 - 提取的是内容维度的需求要点（如"评估 Sprint 3-4 的进度"、"列出关键风险"、"给出 GoToMarket 计划"）
-- 不要提取格式/结构类元数据作为需求要点（如"文档标题应为XXX"、"章节应命名为XXX"）— 这类格式要素不影响内容质量判定
+- 不要提取格式/结构类元数据作为需求要点（如"文档标题应为XXX"、"章节应命名为XXX"、"标题区/分隔线/页码统一风格"、"深色专业配色"）— 这类格式要素不影响内容质量判定
+- 不要提取纯视觉/排版要求（如"配色方案"、"字体大小"、"页眉页脚样式"、"封面设计"）— 这些是设计要求不是内容要求
 - 不要提取过于宽泛或模糊的句子（如"写一份报告"不应拆出，必须拆到具体维度）
 - 每个要点应具体到可以独立验证"是否覆盖"
 
@@ -111,7 +114,10 @@ CRITICAL OUTPUT FORMAT（必须严格按以下 JSON schema 输出，不得输出
 强制要求：
 1. requirement_points 必须覆盖用户需求中所有可独立验证的具体内容要点，但不包括格式/标题类元数据
 2. completeness_ratio = covered 数量 / 总要点数量（保留两位小数）
-3. 不要在 JSON 外输出任何解释性文字或 markdown 标记`;
+3. 对于每个要点，区分两种情况：
+   - "内容未覆盖"：文档中完全没有提到该要点
+   - "缺少来源支撑"：文档提到了该要点，但内容缺乏来源支撑（如具体数据、引用等）
+4. 不要在 JSON 外输出任何解释性文字或 markdown 标记`;
 
 const COMPLETENESS_JUDGE_USER = `## 用户原始需求
 
@@ -125,13 +131,19 @@ const COMPLETENESS_JUDGE_USER = `## 用户原始需求
 
 请先从用户需求中提取所有具体要点，然后逐一检查每个要点是否在文档中被覆盖。
 
+对于每个要点，判断：
+1. covered=true：文档中明确覆盖了该要点，且有具体数据/引用支撑
+2. covered=false, reason="missing"：文档中完全没有提到该要点
+3. covered=false, reason="lack_source"：文档提到了该要点，但缺乏具体数据或来源支撑（如"需要补充 Teams Chat 协作频次数据"）
+
 输出 JSON：
 {
   "requirement_points": [
-    {"point": "具体需求要点", "covered": true/false, "evidence": "覆盖该要点的文档内容"}
+    {"point": "具体需求要点", "covered": true/false, "reason": "missing/lack_source", "evidence": "覆盖该要点的文档内容或缺失说明"}
   ],
   "covered_points": ["已覆盖的要点列表"],
-  "missing_points": ["遗漏的要点列表"],
+  "missing_points": ["内容未覆盖的要点列表"],
+  "lack_source_points": ["缺少来源支撑的要点列表"],
   "completeness_ratio": 0.75
 }`;
 
@@ -219,6 +231,7 @@ async function callCompletenessJudge(
           properties: {
             point: { type: "string" },
             covered: { type: "boolean" },
+            reason: { type: "string" },
             evidence: { type: "string" },
           },
           required: ["point", "covered"],
@@ -226,6 +239,7 @@ async function callCompletenessJudge(
       },
       covered_points: { type: "array", items: { type: "string" } },
       missing_points: { type: "array", items: { type: "string" } },
+      lack_source_points: { type: "array", items: { type: "string" } },
       completeness_ratio: { type: "number" },
     },
     required: ["requirement_points", "covered_points", "missing_points", "completeness_ratio"],
@@ -242,6 +256,9 @@ async function callCompletenessJudge(
     const missingPoints = Array.isArray(raw.missing_points)
       ? (raw.missing_points as string[])
       : (parsed.missingPoints ?? []);
+    const lackSourcePoints = Array.isArray(raw.lack_source_points)
+      ? (raw.lack_source_points as string[])
+      : (parsed.lackSourcePoints ?? []);
     const requirementPoints = Array.isArray(raw.requirement_points)
       ? (raw.requirement_points as RequirementPoint[])
       : (parsed.requirementPoints ?? []);
@@ -251,6 +268,7 @@ async function callCompletenessJudge(
       requirementPoints,
       coveredPoints,
       missingPoints,
+      lackSourcePoints,
     };
   };
 
@@ -318,7 +336,7 @@ async function callCompletenessJudge(
 
   // ── 最终降级：score=0.5（而非满分），表示"无法判断" ──
   logger.warn(`[CompletenessCheck] LLM judge 两次调用/解析均失败，保守降级为 score=0.5`);
-  return { score: 0.5, requirementPoints: [], coveredPoints: [], missingPoints: [] };
+  return { score: 0.5, requirementPoints: [], coveredPoints: [], missingPoints: [], lackSourcePoints: [] };
 }
 
 /**
@@ -429,11 +447,20 @@ export async function checkDocumentCompleteness(
     ? coveredCount / totalPoints
     : (ratioCount > 0 ? totalRatio / ratioCount : 0.5);
 
+  // 提取缺少来源支撑的要点
+  const lackSourcePointsSet = new Set<string>();
+  for (const p of allRequirementPoints) {
+    if (p.reason === "lack_source" || (p.reason === undefined && !p.covered && !missingPointsSet.has(p.point))) {
+      lackSourcePointsSet.add(p.point);
+    }
+  }
+
   return {
     score,
     requirementPoints: allRequirementPoints,
     coveredPoints: Array.from(coveredPointsSet),
     missingPoints: Array.from(missingPointsSet),
+    lackSourcePoints: Array.from(lackSourcePointsSet),
   };
 }
 

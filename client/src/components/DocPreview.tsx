@@ -60,6 +60,7 @@ interface DocPreviewProps {
     totalTasks: number;
     tasks: Record<string, { taskLabel: string; status: "running" | "done"; score?: number }>;
   } | null;
+  generationProgress?: { current: number; total: number; title: string } | null;
   onSectionClick?: (sectionIdx: number) => void;
   onSectionUpdate?: (sectionIdx: number, updated: SectionData) => void;
   onSourceMove?: (fromSectionIdx: number, sourceIdx: number, toSectionIdx: number, type?: string, mode?: "move" | "copy") => void;
@@ -71,7 +72,7 @@ interface DocPreviewProps {
 export default function DocPreview({
   content, trustScore, sections, generating, runId,
   dirtySections, regeneratingSections, documentStyle,
-  evaluationMetrics, evaluating, evaluationProgress, onSectionClick, onSectionUpdate, onSourceMove, onRegenerateSection, onSave, onEvaluate,
+  evaluationMetrics, evaluating, evaluationProgress, generationProgress, onSectionClick, onSectionUpdate, onSourceMove, onRegenerateSection, onSave, onEvaluate,
 }: DocPreviewProps) {
   const [activeSection, setActiveSection] = useState<number | null>(null);
   const [dragOverSection, setDragOverSection] = useState<number | null>(null);
@@ -82,42 +83,70 @@ export default function DocPreview({
   const [saving, setSaving] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // 置信度热力图（nf2）
-  const heatmapColors = useMemo(() => {
-    try {
-      if (!showHeatmap || !sections?.length) return {};
-      const m: Record<number, string> = {};
-      let idx = 0;
-      for (const s of sections) {
-        const n = new Set((s.sources ?? []).map((x) => x.sourceId).filter(Boolean)).size;
-        const c = (s.groundingScore ?? 0.5) < 0.5 ? "rgba(239,68,68,0.15)" :
-          n >= 2 ? "rgba(34,197,94,0.15)" : "rgba(234,179,8,0.15)";
-        for (let i = 0; i < Math.max(((s.content ?? "").match(/<(p|h[1-6]|li)/gi) || []).length, 1); i++)
-          m[++idx] = c;
-      }
-      return m;
-    } catch { return {}; }
-  }, [showHeatmap, sections]);
-
-  // DOMPurify 净化 + 段落标记
+  // DOMPurify 净化 + 段落标记 + 热力图着色（单次 DOM 遍历，无 regex）
+  // 使用浏览器原生 DOMParser 解析 HTML，通过 DOM API 精确匹配元素类型和章节边界
   const sanitizedContent = useMemo(() => {
     if (!content) return null;
     const clean = DOMPurify.sanitize(content, {
       ADD_TAGS: ["h1", "h2", "h3", "h4", "h5", "h6"],
-      ADD_ATTR: ["target", "rel", "class", "title", "id"],
+      ADD_ATTR: ["target", "rel", "class", "title", "id", "style"],
     });
-    // 给段落元素添加 id，供 insight 中的 [¶N] 引用跳转
-    // 先移除已有 id 属性，再注入 para-N id，避免重复 id
-    let paraIdx = 0;
-    return clean
-      .replace(/(<(?:p|h[1-6]|li|div|section)\s[^>]*?)\s*id\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "$1")
-      .replace(/<(p|h[1-6]|li|div|section)(\s|>)/gi, (match, tag, after) => {
-        paraIdx++;
-        const c = heatmapColors[paraIdx];
-        const s = c ? ` style="background:${c};padding:6px 8px;border-radius:4px"` : "";
-        return `<${tag} id="para-${paraIdx}"${s}${after}`;
-      });
-  }, [content, heatmapColors]);
+
+    try {
+      // 解析为 DOM 树
+      const doc = new DOMParser().parseFromString(clean, "text/html");
+
+      // 需要标注的元素类型（与旧 regex 保持一致）
+      const ANNOTATABLE = new Set(["P", "H1", "H2", "H3", "H4", "H5", "H6", "LI", "DIV", "SECTION"]);
+
+      let currentSectionIdx = -1; // -1 = 第一个 <section> 之前（标题/开场白），不归属任何章节
+      let paraIdx = 0;
+
+      // DOM 树遍历：按文档顺序访问所有节点
+      function walk(node: Node) {
+        if (node.nodeType === 1) {
+          // Element node
+          const el = node as Element;
+          const tag = el.tagName;
+
+          // <section> = 章节边界（toHtml 为每个 section 生成 <section><h2>title</h2>...）
+          // 不用 H2 作为边界，因为 LLM 生成的内容中可能包含 ## 子标题，也会转成 <h2>，导致 currentSectionIdx 越界
+          if (tag === "SECTION") currentSectionIdx++;
+
+          // 只标注目标元素类型
+          if (ANNOTATABLE.has(tag)) {
+            paraIdx++;
+            el.setAttribute("id", `para-${paraIdx}`);
+
+            // 热力图着色：仅对归属某章节的元素着色
+            if (showHeatmap && currentSectionIdx >= 0 && currentSectionIdx < (sections?.length ?? 0)) {
+              const s = sections[currentSectionIdx];
+              const srcs = s.sources ?? [];
+              const n = new Set(srcs.map((x) => x.sourceId).filter(Boolean)).size;
+              const gs = s.groundingScore ?? 0.5;
+              const c =
+                gs >= 0.5
+                  ? n >= 2
+                    ? "rgba(34,197,94,0.15)"
+                    : "rgba(234,179,8,0.15)"
+                  : gs >= 0.25
+                    ? "rgba(234,179,8,0.15)"
+                    : "rgba(239,68,68,0.15)";
+              el.setAttribute("style", `background:${c};padding:6px 8px;border-radius:4px`);
+            }
+          }
+        }
+        // 递归遍历子节点
+        for (const child of node.childNodes) walk(child);
+      }
+
+      walk(doc.body);
+      return doc.body.innerHTML;
+    } catch {
+      // DOMParser 失败时回退到未着色的 clean HTML
+      return clean;
+    }
+  }, [content, showHeatmap, sections]);
 
   function handleSectionClick(idx: number) {
     setActiveSection(activeSection === idx ? null : idx);
@@ -322,6 +351,12 @@ export default function DocPreview({
             <span className="font-medium text-gray-700">📄 文档预览</span>
             {sections.length > 0 && (
               <span className="text-xs text-gray-400">{sections.length} 个章节</span>
+            )}
+            {generationProgress && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 flex items-center gap-1">
+                <span className="animate-pulse w-2 h-2 bg-blue-500 rounded-full" />
+                正在生成 {generationProgress.current}/{generationProgress.total}: {generationProgress.title}
+              </span>
             )}
             {evaluating && (
               <span className="text-xs px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200 flex items-center gap-1">

@@ -272,17 +272,35 @@ export function extractJudgeJson(text: string): JudgeResult | null {
   try {
     repaired = jsonrepair(cleaned);
   } catch (repairErr) {
-    // jsonrepair 自身抛出异常（极少见）→ 直接放弃，由 retry 兜底
-    // 不使用正则打地鼠：正则无法穷举 LLM 输出的各种变形，
-    // retry 已去掉 responseFormat + 加警告消息，成功概率远高于正则
+    // jsonrepair 自身抛出异常 → 尝试 regex 兜底提取关键指标
+    // 不使用正则打地鼠修复 JSON，而是直接提取 groundedRatio 和 overallVerdict，
+    // 避免 retry 给出更差的结果（如第一次 0.75 → retry 0.33）
     const cleanedPreview = cleaned.length <= 1000 ? cleaned : cleaned.slice(0, 500) + "\n...\n" + cleaned.slice(-500);
     logger.warn(
-      `[Groundedness] extractJudgeJson: jsonrepair() 异常，交给 retry 兜底, ` +
+      `[Groundedness] extractJudgeJson: jsonrepair() 异常，尝试 regex 兜底, ` +
       `repairError=${repairErr instanceof Error ? repairErr.message : String(repairErr)}, ` +
       `文本快照(rawLen=${rawLen}, trimmedLen=${trimmedLen}, afterFence=${afterFenceLen}, afterBrace=${afterBraceLen}, ` +
       `fenceStripped=${fenceStripped}, braceExtracted=${braceExtracted}), ` +
       `输入给 jsonrepair 的文本:\n${cleanedPreview}`,
     );
+
+    // Regex 兜底：从原始文本中提取 groundedRatio 和 overallVerdict
+    const ratioMatch = cleaned.match(/"groundedRatio"\s*:\s*([0-9]+\.?[0-9]*)/);
+    const verdictMatch = cleaned.match(/"overallVerdict"\s*:\s*"(pass|fail|partial)"/);
+    if (ratioMatch) {
+      const groundedRatio = parseFloat(ratioMatch[1]);
+      const overallVerdict = (verdictMatch?.[1] as "pass" | "fail" | "partial") ?? "partial";
+      logger.info(
+        `[Groundedness] extractJudgeJson: regex 兜底成功, groundedRatio=${groundedRatio}, overallVerdict=${overallVerdict}, claims=0 (未解析个体声明)`,
+      );
+      return {
+        claims: [],
+        groundedRatio,
+        overallVerdict,
+      };
+    }
+
+    // regex 也提取不到 → 放弃，由 retry 兜底
     return null;
   }
 
@@ -304,6 +322,23 @@ export function extractJudgeJson(text: string): JudgeResult | null {
       `输入给 jsonrepair 的原文:\n${cleanedPreview}\n` +
       `jsonrepair 修复后:\n${repairedPreview}`,
     );
+
+    // Regex 兜底：同 step 3 的 catch 逻辑
+    const ratioMatch = cleaned.match(/"groundedRatio"\s*:\s*([0-9]+\.?[0-9]*)/);
+    const verdictMatch = cleaned.match(/"overallVerdict"\s*:\s*"(pass|fail|partial)"/);
+    if (ratioMatch) {
+      const groundedRatio = parseFloat(ratioMatch[1]);
+      const overallVerdict = (verdictMatch?.[1] as "pass" | "fail" | "partial") ?? "partial";
+      logger.info(
+        `[Groundedness] extractJudgeJson: JSON.parse 失败后 regex 兜底成功, groundedRatio=${groundedRatio}, overallVerdict=${overallVerdict}`,
+      );
+      return {
+        claims: [],
+        groundedRatio,
+        overallVerdict,
+      };
+    }
+
     return null;
   }
 

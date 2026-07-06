@@ -5,7 +5,40 @@
 - bug1: [✅] 冲突源前置过滤 — 生成前检测冲突→resolve→排除不可resolve的源，避免引用冲突源
 - bug2: [✅] extractDocumentMetadata 正则提取人名有缺陷，改为 LLM NER 提取
 - bug3: [✅] 评估阶段 SSE 流式进度反馈缺失，用户误以为卡住
-- bug4: [✅] PPT导出表格和图表排版回归 — 修复contentCleaner.ts正则匹配、generation.ts函数位置、slideHtmlBuilder.ts布局问题
+- bug4: [✅] RAG 检索阶段接入 reranker API — hybridSearch 检索阶段未调用用户配置的 reranker API，导致相关 chunk 被 MMR 排除后无法补救
+
+---
+
+## 已修复 Bugs
+
+### bug5: Query 构建 — LLM-based query rewrite 替代 regex 方案 ✅ 已修复
+
+**优先级**：P1 → 已完成
+
+**状态**：已实现 `server/src/lib/queryAnalyzer.ts`，用一次 LLM 调用分离内容要点和格式要求。
+
+**修复内容**：
+
+1. **新模块 `queryAnalyzer.ts`**：`analyzeQuery(userRequest, outline, ...)` 用 LLM 从用户请求中提取 `contentPoints`（内容要点）和 `formatRequirements`（格式要求）。支持 JSON schema 强制输出，失败时 fallback 到 null。
+
+2. **bug5 fix — RAG 检索**：`buildRagQuery` 不再用 regex 穷举删除指令词，改为调用 `buildRagQueryFromAnalysis(sectionTitle, description, _queryAnalysis)`，用 LLM 提取的内容要点构建检索 query。如果 analysis 为 null，fallback 到原始 `title + description`。
+
+3. **Bug4 fix — 完整度检查**：`checkDocumentCompleteness` 和 `checkDocumentRelevance` 的 `requirement` 参数改为 `buildContentRequirement(requirement, queryAnalysis)`，只用内容要点构建 requirement，格式要求（如"标题区分隔线页码统一风格"、"深色专业配色"）不进入完整度检查。
+
+4. **缓存机制**：在 `generateDocument` 开头调用一次 `analyzeQuery`，结果缓存到模块级变量 `_queryAnalysis`，供整个生成流程复用（RAG 检索 + 完整度检查）。
+
+**影响文件**：
+- `server/src/lib/queryAnalyzer.ts`（新增）
+- `server/src/lib/docGenerator.ts`（`buildRagQuery` 重写，`generateDocument` 添加 analysis 调用，导出 `getQueryAnalysis`）
+- `server/src/routes/generation.ts`（两个评估调用点改用 `buildContentRequirement`）
+
+**原方案（已过时）**：
+
+用户在生成文档时，为每个章节指定 title + description。description 同时包含两类信息：
+- **知识点**：用户希望覆盖的具体内容（如"团队规模与结构、部门分布、汇报关系"）
+- **生成指令**：格式和排版要求（如"每项包括说明文字、数据表格和可视化图表"）
+
+旧代码直接拼接 `title + description` 作为 RAG 检索 query，指令词（"数据表格"、"可视化图表"、"信息点"）在 BM25 中匹配到了知识库中不相关的文档（如 PRD.md 的内容质量要求表格），导致检索结果与知识点完全无关。临时修复用 regex 从 description 中删除指令短语，但 regex 无法穷举所有指令格式。
 
 ---
 

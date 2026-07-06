@@ -158,11 +158,63 @@ export function getChunksBySourceId(sourceId: string): Array<{
   }));
 }
 
+/** 源代码文件扩展名（github_file 类型中需要排除的） */
+const CODE_EXTS = new Set([
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+  ".py", ".java", ".go", ".rs", ".swift", ".kt", ".kts",
+  ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp",
+  ".cs", ".fs", ".fsx", ".vb",
+  ".rb", ".php", ".pl", ".pm",
+  ".scala", ".sc", ".groovy", ".clj", ".cljs",
+  ".r", ".rmd", ".lua", ".sh", ".bash", ".zsh", ".fish", ".ps1",
+  ".sql", ".ddl", ".dml",
+  ".vue", ".svelte", ".css", ".scss", ".sass", ".less", ".styl",
+  ".html", ".htm", ".pug", ".jade", ".ejs", ".hbs", ".handlebars",
+  ".dockerfile", ".makefile", ".cmake", ".gradle", ".sbt",
+]);
+
+/** 判断 source 是否为源代码文件（排除）或保留的文档/数据文件 */
+function isCodeFile(name: string): boolean {
+  const lower = name.toLowerCase();
+  for (const ext of CODE_EXTS) {
+    if (lower.endsWith(ext)) return true;
+  }
+  // 常见无扩展名源码文件
+  if (lower === "dockerfile" || lower === "makefile" || lower === "rakefile" || lower === "gemfile") {
+    return true;
+  }
+  return false;
+}
+
 export function getAllChunks(): Array<{
   id: string; sourceId: string; content: string; chunkIndex: number;
   tokenCount: number; metadata?: Record<string, unknown>;
 }> {
-  const rows = dbAll<any>("SELECT * FROM kb_chunks ORDER BY source_id, chunk_index");
+  // 排除 github_file 类型的真正源代码文件，保留 .md/.json/.yaml 等文档和数据文件
+  const rows = dbAll<any>(`
+    SELECT c.* FROM kb_chunks c
+    JOIN kb_sources s ON c.source_id = s.id
+    WHERE NOT (s.type = 'github_file' AND (
+      lower(s.name) LIKE '%.ts' OR lower(s.name) LIKE '%.tsx' OR
+      lower(s.name) LIKE '%.js' OR lower(s.name) LIKE '%.jsx' OR
+      lower(s.name) LIKE '%.py' OR lower(s.name) LIKE '%.java' OR
+      lower(s.name) LIKE '%.go' OR lower(s.name) LIKE '%.rs' OR
+      lower(s.name) LIKE '%.swift' OR lower(s.name) LIKE '%.kt' OR
+      lower(s.name) LIKE '%.cpp' OR lower(s.name) LIKE '%.c' OR
+      lower(s.name) LIKE '%.h' OR lower(s.name) LIKE '%.hpp' OR
+      lower(s.name) LIKE '%.cs' OR lower(s.name) LIKE '%.rb' OR
+      lower(s.name) LIKE '%.php' OR lower(s.name) LIKE '%.scala' OR
+      lower(s.name) LIKE '%.lua' OR lower(s.name) LIKE '%.sh' OR
+      lower(s.name) LIKE '%.sql' OR lower(s.name) LIKE '%.vue' OR
+      lower(s.name) LIKE '%.svelte' OR lower(s.name) LIKE '%.css' OR
+      lower(s.name) LIKE '%.scss' OR lower(s.name) LIKE '%.sass' OR
+      lower(s.name) LIKE '%.less' OR lower(s.name) LIKE '%.html' OR
+      lower(s.name) LIKE '%.pug' OR lower(s.name) LIKE '%.ejs' OR
+      lower(s.name) LIKE '%.dockerfile' OR lower(s.name) LIKE '%.makefile' OR
+      lower(s.name) = 'dockerfile' OR lower(s.name) = 'makefile'
+    ))
+    ORDER BY c.source_id, c.chunk_index
+  `);
   return rows.map((r) => ({
     id: r.id,
     sourceId: r.source_id,
@@ -214,9 +266,31 @@ export function addVectors(vectors: Array<{
 export function getAllVectors(): Array<{
   chunkId: string; embedding: number[]; modelId: string;
 }> {
-  const rows = dbAll<{ chunkId: string; embedding: Buffer; modelId: string }>(
-    "SELECT * FROM kb_vectors",
-  );
+  // 排除 github_file 类型的真正源代码文件，与 getAllChunks 保持一致
+  const rows = dbAll<{ chunkId: string; embedding: Buffer; modelId: string }>(`
+    SELECT v.* FROM kb_vectors v
+    JOIN kb_chunks c ON v.chunk_id = c.id
+    JOIN kb_sources s ON c.source_id = s.id
+    WHERE NOT (s.type = 'github_file' AND (
+      lower(s.name) LIKE '%.ts' OR lower(s.name) LIKE '%.tsx' OR
+      lower(s.name) LIKE '%.js' OR lower(s.name) LIKE '%.jsx' OR
+      lower(s.name) LIKE '%.py' OR lower(s.name) LIKE '%.java' OR
+      lower(s.name) LIKE '%.go' OR lower(s.name) LIKE '%.rs' OR
+      lower(s.name) LIKE '%.swift' OR lower(s.name) LIKE '%.kt' OR
+      lower(s.name) LIKE '%.cpp' OR lower(s.name) LIKE '%.c' OR
+      lower(s.name) LIKE '%.h' OR lower(s.name) LIKE '%.hpp' OR
+      lower(s.name) LIKE '%.cs' OR lower(s.name) LIKE '%.rb' OR
+      lower(s.name) LIKE '%.php' OR lower(s.name) LIKE '%.scala' OR
+      lower(s.name) LIKE '%.lua' OR lower(s.name) LIKE '%.sh' OR
+      lower(s.name) LIKE '%.sql' OR lower(s.name) LIKE '%.vue' OR
+      lower(s.name) LIKE '%.svelte' OR lower(s.name) LIKE '%.css' OR
+      lower(s.name) LIKE '%.scss' OR lower(s.name) LIKE '%.sass' OR
+      lower(s.name) LIKE '%.less' OR lower(s.name) LIKE '%.html' OR
+      lower(s.name) LIKE '%.pug' OR lower(s.name) LIKE '%.ejs' OR
+      lower(s.name) LIKE '%.dockerfile' OR lower(s.name) LIKE '%.makefile' OR
+      lower(s.name) = 'dockerfile' OR lower(s.name) = 'makefile'
+    ))
+  `);
   return rows.map((r) => ({
     chunkId: r.chunkId,
     embedding: Array.from(new Float64Array(r.embedding.buffer, r.embedding.byteOffset, r.embedding.byteLength / 8)),

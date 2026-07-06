@@ -118,12 +118,12 @@ const BUILTIN_FORMATS: FormatTemplate[] = [
     name: "PPT 演示",
     constraints: `输出格式要求（PPT 演示文稿）：
 - 每个章节是一个独立的幻灯片
-- 用 h3 标记每个信息点的标题
+- 用 ### 标记每个信息点的标题（markdown 三级标题）
 - 数据用 markdown 表格格式（| 列1 | 列2 | ... |），表头行和数据行之间用 |---| 分隔
-- 如果文档大纲中指定了图表，必须在 /chart 代码块中附 JSON 数据（每个信息点最多一个图表）：
-/chart
+- 如果文档大纲中指定了图表，必须在 \`\`\`chart 代码块中附 JSON 数据（每个信息点最多一个图表）：
+\`\`\`chart
 [{"type": "column", "title": "图表标题", "categories": ["类别1", "类别2"], "series": [{"name": "系列名", "values": [10, 20]}]}]
-/chart
+\`\`\`
 - chart type 支持: bar / column / pie / doughnut / line / scatter
 - 文字简洁但信息完整，不要用空洞的 bullet points 代替具体数据
 - 表格和图表基于参考信息，如果数据不足可基于参考信息进行合理估算，但必须生成`,
