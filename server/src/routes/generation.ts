@@ -13,6 +13,7 @@ import { dbRun, dbGet, dbAll, dbTransaction } from "../lib/dbQuery.js";
 import { logger } from "../lib/logger.js";
 import type { OutlineSection } from "../lib/narrativeEngine.js";
 import type { QueryAnalysis } from "../lib/queryAnalyzer.js";
+import { CASE_1783257530743 } from "../providers/fixtures/case-1783257530743.js";
 
 export const generationRouter = Router();
 
@@ -64,6 +65,31 @@ generationRouter.post("/generate", async (req, res) => {
     const protocol = req.protocol || "http";
     const host = req.get("host") || "localhost:3000";
     const baseUrl = `${protocol}://${host}`;
+
+    // ── Demo replay mode: 完全 replay case-1783257530743 的数据，不调用任何外部 API ──
+    if (providerPreference?.length === 1 && providerPreference[0] === "demo") {
+      const fixture = CASE_1783257530743;
+      logger.info(`[Generation] Demo replay (non-stream): replaying from case ${fixture.caseId}`);
+
+      dbRun(`UPDATE generation_runs SET title = ?, content = ?, status = 'done', trust_score = ?, document_style = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+        [fixture.title, fixture.htmlContent, fixture.trustScore, fixture.documentStyle, runId],
+        { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "done", trustScore: fixture.trustScore, documentStyle: fixture.documentStyle } });
+
+      try {
+        const paragraphs = fixture.sections.map((s, sIdx) => ({
+          idx: sIdx, title: s.title, groundingScore: s.groundingScore,
+          sources: s.sources.map(src => ({ chunkId: src.chunkId, score: src.score })),
+        }));
+        if (paragraphs.length > 0) buildProvenanceTree(runId, paragraphs);
+      } catch (treeErr) { logger.warn(`[Generation] Demo provenance tree failed: ${treeErr}`); }
+
+      res.json({
+        ok: true, runId, title: fixture.title, content: fixture.htmlContent,
+        sections: fixture.sections, trustScore: fixture.trustScore, documentStyle: fixture.documentStyle,
+        ...(fixture.conflictResolution ? { conflictResolution: fixture.conflictResolution } : {}),
+      });
+      return;
+    }
 
     // 生成文档（超时由 registry 120s + docGenerator 180s 逐层保障）
     const result = await generateDocument({
@@ -188,6 +214,77 @@ generationRouter.post("/generate/stream", async (req, res) => {
     const protocol = req.protocol || "http";
     const host = req.get("host") || "localhost:3000";
     const baseUrl = `${protocol}://${host}`;
+
+    // ── Demo replay mode: 完全 replay case-1783257530743 的数据，不调用任何外部 API ──
+    const isDemoReplay = providerPreference?.length === 1 && providerPreference[0] === "demo";
+    if (isDemoReplay) {
+      const fixture = CASE_1783257530743;
+      logger.info(`[Generation] Demo replay: replaying ${fixture.sections.length} sections from case ${fixture.caseId}`);
+
+      // Simulate streaming: send section-start + section events with realistic delays
+      for (let i = 0; i < fixture.sections.length; i++) {
+        const sec = fixture.sections[i];
+        writeSSE("section-start", { index: i, total: fixture.sections.length, title: sec.title });
+        logger.info(`[Generation] Demo SSE: section-start [${i + 1}/${fixture.sections.length}] ${sec.title}`);
+        await new Promise(resolve => setTimeout(resolve, 600));
+
+        writeSSE("section", {
+          index: i,
+          section: {
+            title: sec.title,
+            content: sec.content,
+            groundingScore: sec.groundingScore,
+            sources: sec.sources,
+            webCitations: undefined,
+          },
+        });
+        logger.info(`[Generation] Demo SSE: section [${i + 1}/${fixture.sections.length}] ${sec.title} (content=${sec.content?.length || 0} chars)`);
+      }
+
+      // Update DB with saved content
+      const docTitle = fixture.title;
+      dbRun(`UPDATE generation_runs SET title = ?, content = ?, status = 'done', trust_score = ?, document_style = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+        [docTitle, fixture.htmlContent, fixture.trustScore, fixture.documentStyle, runId],
+        { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "done", trustScore: fixture.trustScore, documentStyle: fixture.documentStyle } });
+
+      // Build provenance tree from saved data
+      try {
+        const paragraphs = fixture.sections.map((s, sIdx) => ({
+          idx: sIdx,
+          title: s.title,
+          groundingScore: s.groundingScore,
+          sources: s.sources.map(src => ({ chunkId: src.chunkId, score: src.score })),
+        }));
+        if (paragraphs.length > 0) {
+          buildProvenanceTree(runId, paragraphs);
+        }
+      } catch (treeErr) {
+        logger.warn(`[Generation] Demo provenance tree build failed: ${treeErr}`);
+      }
+
+      logger.info(`[Generation] Demo replay 完成: ${docTitle}`);
+
+      // Send done event
+      const donePayload = {
+        ok: true,
+        runId,
+        title: docTitle,
+        content: "",
+        sections: fixture.sections.map(s => ({ title: s.title, content: s.content, groundingScore: s.groundingScore })),
+        trustScore: fixture.trustScore,
+        documentStyle: fixture.documentStyle,
+        ...(fixture.conflictResolution ? { conflictResolution: fixture.conflictResolution } : {}),
+      };
+      const doneJson = JSON.stringify(donePayload);
+      const write1Ok = res.write(`event: done\n`);
+      const write2Ok = res.write(`data: ${doneJson}\n\n`);
+      if (!write1Ok || !write2Ok) {
+        await new Promise<void>((resolve) => res.once("drain", resolve));
+      }
+      res.end();
+      logger.info(`[Generation] Demo done event sent & stream ended`);
+      return;
+    }
 
     // ── 流式生成：每个章节生成后立即推送 SSE ──
     const totalSections = outline.length;
@@ -1283,6 +1380,48 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
   try {
     const { apiKey: reqApiKey, providerId, modelId, userRequest } = req.body;
 
+    // ── Demo replay mode: return saved evaluation metrics, no external API calls ──
+    // 必须在 apiKey 检查之前，demo 模式不需要 apiKey
+    if (providerId === "demo" || (req.body.providerPreference?.includes("demo"))) {
+      const fixture = CASE_1783257530743;
+      const tm = fixture.trustMetrics;
+      logger.info(`[Generation] Demo evaluate (non-stream): replaying from case ${fixture.caseId}`);
+
+      const run = dbGet<any>("SELECT * FROM generation_runs WHERE id = ?", [req.params.id]);
+      if (!run) {
+        res.status(404).json({ ok: false, error: "Run not found" });
+        return;
+      }
+
+      try {
+        const evalId = crypto.randomUUID();
+        dbRun(`INSERT INTO trust_evaluations (id, run_id, metrics, created_at) VALUES (?, ?, ?, datetime('now','localtime'))`,
+          [evalId, req.params.id, JSON.stringify({
+            faithfulness: tm?.faithfulness ?? 0.5, groundedness: tm?.groundedness ?? 0.5,
+            relevance: tm?.relevance ?? 1, completeness: tm?.completeness ?? 1,
+            conflictRate: tm?.conflictRate ?? 0, hasConflicts: tm?.hasConflicts ?? false,
+            irrelevantSentences: tm?.irrelevantSentences ?? [], coveredPoints: tm?.coveredPoints ?? [],
+            missingPoints: tm?.missingPoints ?? [], lackSourcePoints: tm?.lackSourcePoints ?? [],
+            conflictItems: tm?.conflictItems ?? [],
+          })],
+          { table: "trust_evaluations", recordId: evalId, source: "generation" });
+      } catch (e) { logger.warn(`[Generation] Demo eval save failed: ${e}`); }
+
+      res.json({
+        ok: true, runId: req.params.id,
+        metrics: {
+          faithfulness: { score: tm?.faithfulness ?? 0.5, label: "事实忠实度", description: "文档内容是否忠实于参考来源" },
+          groundedness: { score: tm?.groundedness ?? 0.5, label: "有据可查度", description: "内容是否有来源支撑" },
+          relevance: { score: tm?.relevance ?? 1, label: "内容相关度", description: "内容是否与需求相关", irrelevantSentences: tm?.irrelevantSentences ?? [] },
+          completeness: { score: tm?.completeness ?? 1, label: "内容完整度", description: "是否覆盖需求的所有要点", coveredPoints: tm?.coveredPoints ?? [], missingPoints: tm?.missingPoints ?? [], lackSourcePoints: tm?.lackSourcePoints ?? [] },
+          conflicts: { hasConflicts: tm?.hasConflicts ?? false, conflictRate: tm?.conflictRate ?? 0, items: tm?.conflictItems ?? [], label: "内容冲突", description: "不同来源之间的矛盾信息" },
+        },
+      });
+      return;
+    }
+
+    // ── 以下为正常评估流程，需要 apiKey ──
+
     // 动态导入评估模块
     const { checkDocumentRelevance } = await import("../lib/relevanceCheck.js");
     const { checkDocumentCompleteness } = await import("../lib/completenessCheck.js");
@@ -1639,6 +1778,73 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
 
   try {
     const { apiKey: reqApiKey, providerId, modelId, userRequest } = req.body;
+
+    // ── Demo replay mode: replay saved evaluation metrics, no external API calls ──
+    // 必须在 apiKey 检查之前，demo 模式不需要 apiKey
+    if (providerId === "demo" || (req.body.providerPreference?.includes("demo"))) {
+      const fixture = CASE_1783257530743;
+      const tm = fixture.trustMetrics;
+      logger.info(`[Generation] Demo evaluate (stream): replaying saved metrics from case ${fixture.caseId}`);
+      logger.info(`[Generation] Demo evaluate (stream): trustMetrics=${tm ? JSON.stringify(tm).substring(0, 300) : "NULL"}`);
+
+      const run = dbGet<any>("SELECT * FROM generation_runs WHERE id = ?", [req.params.id]);
+      if (!run) {
+        writeSSE("error", { ok: false, error: "Run not found" });
+        res.end();
+        return;
+      }
+
+      const sections = run.content ? parseHtmlSections(run.content, run.title) : [];
+      writeSSE("evaluate-start", { ok: true, runId: req.params.id, sectionCount: sections.length });
+
+      // Simulate progress for each evaluation task
+      writeSSE("evaluate-progress", { task: "relevance", taskIndex: 0, taskLabel: "内容相关度", status: "running" });
+      await new Promise(r => setTimeout(r, 500));
+      writeSSE("evaluate-progress", { task: "relevance", taskIndex: 0, taskLabel: "内容相关度", status: "done", result: { score: tm?.relevance ?? 1, irrelevantSentences: tm?.irrelevantSentences ?? [] } });
+
+      writeSSE("evaluate-progress", { task: "completeness", taskIndex: 1, taskLabel: "内容完整度", status: "running" });
+      await new Promise(r => setTimeout(r, 500));
+      writeSSE("evaluate-progress", { task: "completeness", taskIndex: 1, taskLabel: "内容完整度", status: "done", result: { score: tm?.completeness ?? 1, coveredPoints: tm?.coveredPoints ?? [], missingPoints: tm?.missingPoints ?? [], lackSourcePoints: tm?.lackSourcePoints ?? [] } });
+
+      writeSSE("evaluate-progress", { task: "conflicts", taskIndex: 2, taskLabel: "内容冲突检测", status: "running" });
+      await new Promise(r => setTimeout(r, 500));
+      writeSSE("evaluate-progress", { task: "conflicts", taskIndex: 2, taskLabel: "内容冲突检测", status: "done", result: { hasConflicts: tm?.hasConflicts ?? false, conflictRate: tm?.conflictRate ?? 0, conflicts: tm?.conflictItems ?? [] } });
+
+      // Save evaluation to DB
+      try {
+        const evalId = crypto.randomUUID();
+        dbRun(`INSERT INTO trust_evaluations (id, run_id, metrics, created_at) VALUES (?, ?, ?, datetime('now','localtime'))`,
+          [evalId, req.params.id, JSON.stringify({
+            faithfulness: tm?.faithfulness ?? 0.5,
+            groundedness: tm?.groundedness ?? 0.5,
+            relevance: tm?.relevance ?? 1,
+            completeness: tm?.completeness ?? 1,
+            conflictRate: tm?.conflictRate ?? 0,
+            hasConflicts: tm?.hasConflicts ?? false,
+            irrelevantSentences: tm?.irrelevantSentences ?? [],
+            coveredPoints: tm?.coveredPoints ?? [],
+            missingPoints: tm?.missingPoints ?? [],
+            lackSourcePoints: tm?.lackSourcePoints ?? [],
+            conflictItems: tm?.conflictItems ?? [],
+          })],
+          { table: "trust_evaluations", recordId: evalId, source: "generation" });
+      } catch (e) { logger.warn(`[Generation] Demo eval save failed: ${e}`); }
+
+      writeSSE("evaluate-done", {
+        ok: true,
+        runId: req.params.id,
+        metrics: {
+          faithfulness: { score: tm?.faithfulness ?? 0.5, label: "事实忠实度", description: "文档内容是否忠实于参考来源" },
+          groundedness: { score: tm?.groundedness ?? 0.5, label: "有据可查度", description: "内容是否有来源支撑" },
+          relevance: { score: tm?.relevance ?? 1, label: "内容相关度", description: "内容是否与需求相关", irrelevantSentences: tm?.irrelevantSentences ?? [] },
+          completeness: { score: tm?.completeness ?? 1, label: "内容完整度", description: "是否覆盖需求的所有要点", coveredPoints: tm?.coveredPoints ?? [], missingPoints: tm?.missingPoints ?? [], lackSourcePoints: tm?.lackSourcePoints ?? [] },
+          conflicts: { hasConflicts: tm?.hasConflicts ?? false, conflictRate: tm?.conflictRate ?? 0, items: tm?.conflictItems ?? [], label: "内容冲突", description: "不同来源之间的矛盾信息" },
+        },
+      });
+      res.end();
+      logger.info(`[Generation] Demo evaluate (stream) done`);
+      return;
+    }
 
     // 动态导入评估模块
     const { checkDocumentRelevance } = await import("../lib/relevanceCheck.js");

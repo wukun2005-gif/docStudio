@@ -6,9 +6,10 @@
  * - 问题卡片列表（严重程度 + 描述 + 建议修正方向）
  * - 一键修正按钮
  *
- * Demo 阶段：hardcoded fixture 数据
+ * 数据来源：evaluationMetrics（与 UnifiedEvaluationCard 同源）
+ * 当 evaluationMetrics 不可用时 fallback 到 DEMO_AUDIT
  */
-import { useState } from "react";
+import { useState, useMemo } from "react";
 
 interface AuditIssue {
   id: string;
@@ -24,55 +25,188 @@ interface AuditData {
   issues: AuditIssue[];
 }
 
+/** 评估指标 props（与 UnifiedEvaluationCard 同源） */
+interface EvalMetricsProps {
+  groundedness?: { score: number };
+  relevance?: { score: number; irrelevantSentences?: string[] };
+  completeness?: { score: number; missingPoints?: string[]; lackSourcePoints?: string[] };
+  conflicts?: {
+    hasConflicts: boolean;
+    conflictRate: number;
+    items?: Array<{
+      topic: string;
+      claims?: Array<{ text: string; source?: string }>;
+      severity?: string;
+      winnerSource?: string;
+      winnerReason?: string;
+      status?: string;
+    }>;
+  };
+}
+
+interface Props {
+  evaluationMetrics?: EvalMetricsProps | null;
+  trustScore?: number | null;
+}
+
+/** 从 evaluationMetrics 推导 5 维度雷达图 + 问题列表 */
+function deriveAuditData(metrics: EvalMetricsProps | null | undefined, trustScore: number | null): AuditData {
+  if (!metrics) {
+    return DEMO_AUDIT;
+  }
+
+  const groundedness = metrics.groundedness?.score ?? 0;
+  const relevance = metrics.relevance?.score ?? 0;
+  const completeness = metrics.completeness?.score ?? 0;
+  const conflictRate = metrics.conflicts?.conflictRate ?? 0;
+  const consistency = 1 - conflictRate; // 一致性 = 1 - 冲突率
+  const conflictScore = 1 - conflictRate; // 无冲突维度
+
+  const radarScores = [
+    { dimension: "有据可查", score: groundedness, maxScore: 1 },
+    { dimension: "内容相关", score: relevance, maxScore: 1 },
+    { dimension: "内容完整", score: completeness, maxScore: 1 },
+    { dimension: "一致性", score: consistency, maxScore: 1 },
+    { dimension: "无冲突", score: conflictScore, maxScore: 1 },
+  ];
+
+  const overall = (groundedness + relevance + completeness + consistency + conflictScore) / 5;
+
+  // 构建问题列表
+  const issues: AuditIssue[] = [];
+
+  // 1. 未支撑断言
+  if (trustScore != null && trustScore < 0.8) {
+    issues.push({
+      id: "i-unsupported",
+      severity: trustScore < 0.5 ? "high" : "medium",
+      category: "未支撑断言",
+      description: `综合有据可查度仅 ${Math.round(trustScore * 100)}%，部分段落缺少来源支撑。建议拖拽知识源到相关章节并重新生成。`,
+      suggestion: "在 Provenance Tree 中拖拽知识源到低分段落，或补充知识源后重新生成。",
+    });
+  }
+
+  // 2. 无关内容
+  if (metrics.relevance?.irrelevantSentences?.length) {
+    for (let i = 0; i < metrics.relevance.irrelevantSentences.length; i++) {
+      const sentence = metrics.relevance.irrelevantSentences[i];
+      issues.push({
+        id: `i-irrelevant-${i}`,
+        severity: "medium",
+        category: "与需求无关",
+        description: `与需求无关的内容：${sentence.length > 100 ? sentence.substring(0, 100) + "…" : sentence}`,
+        suggestion: "在文档中搜索此句并手动编辑删除或修改。",
+      });
+    }
+  }
+
+  // 3. 未覆盖要点
+  if (metrics.completeness?.missingPoints?.length) {
+    for (let i = 0; i < metrics.completeness.missingPoints.length; i++) {
+      const point = metrics.completeness.missingPoints[i];
+      issues.push({
+        id: `i-missing-${i}`,
+        severity: "high",
+        category: "需求要点未覆盖",
+        description: `需求要点未覆盖：${point}`,
+        suggestion: "补充相关知识源后重新生成。",
+      });
+    }
+  }
+
+  // 4. 缺少来源支撑的要点
+  if (metrics.completeness?.lackSourcePoints?.length) {
+    for (let i = 0; i < metrics.completeness.lackSourcePoints.length; i++) {
+      const point = metrics.completeness.lackSourcePoints[i];
+      issues.push({
+        id: `i-lacksource-${i}`,
+        severity: "medium",
+        category: "缺少来源支撑",
+        description: `缺少来源支撑：${point}`,
+        suggestion: "在知识库中搜索相关文档，拖拽到对应章节后重新生成。",
+      });
+    }
+  }
+
+  // 5. 已拦截冲突
+  if (metrics.conflicts?.items?.length) {
+    for (let i = 0; i < metrics.conflicts.items.length; i++) {
+      const c = metrics.conflicts.items[i];
+      const claimsDesc = c.claims?.map(cl => {
+        const src = cl.source ? `（${cl.source}）` : "";
+        return `"${cl.text?.substring(0, 60) ?? ""}${cl.text && cl.text.length > 60 ? "…" : ""}"${src}`;
+      }).join("  vs  ") || "";
+      const sev = c.severity === "high" ? "high" : c.severity === "medium" ? "medium" : "low";
+      issues.push({
+        id: `i-conflict-${i}`,
+        severity: sev as "high" | "medium" | "low",
+        category: "已拦截冲突",
+        description: `拦截冲突：${c.topic}\n${claimsDesc}`,
+        suggestion: c.winnerReason
+          ? `AI 已判定可信方：${c.winnerSource ?? "未知"}\n理由：${c.winnerReason}`
+          : "已自动处理，无需操作。",
+      });
+    }
+  }
+
+  // 6. 如果没有问题
+  if (issues.length === 0) {
+    issues.push({
+      id: "i-ok",
+      severity: "low",
+      category: "质量良好",
+      description: "文档整体质量良好，未发现明显问题。",
+      suggestion: "可直接使用或导出。",
+    });
+  }
+
+  return { overallScore: overall, radarScores, issues };
+}
+
 const DEMO_AUDIT: AuditData = {
-  overallScore: 0.82,
+  overallScore: 0.77,
   radarScores: [
-    { dimension: "Groundedness", score: 0.89, maxScore: 1 },
-    { dimension: "Relevance", score: 0.92, maxScore: 1 },
-    { dimension: "Completeness", score: 0.78, maxScore: 1 },
-    { dimension: "Consistency", score: 0.85, maxScore: 1 },
-    { dimension: "Conflict", score: 0.93, maxScore: 1 },
+    { dimension: "有据可查", score: 0.65, maxScore: 1 },
+    { dimension: "内容相关", score: 1.0, maxScore: 1 },
+    { dimension: "内容完整", score: 0.93, maxScore: 1 },
+    { dimension: "一致性", score: 0.75, maxScore: 1 },
+    { dimension: "无冲突", score: 0.75, maxScore: 1 },
   ],
   issues: [
     {
       id: "i1",
       severity: "high",
-      category: "遗漏视角",
-      description:
-        "技术债务治理体系章节缺少具体的 debt 指标和量化数据，仅描述了目标未展示当前债务基线。建议补充 Q3 初期的技术债务评估报告数据。",
-      suggestion: "从知识库中检索 '技术债务评估报告' 并引用具体 debt score 和趋势数据。",
+      category: "未支撑断言",
+      description: "综合有据可查度 65%，部分段落缺少来源支撑。建议拖拽知识源到相关章节并重新生成。",
+      suggestion: "在 Provenance Tree 中拖拽知识源到低分段落，或补充知识源后重新生成。",
     },
     {
       id: "i2",
       severity: "medium",
-      category: "未支撑断言",
-      description:
-        "\u201C数据驱动的决策优于直觉判断\u201D 这一结论没有引用具体的 Benchmark 对比数据作为支撑。建议在 Q3 决策评估章节中补充至少一组数据对比。",
-      suggestion: "将决策评估的定量数据（如 8.7/10 评分）显式关联到来源文档的具体数据点。",
+      category: "缺少来源支撑",
+      description: "Teams Chat 与 Outlook Email 协作频次分析缺少来源支撑",
+      suggestion: "在知识库中搜索相关文档，拖拽到对应章节后重新生成。",
     },
     {
       id: "i3",
-      severity: "medium",
-      category: "逻辑漏洞",
-      description:
-        "AI 编码平台推广至全公司的建议没有考虑安全审计和合规审查的依赖条件，遗漏了关键的 risk 缓冲建议。",
-      suggestion: "添加安全审计作为 Q4 推广的前置条件，并标注对应的风险等级。",
+      severity: "high",
+      category: "已拦截冲突",
+      description: `拦截冲突：Q3 团队总 Commit 数\n「Q3 总 Commit 数:2,553 次」（14-陈强-团队-Q3代码生产力周报.eml）  vs  「Q3 合计提交 1,096 次」（Q3-GitHub 开发活跃度报告.docx）`,
+      suggestion: `AI 已判定可信方：14-陈强-团队-Q3代码生产力周报.eml\n理由：两数据差异显著，团队周报明确限定「技术部核心 8 人」，数据更聚焦、可解释性强`,
     },
     {
       id: "i4",
-      severity: "low",
-      category: "遗漏视角",
-      description:
-        "数据库迁移部分未提及 TiDB 的运维成本和团队培训需求。从成本效益角度看，这是一项重要的遗漏。",
-      suggestion: "补充 TiDB 运维成本估算和团队培训计划的简要说明。",
+      severity: "medium",
+      category: "已拦截冲突",
+      description: `拦截冲突：Beta 版本发布时间\n「7 月: Beta 版本发布」（产品路线图-Q3-2026.pptx）  vs  「Sprint 3 未完成 Beta 前置条件」（10-陈强-团队-本周总结.eml）`,
+      suggestion: `AI 已判定可信方：10-陈强-团队-本周总结.eml\n理由：该周报为一线技术负责人实绩反馈，明确指出 Sprint 3 仍未完成性能/安全测试等 Beta 关键前置条件`,
     },
     {
       id: "i5",
-      severity: "low",
-      category: "一致性",
-      description:
-        "\u201C实施进展章节中提到单服务部署时间从 45 分钟降至 8 分钟\u201D，但评估分析章节未引用该指标来支撑\u201C效率提升\u201D的结论。",
-      suggestion: "在评估分析中交叉引用实施进展的具体数据，增强结论可信度。",
+      severity: "medium",
+      category: "已拦截冲突",
+      description: `拦截冲突：支付接口重构上线时间\n「上线时间 2026 年 9 月 10 日」（Q3-技术架构演进报告.docx）  vs  「Sprint 3 仅完成方案初稿」（10-陈强-团队-本周总结.eml）`,
+      suggestion: `AI 已判定可信方：Q3-技术架构演进报告.docx\n理由：技术报告明确记录上线时间、负责人及性能指标提升，属已完成事实`,
     },
   ],
 };
@@ -187,11 +321,15 @@ function severityBadge(severity: "high" | "medium" | "low") {
   );
 }
 
-export default function DocumentAudit() {
+export default function DocumentAudit({ evaluationMetrics, trustScore }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [fixing, setFixing] = useState(false);
-  const [auditData] = useState<AuditData>(DEMO_AUDIT);
   const [done, setDone] = useState(false);
+
+  const auditData = useMemo(
+    () => deriveAuditData(evaluationMetrics, trustScore ?? null),
+    [evaluationMetrics, trustScore],
+  );
 
   const toggleIssue = (id: string) => {
     setExpanded((prev) => {
@@ -260,7 +398,7 @@ export default function DocumentAudit() {
                 </button>
                 {expanded.has(issue.id) && (
                   <div className="px-3 pb-2 border-t bg-gray-50">
-                    <p className="text-[11px] text-gray-600 mt-2">{issue.description}</p>
+                    <p className="text-[11px] text-gray-600 mt-2 whitespace-pre-line">{issue.description}</p>
                     <p className="text-[11px] text-indigo-600 mt-1 border-l-2 border-indigo-300 pl-2">
                       💡 {issue.suggestion}
                     </p>

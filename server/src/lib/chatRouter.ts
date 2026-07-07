@@ -7,6 +7,7 @@ import { getApiKey } from "../security/keyStore.js";
 import { readSettingsFromDb } from "./settingsReader.js";
 import { generateOutline, type OutlineSection } from "./narrativeEngine.js";
 import { logger } from "./logger.js";
+import { CASE_1783257530743 } from "../providers/fixtures/case-1783257530743.js";
 
 export interface ChatRequest {
   message: string;
@@ -153,6 +154,18 @@ function fallbackIntentAnalysis(message: string): IntentAnalysis {
 
 /** Chat 处理 */
 export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
+  // ── Demo replay mode: return saved outline, skip all LLM calls ──
+  if (req.providerPreference?.length === 1 && req.providerPreference[0] === "demo") {
+    const fixture = CASE_1783257530743;
+    logger.info(`[ChatRouter] Demo replay: returning saved outline from case ${fixture.caseId} (${fixture.outline.length} sections)`);
+    return {
+      type: "outline_request",
+      content: `我理解你想生成文档。让我为你创建一个大纲，你可以调整后再一键生成。`,
+      suggestedOutline: fixture.outline as OutlineSection[],
+      skipEdit: true,
+    };
+  }
+
   // 使用 LLM 分析用户意图
   const analysis = await analyzeIntentWithLLM(
     req.message,

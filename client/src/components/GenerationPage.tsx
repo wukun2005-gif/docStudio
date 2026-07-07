@@ -116,14 +116,18 @@ export default function GenerationPage() {
         fetch(`/api/generation/${currentCase.lastRunId}/evaluation`)
           .then((r) => r.json())
           .then((data) => {
+            console.log("[DIAG] restore evaluation from DB:", JSON.stringify({ ok: data.ok, hasMetrics: !!data.evaluation?.metrics, runId: currentCase.lastRunId }));
             if (data.ok && data.evaluation?.metrics) {
               setEvaluationMetrics(data.evaluation.metrics);
+              console.log("[DIAG] evaluationMetrics SET from DB cache:", JSON.stringify(data.evaluation.metrics).substring(0, 200));
             } else {
               // 无评估结果时清空，避免其他 case 的旧数据泄漏
               setEvaluationMetrics(null);
+              console.log("[DIAG] evaluationMetrics set to NULL (no cached eval)");
             }
           })
-          .catch(() => {
+          .catch((e) => {
+            console.warn("[DIAG] restore evaluation failed:", e);
             setEvaluationMetrics(null);
           });
       } else {
@@ -457,6 +461,7 @@ export default function GenerationPage() {
         updateWorkflowState("evaluating");
         setGenerating(false);
         setGenerationProgress(null);
+        setOutlineCollapsed(true); // 生成完成后折叠大纲卡，腾出空间给评估卡
 
         // 生成完成后自动触发评估（SSE 流式）
         if (targetRunId) {
@@ -578,12 +583,15 @@ export default function GenerationPage() {
               } : null);
               if (data.status === "done" && data.score !== undefined) {
                 partialMetrics[data.task] = { score: data.score };
+                console.log(`[DIAG] SSE evaluate-progress done: task=${data.task}, score=${data.score}, partial=`, JSON.stringify(partialMetrics));
                 setEvaluationMetrics({ ...partialMetrics });
               }
             } else if (eventName === "evaluate-done") {
               const data = JSON.parse(eventData);
+              console.log("[DIAG] SSE evaluate-done received:", JSON.stringify({ ok: data.ok, hasMetrics: !!data.metrics, metricKeys: data.metrics ? Object.keys(data.metrics) : [] }));
               if (data.ok) {
                 setEvaluationMetrics(data.metrics);
+                console.log("[DIAG] evaluationMetrics SET from SSE:", JSON.stringify(data.metrics).substring(0, 300));
               }
             } else if (eventName === "error") {
               const data = JSON.parse(eventData);
@@ -787,6 +795,10 @@ export default function GenerationPage() {
       </div>
 
       {/* 文档预览区 */}
+      {(() => {
+        console.log("[DIAG] render DocPreview:", JSON.stringify({ hasContent: !!document, contentLen: document?.length, sectionsLen: sections.length, hasEvalMetrics: !!evaluationMetrics, evalMetricsKeys: evaluationMetrics ? Object.keys(evaluationMetrics) : [], trustScore, generating, runId }));
+        return null;
+      })()}
       <DocPreview
         content={document}
         trustScore={trustScore}

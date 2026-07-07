@@ -94,7 +94,7 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
     const timeouts: ReturnType<typeof setTimeout>[] = [];
     let cancelled = false;
 
-    const TOTAL_DURATION = 120_000; // 120 秒
+    const TOTAL_DURATION = 180_000; // 180 秒
     const startTime = Date.now();
 
     const progressInterval = setInterval(() => {
@@ -323,29 +323,142 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
         hideCursor();
         await wait(1000);
 
-        // ── 45-55s: 生成树溯源（章节来源详情） ──────
-        await moveToCenter("文档生成完成！每个段落都有知识库来源支撑", 2000);
+        // ── 评估指标卡（详细展示） ──────────────────
+        await moveToCenter("文档生成完成！i-Write 提供 4 维度可量化信任指标", 2500);
 
-        // 先收起大纲和评估卡，腾出垂直空间给来源树
-        const outlineToggle = document.getElementById("demo-outline-toggle");
-        if (outlineToggle && outlineToggle.textContent?.includes("收起")) {
-          outlineToggle.click();
-          await wait(400);
-        }
-        const evalCollapse = document.getElementById("demo-eval-collapse");
-        if (evalCollapse) {
-          evalCollapse.click();
-          await wait(400);
-        }
+        // 等待评估 SSE 完成（demo replay 约 2s，留足缓冲）
+        await wait(2000);
 
-        // 滚动到来源树区域
-        hideCursor();
-        const sourceToggle0 = document.getElementById("demo-source-toggle-0");
-        if (sourceToggle0) sourceToggle0.scrollIntoView({ behavior: "smooth", block: "start" });
+        // 评估卡应该在生成后已展开，如果被折叠了则展开
+        const evalExpand0 = document.getElementById("demo-eval-expand");
+        if (evalExpand0) { evalExpand0.click(); await wait(400); }
+
+        const evalCard0 = document.getElementById("demo-eval-card");
+        if (evalCard0) {
+          const rect = evalCard0.getBoundingClientRect();
+          await moveTo(rect.left + rect.width / 2, rect.top + 60,
+            "有据可查度 0.65 — 文档内容是否有知识库来源支撑",
+          );
+          await wait(3000);
+          scrollList("demo-eval-card", 100);
+          await wait(1000);
+          await moveTo(rect.left + rect.width / 2, rect.top + 120,
+            "内容相关度 1.00 — 所有段落都与用户需求紧密相关",
+          );
+          await wait(3000);
+          scrollList("demo-eval-card", 100);
+          await wait(1000);
+          await moveTo(rect.left + rect.width / 2, rect.top + 120,
+            "内容完整度 0.93 — 14 项需求要点已覆盖 14 项",
+          );
+          await wait(3000);
+          scrollList("demo-eval-card", 100);
+          await wait(1000);
+          await moveTo(rect.left + rect.width / 2, rect.top + 120,
+            "冲突率 0.25 — AI 检测到 5 处来源间矛盾，已自动处理",
+          );
+          await wait(3000);
+        }
+        await moveToCenter("4 维度评估：有据可查度 · 内容相关度 · 内容完整度 · 冲突率", 2500);
+
+        // 切换到"问题发现" tab，详细解释每种问题
+        await moveAndClick("demo-eval-tab-issues", "切换到「问题发现」→ 查看具体问题", 2000, true);
         await wait(1000);
 
-        // 点击第一个章节的 toggle，展开来源树
-        await moveAndClick("demo-source-toggle-0", "点击章节 → 展开来源树（Provenance Tree）", 1500, true);
+        const evalCard2 = document.getElementById("demo-eval-card");
+        if (evalCard2) {
+          const rect = evalCard2.getBoundingClientRect();
+          await moveTo(rect.left + rect.width / 2, rect.top + 80,
+            "🔴 未支撑断言：综合有据可查度 65%，部分段落缺少来源支撑",
+          );
+          await wait(3500);
+          scrollList("demo-eval-card", 150);
+          await wait(1000);
+          await moveTo(rect.left + rect.width / 2, rect.top + 80,
+            "🟢 已拦截冲突：5 处来源矛盾被 AI 识别并拦截，未进入文档\n如「Q3团队规模」两份文档数据不一致",
+          );
+          await wait(4000);
+          scrollList("demo-eval-card", 200);
+          await wait(1000);
+          await moveTo(rect.left + rect.width / 2, rect.top + 80,
+            "每条冲突都标注了冲突主题和来源文档\n用户可据此追溯原始文档",
+          );
+          await wait(3500);
+          scrollList("demo-eval-card", 200);
+          await wait(1000);
+        }
+        await moveToCenter("问题发现 = 让用户知道文档哪里不完美、为什么", 2500);
+
+        // ── 置信度热力图（详细展示） ────────────────
+        // 先折叠评估卡和大纲，让文档内容占满屏幕
+        const evalCollapseHeat = document.getElementById("demo-eval-collapse");
+        if (evalCollapseHeat) { evalCollapseHeat.click(); await wait(400); }
+        const outlineCollapseHeat = document.getElementById("demo-outline-toggle");
+        if (outlineCollapseHeat && outlineCollapseHeat.textContent?.includes("收起")) {
+          outlineCollapseHeat.click();
+          await wait(400);
+        }
+
+        await moveAndClick("demo-heatmap-toggle", "开启热力图 → 每个段落按来源多寡着色", 2000);
+        await moveToCenter("绿色 = 多源交叉验证（高可信）\n黄色 = 单源支撑（中可信）\n红色 = AI 推断（低可信）", 3000);
+
+        // 滚动文档内容区，展示不同颜色的段落
+        const docContainer = document.querySelector(".doc-content");
+        if (docContainer) {
+          setTooltipText("滚动查看每个段落的着色情况…");
+          setPosition({ x: 200, y: window.innerHeight / 2 });
+          docContainer.scrollIntoView({ behavior: "smooth", block: "start" });
+          await wait(1000);
+          const scrollEl = docContainer.closest(".overflow-y-auto");
+          if (scrollEl) {
+            scrollEl.scrollBy({ top: 200, behavior: "smooth" });
+            await wait(1500);
+            scrollEl.scrollBy({ top: 200, behavior: "smooth" });
+            await wait(1500);
+            scrollEl.scrollBy({ top: 200, behavior: "smooth" });
+          }
+          await wait(1000);
+          hideCursor();
+          await wait(500);
+        }
+        await moveToCenter("热力图让信任度一目了然：一眼看出哪些段落需要补充来源", 2500);
+
+        // ── 参考来源章节（文档底部引用列表） ────────
+        // 直接从当前位置滚动到文档底部，不要移动光标到顶部
+        await moveToCenter("文档底部：所有参考来源汇总", 2000);
+        if (docContainer) {
+          const scrollEl = docContainer.closest(".overflow-y-auto");
+          if (scrollEl) {
+            scrollEl.scrollTo({ top: scrollEl.scrollHeight, behavior: "smooth" });
+            await wait(2000);
+          }
+        }
+        // 光标直接指向 citation footer，保持在附近不晃动
+        const citeFooter = document.querySelector(".citations");
+        if (citeFooter) {
+          const rect = citeFooter.getBoundingClientRect();
+          // 光标放在 citation footer 附近，不移动到别处
+          await moveTo(rect.left + rect.width / 2, rect.top + 60,
+            "9 个知识源支撑本文档：PRD · 产品路线图 · 技术报告 · 周报 · 月报…\n点击可跳转原始文档",
+          );
+          await wait(3500);
+          // 光标保持在原位，只换文字
+          setTooltipText("每个引用都有据可查，用户可追溯任意结论的来源");
+          await wait(2500);
+        } else {
+          await moveToCenter("每个引用都有据可查，用户可追溯任意结论的来源", 2500);
+        }
+
+        // ── 来源生成树（来源溯源树 + 拖拽） ───
+        // 直接从文档底部滚动到来源树区域，不要先滚回顶部
+        const sourceTreeArea = document.getElementById("demo-source-toggle-0");
+        if (sourceTreeArea) {
+          sourceTreeArea.scrollIntoView({ behavior: "smooth", block: "start" });
+          await wait(1000);
+        }
+        await moveToCenter("来源溯源树：逐章节展示引用了哪些知识源文档", 2500);
+
+        await moveAndClick("demo-source-toggle-0", "点击章节 → 展开来源树", 1500, true);
         await wait(2000);
         await moveToCenter("来源树展示每个章节引用了哪些知识源文档\n评分越高，来源越可信", 3000);
 
@@ -354,10 +467,9 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
         await moveAndClick("demo-source-toggle-1", "展开第二个章节的来源", 1500, true);
         await wait(1500);
 
-        // ── 55-65s: 拖拽来源移动 ────────────────────
+        // 拖拽来源移动
         await moveToCenter("拖拽知识源可以在章节之间移动\n修改引用关系后重新生成章节内容", 2500);
 
-        // 实际模拟拖拽：从 section 1 拖一个 source 到 section 0
         const s1Toggle = document.getElementById("demo-source-toggle-1");
         const s0Toggle = document.getElementById("demo-source-toggle-0");
         if (s1Toggle && s0Toggle) {
@@ -385,17 +497,19 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
             s0Panel.scrollIntoView({ behavior: "smooth", block: "center" });
             await wait(800);
             const s0Rect = s0Panel.getBoundingClientRect();
-            await moveTo(s0Rect.left + s0Rect.width / 2, s0Rect.top + s0Rect.height / 2,
-              "…释放到概述章节，重新生成内容",
+            const dropX = s0Rect.left + s0Rect.width / 2;
+            const dropY = s0Rect.top + s0Rect.height / 2;
+            await moveTo(dropX, dropY,
+              "…释放到概述章节，选择移动或复制",
             );
             await wait(800);
 
-            // 4. dispatch dragover + drop
-            s0Panel.dispatchEvent(new DragEvent("dragover", { bubbles: true, dataTransfer: dt }));
-            s0Panel.dispatchEvent(new DragEvent("drop", { bubbles: true, dataTransfer: dt }));
+            // 4. dispatch dragover + drop（带坐标，修复弹窗定位 bug）
+            s0Panel.dispatchEvent(new DragEvent("dragover", { bubbles: true, dataTransfer: dt, clientX: dropX, clientY: dropY }));
+            s0Panel.dispatchEvent(new DragEvent("drop", { bubbles: true, dataTransfer: dt, clientX: dropX, clientY: dropY }));
             await wait(800);
 
-            // 5. 点击"移动"按钮（pendingDrop 弹窗）
+            // 5. 点击"移动"按钮（pendingDrop 弹窗，现在应在 drop 位置附近）
             const moveBtns = document.querySelectorAll("button");
             for (const btn of moveBtns) {
               if (btn.textContent?.includes("移动")) {
@@ -415,7 +529,7 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
             }
             await wait(1500);
 
-            // 6. 点击 section 0 toggle 展开（移入来源的章节），展示"重新生成"按钮
+            // 6. 展开目标章节，展示"重新生成"按钮
             const s0ToggleBtn = document.getElementById("demo-source-toggle-0");
             if (s0ToggleBtn) {
               s0ToggleBtn.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -439,90 +553,59 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
         }
         await moveToCenter("拖拽来源 = 灵活控制每个段落的证据支撑\n修改后点「重新生成」更新内容", 2500);
 
-        // ── 65-75s: 评估指标卡 ──────────────────────
-        // 评估卡在来源树阶段被折叠了，重新展开
-        const evalExpand = document.getElementById("demo-eval-expand");
-        if (evalExpand) { evalExpand.click(); await wait(400); }
-
-        const evalCard = document.getElementById("demo-eval-card");
-        if (evalCard) {
-          const rect = evalCard.getBoundingClientRect();
-          await moveTo(rect.left + rect.width / 2, rect.top + 60,
-            "i-Write 提供可量化信任指标",
+        // ── 导出 PPTX ────────────────────────────────
+        await moveToCenter("文档生成完毕，支持导出为 Word / PowerPoint / Excel", 2000);
+        // 确保导出按钮可见（大纲折叠状态）
+        const exportBtn = document.getElementById("demo-export-pptx");
+        if (exportBtn) {
+          exportBtn.scrollIntoView({ behavior: "smooth", block: "center" });
+          await wait(600);
+          const bRect = exportBtn.getBoundingClientRect();
+          await moveTo(bRect.left + bRect.width / 2, bRect.top + bRect.height / 2,
+            "点击导出 PowerPoint → 直接下载 PPTX 文件",
           );
-          await wait(2000);
-          scrollList("demo-eval-card", 200);
           await wait(1500);
-        }
-        await moveToCenter("有据可查度 0.97 · 内容相关度 0.87\n内容完整度 0.97 · 冲突率 0.18", 2000);
-
-        // 切换到"问题发现" tab
-        await moveAndClick("demo-eval-tab-issues", "切换到「问题发现」→ AI 发现 4 个潜在问题", 2500, true);
-
-        // ── 75-82s: 置信度热力图（nf2） ────────────
-        // 先折叠评估卡，让文档内容占满屏幕
-        const evalCollapse2 = document.getElementById("demo-eval-collapse");
-        if (evalCollapse2) { evalCollapse2.click(); await wait(400); }
-
-        await moveAndClick("demo-heatmap-toggle", "热力图开关 → 段落按来源多寡着色", 2000);
-        await moveToCenter("绿色 = 多源交叉验证，黄色 = 单源支撑，红色 = AI 推断", 2000);
-
-        // 滚动文档内容区，展示不同颜色的段落
-        const docContainer = document.querySelector(".doc-content");
-        if (docContainer) {
-          setTooltipText("滚动查看所有段落着色情况…");
-          setPosition({ x: 200, y: window.innerHeight / 2 });
-          docContainer.scrollIntoView({ behavior: "smooth", block: "start" });
-          await wait(1000);
-          // 滚动文档内容
-          const scrollEl = docContainer.closest(".overflow-y-auto");
-          if (scrollEl) {
-            scrollEl.scrollBy({ top: 200, behavior: "smooth" });
-            await wait(1500);
-            scrollEl.scrollBy({ top: 200, behavior: "smooth" });
-            await wait(1500);
-            scrollEl.scrollBy({ top: 200, behavior: "smooth" });
-          }
-          await wait(1000);
-          // 滚动到顶部
-          hideCursor();
-          await wait(500);
-        }
-
-        // ── 82-92s: AI 自审（nf3） ─────────────────
-        const auditPanel = document.getElementById("demo-audit-panel");
-        if (auditPanel) {
-          const rect = auditPanel.getBoundingClientRect();
-          await moveTo(rect.left + rect.width / 2, rect.top + 60,
-            "AI 自审 / 压力测试：AI 主动挑战自己的输出",
-          );
+          setIsClicking(true);
+          await wait(200);
+          (exportBtn as HTMLElement).click();
+          setIsClicking(false);
           await wait(2000);
         }
-        await moveAndClick("demo-audit-fix", "一键修正 → AI 自动修复发现的问题", 2000);
-        await moveToCenter("5 维度雷达图：有据可查度 · 内容相关度\n内容完整度 · 一致性 · 无冲突", 2500);
+        await moveToCenter("一键导出，格式精美，可直接使用", 2000);
 
-        // ── 92-98s: 导出能力 ──────────────────────
-        await moveToCenter("支持导出为 Word / PowerPoint / Excel 格式", 1500);
-        await moveAndClick("demo-export-pptx", "导出为 PowerPoint → 下载 PPTX 文件", 2000);
-        // 同时打开 OneDrive 上的真实 PPTX 示例
-        window.open("https://1drv.ms/p/c/2678b95b0c3e07ef/IQA3oknIehNYQLe4l3DWMzWXASyVrevG8U9bx2CxdEneA5o", "_blank");
-        await moveToCenter("一键导出，格式精美，可直接使用\n（OneDrive PPTX 示例已打开）", 2500);
-
-        // ── 98-120s: People Graph 回顾 + 结尾 ──────
-        dispatchNav("knowledge");
-        await wait(500);
-        await moveAndClick("demo-kb-tab-people", "知识库回顾：People Graph 为文档提供人物上下文", 2000);
-        scrollList("demo-people-org-tree", 200);
-        await wait(2000);
-
+        // ── 回顾 + 结尾 ────────────────────────────
         dispatchNav("generate");
         await wait(500);
-        await moveToCenter("i-Write — 连接知识碎片，生成可信文档", 2500);
 
-        setTooltipText("Knowledge + Metrics = Trust");
-        setPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+        // 展开评估卡
+        const evalExpandRecap = document.getElementById("demo-eval-expand");
+        if (evalExpandRecap) { evalExpandRecap.click(); await wait(400); }
+
+        // 确保在"评分概览" tab（如果不是则点击切换）
+        const evalOverviewTab = document.querySelector("#demo-eval-card button");
+        if (evalOverviewTab) {
+          // 找到第一个 tab 按钮（评分概览）
+          const tabs = document.querySelectorAll("#demo-eval-card > .flex button");
+          for (const tab of tabs) {
+            if (tab.textContent?.includes("评分概览")) {
+              (tab as HTMLElement).click();
+              await wait(300);
+              break;
+            }
+          }
+        }
+
+        // 展开文档大纲卡
+        const outlineExpandRecap = document.getElementById("demo-outline-toggle");
+        if (outlineExpandRecap && outlineExpandRecap.textContent?.includes("展开")) {
+          outlineExpandRecap.click();
+          await wait(400);
+        }
+
+        await moveToCenter("从 9 个知识源 → RAG 检索 → 生成文档\n→ 4 维度评估 → 5 处冲突拦截", 3500);
+        await moveToCenter("事实知识源 + 内容生成 + 评估指标\n= 可信任的文档生成, i-Write", 3500);
         setProgress(100);
-        await wait(4000);
+        await wait(2000);
 
         setTooltipText("");
         await wait(2000);

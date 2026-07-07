@@ -10,10 +10,16 @@ interface EvalMetrics {
 interface Props { evaluationMetrics?: EvalMetrics | null; trustScore?: number | null }
 
 const DEMO: EvalMetrics = {
-  groundedness: { score: 0.89 },
-  relevance: { score: 0.92 },
-  completeness: { score: 0.78, missingPoints: ["安全合规评估", "成本分析"] },
-  conflicts: { hasConflicts: true, conflictRate: 0.12, items: [{ topic: "支付方案", claims: [{ text: "Stripe" }, { text: "支付宝" }] }, { topic: "排期", claims: [{ text: "Sprint 3" }, { text: "Sprint 4" }] }] },
+  groundedness: { score: 0.6497142857142858 },
+  relevance: { score: 1, irrelevantSentences: [] },
+  completeness: { score: 0.9333333333333333, missingPoints: [] },
+  conflicts: { hasConflicts: true, conflictRate: 0.25, items: [
+    { topic: "Q3 团队规模目标与实际人数", claims: [{ text: "当前团队:18人；Q3末目标:25人", source: "产品路线图-Q3-2026.pptx" }, { text: "人数:18-19人", source: "docs/PRD.md" }], severity: "low" },
+    { topic: "Beta版本发布时间", claims: [{ text: "7月:Beta版本发布", source: "产品路线图-Q3-2026.pptx" }, { text: "Sprint 3未完成Beta前置条件", source: "10-陈强-团队-本周总结.eml" }], severity: "medium" },
+    { topic: "Q3技术债务清理数量", claims: [{ text: "Q3共完成技术债务清理14项", source: "Q3-技术架构演进报告.docx" }, { text: "Q3共清理14项（分类统计）", source: "Q3-技术架构演进报告.docx" }], severity: "low" },
+    { topic: "支付接口重构上线时间", claims: [{ text: "上线时间2026年9月10日", source: "Q3-技术架构演进报告.docx" }, { text: "Sprint 3仅完成方案初稿", source: "10-陈强-团队-本周总结.eml" }], severity: "medium" },
+    { topic: "Q3团队总Commit数", claims: [{ text: "Q3总Commit数:2,553次", source: "14-陈强-团队-Q3代码生产力周报.eml" }, { text: "Q3合计提交1,096次", source: "Q3-GitHub开发活跃度报告.docx" }], severity: "high" },
+  ] },
 };
 
 function Radar({ scores, size = 160 }: { scores: Array<{ lab: string; val: number }>; size?: number }) {
