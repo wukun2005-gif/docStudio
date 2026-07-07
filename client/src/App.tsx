@@ -100,6 +100,9 @@ export default function App() {
               </button>
             </>
           )}
+          <span className="text-xs text-gray-400 opacity-60 hover:opacity-100 transition-opacity ml-2 select-none" title="作者邮箱">
+            wukun2005@gmail.com
+          </span>
         </div>
       </nav>
 

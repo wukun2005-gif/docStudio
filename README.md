@@ -2,6 +2,14 @@
 
 > AI 驱动的可信文档生成工作台 — 让人类关注内容价值，AI 负责生成与验证
 
+<p align="center">
+  <img src="assets/demo.gif" alt="Document Studio Demo" width="800">
+</p>
+
+<p align="center">
+  <a href="https://1drv.ms/v/c/203d7a34c28a5187/IQDTURF_I-ElSo1p2NlZCdtNAZHeU9sXO8jpBfvL-Zpyp6U?e=TblyKG">▶️ 查看完整 Demo 视频</a>
+</p>
+
 ---
 
 ## 快速开始
