@@ -64,6 +64,7 @@ export default function WriteProgress({ outline, userRequest, onComplete, onSett
   const [currentChapter, setCurrentChapter] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const sectionsRef = useRef<GenerationSection[]>([]);
 
   useEffect(() => {
     const abort = new AbortController();
@@ -102,11 +103,27 @@ export default function WriteProgress({ outline, userRequest, onComplete, onSett
                     p.title === chapterName ? { ...p, status: 'done' } : p
                   ));
                 }
+                // 收集完整章节数据（含来源）
+                const sectionData = (event as unknown as Record<string, unknown>).section as Record<string, unknown> | undefined;
+                if (sectionData) {
+                  const sec: GenerationSection = {
+                    title: String(sectionData.title ?? ''),
+                    content: String(sectionData.content ?? ''),
+                    groundingScore: Number(sectionData.groundingScore ?? 0),
+                    sources: Array.isArray(sectionData.sources)
+                      ? sectionData.sources.map((s: unknown) => ({
+                          chunkId: String((s as Record<string, unknown>).chunkId ?? ''),
+                          score: Number((s as Record<string, unknown>).score ?? 0),
+                          sourceName: (s as Record<string, unknown>).sourceName as string | undefined,
+                        }))
+                      : [],
+                  };
+                  sectionsRef.current.push(sec);
+                }
                 break;
               }
               case 'done': {
                 const payload = (event as unknown as Record<string, unknown>).excelPayload as ExcelWritePayload | undefined;
-                const sections = (event as unknown as Record<string, unknown>).sections as GenerationSection[] | undefined;
                 const runId = (event as unknown as Record<string, unknown>).runId as string | undefined;
 
                 // 如果有 Excel payload，写入工作簿
@@ -114,8 +131,10 @@ export default function WriteProgress({ outline, userRequest, onComplete, onSett
                   await writeToWorkbook(payload);
                 }
 
-                // 构建基础 sections 数据
-                const finalSections: GenerationSection[] = sections ?? [];
+                // 使用 SSE section 事件中收集的完整数据（含来源）
+                const finalSections = sectionsRef.current.length > 0
+                  ? sectionsRef.current
+                  : ((event as unknown as Record<string, unknown>).sections as GenerationSection[] | undefined) ?? [];
                 onComplete(runId ?? '', finalSections);
                 break;
               }

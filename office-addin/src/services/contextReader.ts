@@ -11,8 +11,7 @@
  */
 export async function readWorkbookContext(maxLength = 4000): Promise<string> {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (Excel as any).run(async (context: any) => {
+    const result = await Excel.run(async (context) => {
       const sheet = context.workbook.worksheets.getActiveWorksheet();
       const range = sheet.getUsedRange();
       range.load('values');
@@ -21,7 +20,30 @@ export async function readWorkbookContext(maxLength = 4000): Promise<string> {
       const values = range.values as string[][];
       return JSON.stringify(values).slice(0, maxLength);
     });
+    return result ?? '';
+  } catch {
     return '';
+  }
+}
+
+/**
+ * 读取当前选中区域的值
+ * @returns 选中区域的文本表示
+ */
+export async function readSelectedRange(): Promise<string> {
+  try {
+    const result = await Excel.run(async (context) => {
+      const range = context.workbook.getSelectedRange();
+      range.load('values, address');
+      await context.sync();
+
+      const values = range.values as string[][];
+      return {
+        address: range.address as string,
+        text: values.map(row => row.join('\t')).join('\n'),
+      };
+    });
+    return result?.text ?? '';
   } catch {
     return '';
   }

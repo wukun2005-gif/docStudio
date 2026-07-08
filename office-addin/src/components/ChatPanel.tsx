@@ -4,7 +4,7 @@
  * 用户输入文档需求，AI 返回大纲。
  */
 import { useState, useRef, useEffect } from 'react';
-import { Card, Textarea, Button, Text, makeStyles, tokens, MessageBar, MessageBarBody, MessageBarActions, Link as FluentLink } from '@fluentui/react-components';
+import { Card, Textarea, Button, Text, makeStyles, tokens } from '@fluentui/react-components';
 import type { TextareaOnChangeData } from '@fluentui/react-components';
 import { Send24Regular } from '@fluentui/react-icons';
 import { apiClient } from '../services/apiClient';
@@ -44,7 +44,12 @@ const useStyles = makeStyles({
     maxWidth: '85%',
   },
   messageError: {
-    alignSelf: 'stretch',
+    alignSelf: 'flex-start',
+    maxWidth: '85%',
+  },
+  bubbleError: {
+    background: tokens.colorPaletteRedBackground2,
+    color: tokens.colorPaletteRedForeground1,
   },
   bubble: {
     padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
@@ -138,18 +143,13 @@ export default function ChatPanel({ onOutlineGenerated }: ChatPanelProps) {
       <div className={styles.messages}>
         {messages.map((msg, idx) => (
           <div key={idx} className={msg.role === 'user' ? styles.messageUser : msg.role === 'error' ? styles.messageError : styles.messageAi}>
-            {msg.role === 'error' ? (
-              <MessageBar intent="error">
-                <MessageBarBody>{msg.content}</MessageBarBody>
-                <MessageBarActions>
-                  <FluentLink onClick={() => window.open('http://localhost:5173/settings', '_blank')}>去配置</FluentLink>
-                </MessageBarActions>
-              </MessageBar>
-            ) : (
-              <Card className={`${styles.bubble} ${msg.role === 'user' ? styles.bubbleUser : styles.bubbleAi}`}>
-                <Text size={200}>{msg.content}</Text>
-              </Card>
-            )}
+            <Card className={`${styles.bubble} ${
+              msg.role === 'user' ? styles.bubbleUser :
+              msg.role === 'error' ? styles.bubbleError :
+              styles.bubbleAi
+            }`}>
+              <Text size={200}>{msg.content}</Text>
+            </Card>
           </div>
         ))}
         <div ref={messagesEndRef} />
