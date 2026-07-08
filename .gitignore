@@ -8,8 +8,9 @@ data_old/
 .env
 .DS_Store
 coverage/
-*.log
+.tunnel-url
 *.tsbuildinfo
+*.log
 *.md
 docs/backlog.md
 docs/sample-data-upgrade-plan.md

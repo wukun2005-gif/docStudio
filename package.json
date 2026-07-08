@@ -9,13 +9,16 @@
     "client"
   ],
   "scripts": {
-    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev": "concurrently --names \"server,client,addin,tunnel\" \"npm run dev:server\" \"npm run dev:client\" \"npm run dev:addin\" \"npm run dev:tunnel\"",
     "dev:server": "cd server && npm run dev",
     "dev:client": "cd client && npm run dev",
-    "build": "npm run build:shared && npm run build:server && npm run build:client",
+    "dev:addin": "cd office-addin && npm run dev",
+    "dev:tunnel": "node scripts/start-tunnel.mjs",
+    "build": "npm run build:shared && npm run build:server && npm run build:client && npm run build:addin",
     "build:shared": "cd shared && npm run build",
     "build:server": "cd server && npm run build",
     "build:client": "cd client && npm run build",
+    "build:addin": "cd office-addin && npm run build",
     "test": "node tests/log-runner.mjs vitest run",
     "test:unit": "node tests/log-runner.mjs vitest run",
     "test:integration": "node tests/log-runner.mjs vitest run --config vitest.integration.config.ts",
