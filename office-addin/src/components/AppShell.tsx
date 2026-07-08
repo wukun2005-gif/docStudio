@@ -78,7 +78,7 @@ export default function AppShell() {
 
       {/* 写入面板 */}
       <div className={styles.body}>
-        <WriteTab />
+        <WriteTab onSettingsClick={handleSettingsClick} />
       </div>
     </div>
   );

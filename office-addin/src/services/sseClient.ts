@@ -7,7 +7,7 @@
 import { fetchEventSource } from '@microsoft/fetch-event-source';
 
 export interface SSEEvent {
-  type: 'chapter_start' | 'chapter_complete' | 'progress' | 'error' | 'done';
+  type: 'chapter_start' | 'chapter_complete' | 'section-start' | 'section' | 'progress' | 'error' | 'done';
   chapter?: string;
   progress?: number;
   message?: string;

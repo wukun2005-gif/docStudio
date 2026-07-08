@@ -1,52 +1,88 @@
 /**
- * WriteTab — 写入面板（占位组件）
+ * WriteTab — 写入面板状态机
  *
- * Phase 1 将实现完整的四阶段状态机：
- *   Chat → 大纲编辑 → 生成中 → 结果展示
- *
- * 当前为 Phase 0 占位，验证 Fluent UI 渲染。
+ * 四个阶段：chat → outline → generating → results
  */
-import { Card, Text, makeStyles, tokens } from '@fluentui/react-components';
+import { useState } from 'react';
+import ChatPanel from './ChatPanel';
+import OutlinePanel from './OutlinePanel';
+import WriteProgress from './WriteProgress';
+import ResultsPanel from './ResultsPanel';
 
-const useStyles = makeStyles({
-  container: {
-    display: 'flex',
-    flexDirection: 'column',
-    padding: '12px',
-    gap: tokens.spacingVerticalM,
-    height: '100%',
-  },
-  welcome: {
-    padding: '16px',
-    borderRadius: tokens.borderRadiusMedium,
-    background: tokens.colorNeutralBackground2,
-  },
-  hint: {
-    color: tokens.colorNeutralForeground3,
-    fontSize: tokens.fontSizeBase200,
-  },
-});
+export interface OutlineItem {
+  id: string;
+  title: string;
+  description?: string;
+}
 
-export default function WriteTab() {
-  const styles = useStyles();
+export interface GenerationSection {
+  title: string;
+  content: string;
+  groundingScore: number;
+  sources: Array<{ chunkId: string; score: number; sourceName?: string }>;
+}
 
-  return (
-    <div className={styles.container}>
-      <Card className={styles.welcome}>
-        <Text block weight="semibold" style={{ marginBottom: 8 }}>
-          i-Write Excel Add-in
-        </Text>
-        <Text block className={styles.hint}>
-          Phase 0 基础设施搭建完成。
-          后续 Phase 将实现 Chat 对话、大纲编辑、文档生成、评估结果等完整功能。
-        </Text>
-      </Card>
+export type WriteStage = 'chat' | 'outline' | 'generating' | 'results';
 
-      <Card>
-        <Text block size={200} className={styles.hint}>
-          请在 Excel 工作簿中选择一个单元格，然后使用 i-Write 生成文档。
-        </Text>
-      </Card>
-    </div>
-  );
+interface WriteTabProps {
+  onSettingsClick: () => void;
+}
+
+export default function WriteTab({ onSettingsClick }: WriteTabProps) {
+  const [stage, setStage] = useState<WriteStage>('chat');
+  const [outline, setOutline] = useState<OutlineItem[]>([]);
+  const [runId, setRunId] = useState<string>('');
+  const [sections, setSections] = useState<GenerationSection[]>([]);
+  const [userRequest, setUserRequest] = useState('');
+
+  const handleOutlineGenerated = (newOutline: OutlineItem[], request: string) => {
+    setOutline(newOutline);
+    setUserRequest(request);
+    setStage('outline');
+  };
+
+  const handleConfirmGenerate = () => {
+    setStage('generating');
+  };
+
+  const handleGenerationComplete = (newRunId: string, newSections: GenerationSection[]) => {
+    setRunId(newRunId);
+    setSections(newSections);
+    setStage('results');
+  };
+
+  const handleRegenerate = () => {
+    setStage('chat');
+  };
+
+  switch (stage) {
+    case 'chat':
+      return <ChatPanel onOutlineGenerated={handleOutlineGenerated} />;
+    case 'outline':
+      return (
+        <OutlinePanel
+          outline={outline}
+          onOutlineChange={setOutline}
+          onConfirm={handleConfirmGenerate}
+          onBack={() => setStage('chat')}
+        />
+      );
+    case 'generating':
+      return (
+        <WriteProgress
+          outline={outline}
+          userRequest={userRequest}
+          onComplete={handleGenerationComplete}
+          onSettingsClick={onSettingsClick}
+        />
+      );
+    case 'results':
+      return (
+        <ResultsPanel
+          runId={runId}
+          sections={sections}
+          onRegenerate={handleRegenerate}
+        />
+      );
+  }
 }

@@ -8,6 +8,7 @@ import crypto from "crypto";
 import { generateDocument, toHtml, sanitizeCitationHtml, getQueryAnalysis, type GenerateDocResult } from "../lib/docGenerator.js";
 import { exportDocument, type ExportFormat, type ExportSection, type ChartSpec } from "../lib/docExporter.js";
 import { extractChartSpecs } from "../lib/chartSpecParser.js";
+import { toExcelPayload } from "../lib/excelPayloadBuilder.js";
 import { buildProvenanceTree, getProvenanceByRunId } from "../lib/provenanceTree.js";
 import { dbRun, dbGet, dbAll, dbTransaction } from "../lib/dbQuery.js";
 import { logger } from "../lib/logger.js";
@@ -381,6 +382,249 @@ generationRouter.post("/generate/stream", async (req, res) => {
         [runId], { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "crashed" } });
     } catch {}
     // 如果还能写，就写 error event
+    if (!res.writableEnded) {
+      res.write(`event: error\n`);
+      res.write(`data: ${JSON.stringify({ ok: false, error: msg })}\n\n`);
+      res.end();
+    }
+  }
+});
+
+/** POST /api/generation/generate/excel-stream — 流式生成 Excel 文档（SSE，章节级推送，done 事件返回 ExcelWritePayload） */
+generationRouter.post("/generate/excel-stream", async (req, res) => {
+  let runId = "";
+  try {
+    const { title, outline, format, providerPreference, modelId, apiKey, providerBaseUrls, userRequest } = req.body;
+
+    if (!title || !outline) {
+      res.status(400).json({ ok: false, error: "title and outline are required" });
+      return;
+    }
+
+    // ── 并发去重（与 stream 版本相同） ──
+    const existing = dbGet<{ id: string; created_at: string }>(
+      "SELECT id, created_at FROM generation_runs WHERE title = ? AND status = 'generating'",
+      [title],
+    );
+
+    if (existing) {
+      const STALE_THRESHOLD_SECONDS = 10 * 60;
+      const staleCheck = dbGet<{ stale: number }>(
+        `SELECT (strftime('%s', 'now', 'localtime') - strftime('%s', ?)) > ${STALE_THRESHOLD_SECONDS} AS stale`,
+        [existing.created_at],
+      );
+      if (staleCheck?.stale === 1) {
+        logger.warn(`[Generation] 清理遗留死锁记录 ${existing.id} (created_at=${existing.created_at})，允许新请求`);
+        dbRun(`UPDATE generation_runs SET status = 'crashed' WHERE id = ?`, [existing.id],
+          { table: "generation_runs", recordId: existing.id, source: "generation" });
+      } else {
+        logger.warn(`[Generation] 拒绝并发请求: "${title}" 已有生成任务 ${existing.id}`);
+        res.status(409).json({ ok: false, error: "同名文档正在生成中，请等待完成", existingRunId: existing.id });
+        return;
+      }
+    }
+
+    runId = crypto.randomUUID();
+    const effectiveFormat = format ?? "excel";
+    dbRun(`INSERT INTO generation_runs (id, title, outline, format, status) VALUES (?, ?, ?, ?, ?)`,
+      [runId, title, JSON.stringify(outline), effectiveFormat, "generating"],
+      { table: "generation_runs", recordId: runId, source: "generation", newData: { title, format: effectiveFormat, status: "generating" } });
+
+    // ── 设置 SSE headers ──
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders?.();
+
+    // SSE 推送助手
+    const writeSSE = (event: string, data: object) => {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    writeSSE("start", { ok: true, runId });
+    writeSSE("progress", { phase: "retrieving", message: "正在检索知识库并检测冲突..." });
+    logger.info(`[Generation] Excel 流式生成开始: ${title}, runId=${runId}, 章节数=${outline.length}`);
+
+    const protocol = req.protocol || "http";
+    const host = req.get("host") || "localhost:3000";
+    const baseUrl = `${protocol}://${host}`;
+
+    // ── Demo replay mode ──
+    const isDemoReplay = providerPreference?.length === 1 && providerPreference[0] === "demo";
+    if (isDemoReplay) {
+      const fixture = CASE_1783257530743;
+      logger.info(`[Generation] Excel Demo replay: replaying ${fixture.sections.length} sections from case ${fixture.caseId}`);
+
+      for (let i = 0; i < fixture.sections.length; i++) {
+        const sec = fixture.sections[i];
+        writeSSE("section-start", { index: i, total: fixture.sections.length, title: sec.title });
+        logger.info(`[Generation] Excel Demo SSE: section-start [${i + 1}/${fixture.sections.length}] ${sec.title}`);
+        await new Promise(resolve => setTimeout(resolve, 600));
+
+        writeSSE("section", {
+          index: i,
+          section: {
+            title: sec.title,
+            content: sec.content,
+            groundingScore: sec.groundingScore,
+            sources: sec.sources,
+            webCitations: undefined,
+          },
+        });
+        logger.info(`[Generation] Excel Demo SSE: section [${i + 1}/${fixture.sections.length}] ${sec.title} (content=${sec.content?.length || 0} chars)`);
+      }
+
+      const docTitle = fixture.title;
+      dbRun(`UPDATE generation_runs SET title = ?, content = ?, status = 'done', trust_score = ?, document_style = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+        [docTitle, fixture.htmlContent, fixture.trustScore, fixture.documentStyle, runId],
+        { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "done", trustScore: fixture.trustScore, documentStyle: fixture.documentStyle } });
+
+      try {
+        const paragraphs = fixture.sections.map((s, sIdx) => ({
+          idx: sIdx, title: s.title, groundingScore: s.groundingScore,
+          sources: s.sources.map(src => ({ chunkId: src.chunkId, score: src.score })),
+        }));
+        if (paragraphs.length > 0) buildProvenanceTree(runId, paragraphs);
+      } catch (treeErr) {
+        logger.warn(`[Generation] Excel Demo provenance tree build failed: ${treeErr}`);
+      }
+
+      logger.info(`[Generation] Excel Demo replay 完成: ${docTitle}`);
+
+      // Demo 模式下构建 mock 的 GenerateDocResult 来生成 Excel payload
+      const mockResult: GenerateDocResult = {
+        content: fixture.htmlContent,
+        sections: fixture.sections.map(s => ({
+          title: s.title,
+          content: s.content,
+          sources: s.sources.map(src => ({
+            chunkId: src.chunkId, content: "", score: src.score,
+            sourceId: src.chunkId, sourceName: src.sourceName,
+          })),
+          webCitations: [],
+          groundingScore: s.groundingScore,
+          citationLinks: [],
+        })),
+        trustScore: fixture.trustScore,
+        documentStyle: fixture.documentStyle,
+        title: docTitle,
+      };
+      const excelPayload = toExcelPayload(mockResult);
+
+      const donePayload = {
+        ok: true,
+        runId,
+        title: docTitle,
+        excelPayload,
+        sections: fixture.sections.map(s => ({ title: s.title, content: s.content, groundingScore: s.groundingScore })),
+        trustScore: fixture.trustScore,
+        documentStyle: fixture.documentStyle,
+        ...(fixture.conflictResolution ? { conflictResolution: fixture.conflictResolution } : {}),
+      };
+      const doneJson = JSON.stringify(donePayload);
+      const write1Ok = res.write(`event: done\n`);
+      const write2Ok = res.write(`data: ${doneJson}\n\n`);
+      if (!write1Ok || !write2Ok) {
+        await new Promise<void>((resolve) => res.once("drain", resolve));
+      }
+      res.end();
+      logger.info(`[Generation] Excel Demo done event sent & stream ended`);
+      return;
+    }
+
+    // ── 流式生成：每个章节生成后立即推送 SSE ──
+    const totalSections = outline.length;
+    let sectionIndex = 0;
+    const result = await generateDocument({
+      title,
+      outline: outline as OutlineSection[],
+      format: effectiveFormat,
+      providerPreference,
+      modelId,
+      apiKey,
+      providerBaseUrls,
+      userRequest,
+    }, (section, phase) => {
+      if (phase === "start") {
+        writeSSE("section-start", { index: sectionIndex, total: totalSections, title: section.title });
+        logger.info(`[Generation] Excel SSE 推送: section-start [${sectionIndex + 1}/${totalSections}] ${section.title}`);
+      } else {
+        const doneSection = section as GenerateDocResult["sections"][number];
+        writeSSE("section", {
+          index: sectionIndex,
+          section: {
+            title: doneSection.title,
+            content: doneSection.content,
+            groundingScore: doneSection.groundingScore,
+            sources: doneSection.sources.map((s) => ({ chunkId: s.chunkId, score: s.score, sourceId: s.sourceId, sourceName: s.sourceName, sourceUrl: s.sourceUrl })),
+            webCitations: doneSection.webCitations,
+            pythonScript: (doneSection as any).pythonScript,
+            chartSpecsRaw: (doneSection as any).chartSpecsRaw,
+          },
+        });
+        logger.info(`[Generation] Excel SSE 推送: section [${sectionIndex + 1}/${totalSections}] ${doneSection.title} (content=${doneSection.content?.length || 0} chars)`);
+        sectionIndex++;
+      }
+    });
+
+    // ── 生成完成：更新 DB 记录，构建 provenance tree ──
+    const htmlContent = toHtml(result, baseUrl);
+    const docTitle = result.title;
+    const excelPayload = toExcelPayload(result);
+
+    dbRun(`UPDATE generation_runs SET title = ?, content = ?, status = 'done', trust_score = ?, document_style = ?, conflict_resolution = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+      [docTitle, htmlContent, result.trustScore, result.documentStyle, result.conflictResolution ? JSON.stringify(result.conflictResolution) : null, runId],
+      { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "done", trustScore: result.trustScore, documentStyle: result.documentStyle } });
+
+    try {
+      const paragraphs = result.sections.map((s, sIdx) => ({
+        idx: sIdx,
+        title: s.title,
+        groundingScore: s.groundingScore,
+        sources: s.sources.map((src) => ({ chunkId: src.chunkId, score: src.score, sourceId: src.sourceId, sourceName: src.sourceName, sourceUrl: src.sourceUrl })),
+        webCitations: s.webCitations?.length ? s.webCitations : undefined,
+      }));
+      if (paragraphs.length > 0) {
+        buildProvenanceTree(runId, paragraphs);
+      }
+    } catch (treeErr) {
+      logger.warn(`[Generation] Excel 生成树构建失败（不影响生成）: ${treeErr}`);
+    }
+
+    logger.info(`[Generation] Excel 流式文档生成完成: ${docTitle}`);
+
+    // ── 推送最终结果（done event），使用 excelPayload 替代 content ──
+    const donePayload = {
+      ok: true,
+      runId,
+      title: docTitle,
+      excelPayload,
+      sections: result.sections.map((s) => ({ title: s.title, content: s.content, groundingScore: s.groundingScore })),
+      trustScore: result.trustScore,
+      documentStyle: result.documentStyle,
+      ...(result.conflictResolution ? { conflictResolution: result.conflictResolution } : {}),
+    };
+    const doneJson = JSON.stringify(donePayload);
+    logger.info(`[Generation] Excel done event JSON: jsonLen=${doneJson.length} sections=${result.sections.length} sheets=${excelPayload.sheets.length}`);
+
+    const write1Ok = res.write(`event: done\n`);
+    const write2Ok = res.write(`data: ${doneJson}\n\n`);
+    if (!write1Ok || !write2Ok) {
+      logger.warn(`[Generation] Excel done event backpressure, 等待 drain`);
+      await new Promise<void>((resolve) => res.once("drain", resolve));
+    }
+    res.end();
+    logger.info(`[Generation] Excel done event sent & stream ended`);
+
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Generation] Excel 流式生成失败: ${msg}`);
+    try {
+      dbRun(`UPDATE generation_runs SET status = 'crashed', updated_at = datetime('now','localtime') WHERE id = ?`,
+        [runId], { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "crashed" } });
+    } catch {}
     if (!res.writableEnded) {
       res.write(`event: error\n`);
       res.write(`data: ${JSON.stringify({ ok: false, error: msg })}\n\n`);
