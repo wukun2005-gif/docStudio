@@ -12,7 +12,7 @@ export const chatRouter = Router();
 /** POST /api/chat — Chat 交互 */
 chatRouter.post("/", async (req, res) => {
   try {
-    const { message, conversationHistory, providerPreference, modelId, apiKey, providerBaseUrls } = req.body;
+    const { message, conversationHistory, providerPreference, modelId, apiKey, providerBaseUrls, documentContext } = req.body;
 
     if (!message) {
       res.status(400).json({ ok: false, error: "message is required" });
@@ -26,6 +26,7 @@ chatRouter.post("/", async (req, res) => {
       modelId,
       apiKey,
       providerBaseUrls,
+      documentContext,
     });
 
     res.json({ ok: true, ...response });

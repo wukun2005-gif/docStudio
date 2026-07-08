@@ -12,18 +12,41 @@ import {
 } from "../lib/chatRepo.js";
 import type { ChatSession, ChatMessage } from "../../../shared/src/types/chat.js";
 
+interface DocumentContext {
+  runId: string;
+  outline: Array<{ title: string; description?: string }>;
+  currentContent?: string;
+}
+
 interface ChatBoxProps {
   collapsed?: boolean;
   onOutlineRequest?: (outline: Array<{ title: string; description?: string }>, skipEdit?: boolean, userRequest?: string) => void;
+  documentContext?: DocumentContext;
+  onEditRequest?: (target: { scope: "single" | "multiple" | "full"; sectionIndices?: number[]; instruction: string }) => void;
 }
 
-export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
+export default function ChatBox({ collapsed, onOutlineRequest, documentContext: propDocumentContext, onEditRequest }: ChatBoxProps) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
+  const [activeDocumentContext, setActiveDocumentContext] = useState<DocumentContext | undefined>(propDocumentContext);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // 监听外部 documentContext 变化
+  useEffect(() => {
+    setActiveDocumentContext(propDocumentContext);
+  }, [propDocumentContext]);
+
+  // 监听 document-context 事件（GenerationPage 生成文档后触发）
+  useEffect(() => {
+    function handleDocumentContext(e: CustomEvent) {
+      setActiveDocumentContext(e.detail);
+    }
+    window.addEventListener("document-context", handleDocumentContext as EventListener);
+    return () => window.removeEventListener("document-context", handleDocumentContext as EventListener);
+  }, []);
 
   // 自动调整 textarea 高度
   const adjustTextareaHeight = () => {
@@ -53,6 +76,37 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
   } = useChatStore();
 
   const currentCase = useCaseStore((s) => s.currentCase);
+
+  // 监听 edit-started / edit-completed 事件（显示修改进度）
+  useEffect(() => {
+    function handleEditStarted(e: CustomEvent) {
+      const { scope, instruction } = e.detail as { scope: string; instruction: string };
+      addMessage({
+        id: `edit-start-${Date.now()}`,
+        sessionId: activeSessionId ?? "",
+        role: "assistant",
+        content: `🔄 正在修改 ${scope}...\n\n指令：${instruction}`,
+        createdAt: localIso(),
+      });
+    }
+    function handleEditCompleted(e: CustomEvent) {
+      const { scope, successCount, failCount } = e.detail as { scope: string; successCount: number; failCount: number };
+      const status = failCount === 0 ? "✅" : successCount > 0 ? "⚠️" : "❌";
+      addMessage({
+        id: `edit-done-${Date.now()}`,
+        sessionId: activeSessionId ?? "",
+        role: "assistant",
+        content: `${status} ${scope} 修改完成（成功 ${successCount} 章${failCount > 0 ? `，失败 ${failCount} 章` : ""}）`,
+        createdAt: localIso(),
+      });
+    }
+    window.addEventListener("edit-started", handleEditStarted as EventListener);
+    window.addEventListener("edit-completed", handleEditCompleted as EventListener);
+    return () => {
+      window.removeEventListener("edit-started", handleEditStarted as EventListener);
+      window.removeEventListener("edit-completed", handleEditCompleted as EventListener);
+    };
+  }, [activeSessionId, addMessage]);
 
   // ── 按 caseId 加载 sessions + messages（照搬 patentExaminator）──
   useEffect(() => {
@@ -193,6 +247,9 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
         message: userInput,
         conversationHistory: sessionMessages.map((m) => ({ role: m.role, content: m.content })),
       };
+      if (activeDocumentContext) {
+        fetchBody.documentContext = activeDocumentContext;
+      }
       if ((window as any).__DEMO_MODE__) {
         fetchBody.providerPreference = ["demo"];
       }
@@ -234,6 +291,15 @@ export default function ChatBox({ collapsed, onOutlineRequest }: ChatBoxProps) {
             // 跨组件通信：通过 window event，附带用户原始消息
             console.log("[ChatBox] Dispatching outline-request event", { userRequest: userInput, skipEdit: data.skipEdit });
             window.dispatchEvent(new CustomEvent("outline-request", { detail: { outline: data.suggestedOutline, userRequest: userInput, skipEdit: data.skipEdit } }));
+          }
+        }
+
+        if (data.type === "edit_request" && data.editTarget) {
+          console.log("[ChatBox] Edit request detected", { editTarget: data.editTarget });
+          if (onEditRequest) {
+            onEditRequest(data.editTarget);
+          } else {
+            window.dispatchEvent(new CustomEvent("edit-request", { detail: data.editTarget }));
           }
         }
       }

@@ -148,6 +148,10 @@ export interface GenerateDocRequest {
   signal?: AbortSignal;
   /** 用户原始需求（传递给 LLM 以理解文档类型） */
   userRequest?: string;
+  /** 编辑指令：基于原内容的修改要求（chat 驱动修改时使用） */
+  editInstruction?: string;
+  /** 原章节内容（编辑模式时需要传给 LLM） */
+  originalContent?: string;
   /** 文档元数据（收件人、主题等） */
   metadata?: DocumentMetadata;
   /** 生成前冲突源过滤（默认 true：检测到冲突的 chunk 在生成前即被排除，确保冲突数据不进入文档。

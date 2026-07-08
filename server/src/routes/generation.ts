@@ -1267,14 +1267,100 @@ function extractMarkdownTables(html: string): { tables: Array<string[][]>; clean
   for (const raw of consumedRaw) {
     cleanedHtml = cleanedHtml.split(raw).join("");
   }
-
   return { tables, cleanedHtml };
+}
+
+// ── 纯 LLM 编辑章节内容（不走 RAG/检索/评估管道） ──
+async function editSectionContent(params: {
+  runId: string;
+  sectionIdx: number;
+  section: OutlineSection;
+  originalContent: string;
+  editInstruction: string;
+  apiKey?: string;
+  providerPreference?: string[];
+  modelId?: string;
+  providerBaseUrls?: Record<string, string>;
+}): Promise<{ title: string; content: string; wordCount: number; charCount: number; sources: any[]; webCitations: any[]; groundingScore: number }> {
+  const { section, originalContent, editInstruction, apiKey, providerPreference, modelId, providerBaseUrls } = params;
+  const { registry } = await import("../providers/registry.js");
+  const { getApiKey } = await import("../security/keyStore.js");
+  const { readSettingsFromDb } = await import("../lib/settingsReader.js");
+
+  const dbSettings = readSettingsFromDb();
+  const defaultProviders = dbSettings.providerPreference?.length ? dbSettings.providerPreference : ["mimo"];
+  const providers = providerPreference ?? defaultProviders;
+
+  const providerApiKeys: Record<string, string> = {};
+  for (const pid of providers) {
+    const key = apiKey ?? getApiKey(pid);
+    if (key) providerApiKeys[pid] = key;
+  }
+
+  const systemPrompt = `你是一个文档编辑助手。用户要求对已生成的文档章节进行修改。
+
+【重要规则】
+1. 只修改用户要求改动的部分，其他内容保持不变
+2. 不要添加称呼语（如"各位同事，你好："）
+3. 不要添加总结性或过渡性语言
+4. 保持原文的结构、格式和引用标记
+5. 直接输出修改后的完整章节内容，不要解释修改了什么`;
+
+  const userPrompt = `修改指令：${editInstruction}
+
+章节标题：${section.title}
+${section.description ? `章节主题：${section.description}` : ""}
+
+原文内容：
+${originalContent}
+
+请按照修改指令对原文进行修改，输出修改后的完整章节内容。`;
+
+  logger.info(`[EditSection] 开始纯 LLM 编辑: section="${section.title}", instruction="${editInstruction}"`);
+
+  const { response } = await registry.runWithFallback(
+    providers,
+    {
+      modelId: modelId ?? dbSettings.modelId ?? "mimo-v2-pro",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      apiKey: "",
+      temperature: 0.3,
+      timeoutMs: 90_000,
+    },
+    undefined, undefined,
+    providerApiKeys,
+    providerBaseUrls,
+  );
+
+  if (response.error) {
+    throw new Error(`Edit LLM error: ${response.error.message}`);
+  }
+
+  const newContent = response.text.trim();
+  logger.info(`[EditSection] 编辑完成: ${newContent.length} chars`);
+
+  // 统计字数
+  const wordCount = newContent.replace(/\s+/g, "").length;
+  const charCount = newContent.length;
+
+  return {
+    title: section.title,
+    content: newContent,
+    wordCount,
+    charCount,
+    sources: [],  // 纯编辑不引入新来源
+    webCitations: [],
+    groundingScore: 0,
+  };
 }
 
 /** POST /api/generation/:runId/regenerate-section — 重新生成单个章节 */
 generationRouter.post("/:runId/regenerate-section", async (req, res) => {
   try {
-    const { sectionIdx, section, outline, apiKey } = req.body;
+    const { sectionIdx, section, outline, apiKey, editInstruction, originalContent } = req.body;
     if (sectionIdx === undefined || !section || !outline) {
       res.status(400).json({ ok: false, error: "sectionIdx, section, and outline are required" });
       return;
@@ -1291,7 +1377,43 @@ generationRouter.post("/:runId/regenerate-section", async (req, res) => {
     const host = req.get("host") || "localhost:3000";
     const baseUrl = `${protocol}://${host}`;
 
-    // 用单章节大纲调用 generateDocument
+    // ── 编辑模式：跳过完整生成管道，纯 LLM 编辑 ──
+    if (editInstruction != null && originalContent != null) {
+      const editResult = await editSectionContent({
+        runId: req.params.runId,
+        sectionIdx,
+        section,
+        originalContent,
+        editInstruction,
+        apiKey,
+        providerPreference: req.body.providerPreference,
+        modelId: req.body.modelId,
+        providerBaseUrls: req.body.providerBaseUrls,
+      });
+
+      // ── Phase 3: Downstream 智能触发 ──
+      let significanceResult: { significance: string; reason: string; triggers: string[] } | undefined;
+      const { analyzeSignificance } = await import("../lib/editImpactAnalyzer.js");
+      const impact = await analyzeSignificance(
+        originalContent,
+        editResult.content,
+        editInstruction,
+        { apiKey, providerPreference: req.body.providerPreference, modelId: req.body.modelId, providerBaseUrls: req.body.providerBaseUrls },
+      );
+      significanceResult = { significance: impact.significance, reason: impact.reason, triggers: impact.triggers };
+      logger.info(`[Generation] 章节 ${sectionIdx} edit significance=${impact.significance}, triggers=[${impact.triggers.join(",")}]`);
+
+      logger.info(`[Generation] 章节 ${sectionIdx} 重新生成完成`);
+
+      res.json({
+        ok: true,
+        section: editResult,
+        significance: significanceResult,
+      });
+      return;
+    }
+
+    // 用单章节大纲调用 generateDocument（非编辑模式）
     const singleOutline = [section];
     const result = await generateDocument({
       title: run.title,
@@ -1335,6 +1457,20 @@ generationRouter.post("/:runId/regenerate-section", async (req, res) => {
       logger.warn(`[Generation] 章节生成树更新失败: ${treeErr}`);
     }
 
+    // ── Phase 3: Downstream 智能触发 ──
+    let significanceResult: { significance: string; reason: string; triggers: string[] } | undefined;
+    if (editInstruction) {
+      const { analyzeSignificance } = await import("../lib/editImpactAnalyzer.js");
+      const impact = await analyzeSignificance(
+        originalContent ?? "",
+        newSectionData.content ?? "",
+        editInstruction,
+        { apiKey, providerPreference: req.body.providerPreference, modelId: req.body.modelId, providerBaseUrls: req.body.providerBaseUrls },
+      );
+      significanceResult = { significance: impact.significance, reason: impact.reason, triggers: impact.triggers };
+      logger.info(`[Generation] 章节 ${sectionIdx} edit significance=${impact.significance}, triggers=[${impact.triggers.join(",")}]`);
+    }
+
     logger.info(`[Generation] 章节 ${sectionIdx} 重新生成完成`);
 
     res.json({
@@ -1346,6 +1482,7 @@ generationRouter.post("/:runId/regenerate-section", async (req, res) => {
         webCitations: newSectionData.webCitations,
         groundingScore: newSectionData.groundingScore,
       },
+      significance: significanceResult,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

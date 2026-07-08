@@ -34,7 +34,11 @@ export default function GenerationPage() {
   const [generating, setGenerating] = useState(false);
   const [trustScore, setTrustScore] = useState<number | null>(null);
   const [sections, setSections] = useState<SectionData[]>([]);
-  const [generationProgress, setGenerationProgress] = useState<{ current: number; total: number; title: string } | null>(null);
+  const [generationProgress, setGenerationProgress] = useState<
+    | { current: number; total: number; title: string }
+    | { stage: string; currentSection: number; totalSections: number; message: string }
+    | null
+  >(null);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
   const [dirtySections, setDirtySections] = useState<Set<number>>(new Set());
@@ -93,6 +97,18 @@ export default function GenerationPage() {
       setDocument(currentCase.generatedContent ?? null);
       setTrustScore(currentCase.trustScore ?? null);
       setRunId(currentCase.lastRunId ?? null);
+
+      // 通知 ChatBox 当前文档上下文
+      if (currentCase.lastRunId && currentCase.outline.length > 0) {
+        window.dispatchEvent(new CustomEvent("document-context", {
+          detail: {
+            runId: currentCase.lastRunId,
+            outline: currentCase.outline.map((s) => ({ title: s.title, description: s.description })),
+            currentContent: currentCase.generatedContent ?? undefined,
+          },
+        }));
+      }
+
       // 恢复 sections 来源详情（重启后从 provenance 重建）
       if (currentCase.lastRunId) {
         fetch(`/api/generation/${currentCase.lastRunId}/sections`)
@@ -463,6 +479,11 @@ export default function GenerationPage() {
         setGenerationProgress(null);
         setOutlineCollapsed(true); // 生成完成后折叠大纲卡，腾出空间给评估卡
 
+        // 通知 ChatBox 当前文档上下文
+        window.dispatchEvent(new CustomEvent("document-context", {
+          detail: { runId: targetRunId, outline: localOutline.map((s) => ({ title: s.title, description: s.description })), currentContent: finalData.content },
+        }));
+
         // 生成完成后自动触发评估（SSE 流式）
         if (targetRunId) {
           evaluateWithSSE(targetRunId);
@@ -716,6 +737,119 @@ export default function GenerationPage() {
       });
     }
   };
+
+  // ── Chat 驱动修改 ──
+  const handleEditRequest = async (target: { scope: "single" | "multiple" | "full"; sectionIndices?: number[]; instruction: string }) => {
+    if (!runId || !localOutline.length) return;
+
+    // 确定要修改的章节索引列表
+    let indices: number[] = [];
+    if (target.scope === "single" && target.sectionIndices) {
+      indices = target.sectionIndices;
+    } else if (target.scope === "multiple" && target.sectionIndices) {
+      indices = target.sectionIndices;
+    } else if (target.scope === "full") {
+      indices = localOutline.map((_, i) => i);
+    }
+
+    if (indices.length === 0) return;
+
+    const scopeLabel = target.scope === "full" ? "全文" : indices.length > 1 ? `${indices.length} 个章节` : `第 ${indices[0] + 1} 章`;
+    window.dispatchEvent(new CustomEvent("edit-started", { detail: { scope: scopeLabel, instruction: target.instruction } }));
+
+    let successCount = 0;
+    let failCount = 0;
+
+    // 设置编辑进度
+    setGenerationProgress({
+      stage: "editing",
+      currentSection: 0,
+      totalSections: indices.length,
+      message: `正在修改 ${scopeLabel}...`,
+    });
+
+    // 串行逐章修改
+    for (let seq = 0; seq < indices.length; seq++) {
+      const sectionIdx = indices[seq];
+      if (sectionIdx < 0 || sectionIdx >= localOutline.length) continue;
+
+      // 优先从 sections 数组取内容，fallback 从 document HTML 提取
+      let originalContent = sections[sectionIdx]?.content ?? "";
+      if (!originalContent && document) {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(document, "text/html");
+        const sectionEls = doc.querySelectorAll("section");
+        if (sectionEls[sectionIdx]) {
+          // 去掉 h2 标题，只保留正文
+          const h2 = sectionEls[sectionIdx].querySelector("h2");
+          originalContent = h2 ? sectionEls[sectionIdx].innerHTML.replace(h2.outerHTML, "").trim() : sectionEls[sectionIdx].innerHTML.trim();
+        }
+      }
+
+      setRegeneratingSections((prev) => new Set(prev).add(sectionIdx));
+      setGenerationProgress({
+        stage: "editing",
+        currentSection: seq + 1,
+        totalSections: indices.length,
+        message: `正在修改 ${localOutline[sectionIdx]?.title ?? `章节 ${sectionIdx + 1}`} (${seq + 1}/${indices.length})...`,
+      });
+
+      try {
+        const res = await fetch(`/api/generation/${runId}/regenerate-section`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sectionIdx,
+            section: localOutline[sectionIdx],
+            outline: localOutline,
+            editInstruction: target.instruction,
+            originalContent,
+          }),
+        });
+        const data = await res.json();
+        if (data.ok && data.section) {
+          setSections((prev) => prev.map((s, i) => i === sectionIdx ? data.section : s));
+          // 更新文档 HTML（替换对应章节内容）
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(document ?? "", "text/html");
+          const sectionEls = doc.querySelectorAll("section");
+          if (sectionEls[sectionIdx]) {
+            sectionEls[sectionIdx].innerHTML = `<h2>${data.section.title}</h2>${data.section.content}`;
+            setDocument(doc.body.innerHTML);
+          }
+          // Phase 3: 根据 significance 决定是否触发 downstream 评估
+          if (data.significance && data.significance.significance !== "cosmetic" && runId) {
+            console.log(`[GenerationPage] Edit significance=${data.significance.significance}, triggering evaluation`);
+            evaluateWithSSE(runId);
+          }
+          successCount++;
+        } else {
+          failCount++;
+        }
+      } catch (err) {
+        console.error(`Edit section ${sectionIdx} failed:`, err);
+        failCount++;
+      } finally {
+        setRegeneratingSections((prev) => {
+          const next = new Set(prev);
+          next.delete(sectionIdx);
+          return next;
+        });
+      }
+    }
+
+    setGenerationProgress(null);
+    window.dispatchEvent(new CustomEvent("edit-completed", { detail: { scope: scopeLabel, successCount, failCount } }));
+  };
+
+  // 监听 edit-request 事件（来自 ChatBox）
+  useEffect(() => {
+    function handleEditEvent(e: CustomEvent) {
+      handleEditRequest(e.detail);
+    }
+    window.addEventListener("edit-request", handleEditEvent as EventListener);
+    return () => window.removeEventListener("edit-request", handleEditEvent as EventListener);
+  }, [runId, localOutline, sections, document]);
 
   return (
     <div className="h-full flex flex-col overflow-hidden">

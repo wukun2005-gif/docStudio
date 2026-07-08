@@ -60,7 +60,10 @@ interface DocPreviewProps {
     totalTasks: number;
     tasks: Record<string, { taskLabel: string; status: "running" | "done"; score?: number }>;
   } | null;
-  generationProgress?: { current: number; total: number; title: string } | null;
+  generationProgress?:
+    | { current: number; total: number; title: string }
+    | { stage: string; currentSection: number; totalSections: number; message: string }
+    | null;
   onSectionClick?: (sectionIdx: number) => void;
   onSectionUpdate?: (sectionIdx: number, updated: SectionData) => void;
   onSourceMove?: (fromSectionIdx: number, sourceIdx: number, toSectionIdx: number, type?: string, mode?: "move" | "copy") => void;
@@ -355,7 +358,9 @@ export default function DocPreview({
             {generationProgress && (
               <span className="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 flex items-center gap-1">
                 <span className="animate-pulse w-2 h-2 bg-blue-500 rounded-full" />
-                正在生成 {generationProgress.current}/{generationProgress.total}: {generationProgress.title}
+                {"currentSection" in generationProgress
+                  ? `${generationProgress.message}`
+                  : `正在生成 ${generationProgress.current}/${generationProgress.total}: ${generationProgress.title}`}
               </span>
             )}
             {evaluating && (
