@@ -4,8 +4,9 @@
  * 单面板设计：顶部栏（Logo + 齿轮配置入口）+ 写入面板。
  * 配置通过现有 i-Write 网页端完成。
  */
+import { useState } from 'react';
 import { Button, makeStyles, tokens } from '@fluentui/react-components';
-import { Settings24Regular } from '@fluentui/react-icons';
+import { Settings24Regular, ArrowCounterclockwise24Regular } from '@fluentui/react-icons';
 
 import WriteTab from './WriteTab';
 
@@ -14,6 +15,7 @@ const useStyles = makeStyles({
     display: 'flex',
     flexDirection: 'column',
     height: '100vh',
+    width: '100%',
     overflow: 'hidden',
   },
   header: {
@@ -42,21 +44,30 @@ const useStyles = makeStyles({
     fontWeight: tokens.fontWeightSemibold,
   },
   logoTitle: {
-    fontSize: tokens.fontSizeBase400,
+    fontSize: '13px',
     fontWeight: tokens.fontWeightSemibold,
-    color: tokens.colorNeutralForeground1,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
   },
   body: {
     flex: 1,
-    overflow: 'hidden',
+    width: '100%',
+    overflow: 'auto',
   },
 });
 
 export default function AppShell() {
   const styles = useStyles();
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const handleSettingsClick = () => {
     window.open('http://localhost:5173/settings', '_blank');
+  };
+
+  const handleRefresh = () => {
+    // 通过改变 key 重新挂载 WriteTab，比 window.location.reload() 快 10 倍+
+    setRefreshKey(k => k + 1);
   };
 
   return (
@@ -64,21 +75,29 @@ export default function AppShell() {
       {/* 顶部栏 */}
       <div className={styles.header}>
         <div className={styles.headerLeft}>
-          <div className={styles.logo}>i-W</div>
-          <span className={styles.logoTitle}>i-Write</span>
+          <span className={styles.logoTitle}>i-Write, Doc Generation with Knowledge</span>
         </div>
-        <Button
-          appearance="subtle"
-          icon={<Settings24Regular />}
-          size="small"
-          title="打开 i-Write 配置"
-          onClick={handleSettingsClick}
-        />
+        <div style={{ display: 'flex', gap: 4 }}>
+          <Button
+            appearance="subtle"
+            icon={<ArrowCounterclockwise24Regular />}
+            size="small"
+            title="刷新 Task Pane"
+            onClick={handleRefresh}
+          />
+          <Button
+            appearance="subtle"
+            icon={<Settings24Regular />}
+            size="small"
+            title="打开 i-Write 配置"
+            onClick={handleSettingsClick}
+          />
+        </div>
       </div>
 
       {/* 写入面板 */}
       <div className={styles.body}>
-        <WriteTab onSettingsClick={handleSettingsClick} />
+        <WriteTab key={refreshKey} onSettingsClick={handleSettingsClick} />
       </div>
     </div>
   );

@@ -19,7 +19,7 @@
   </Hosts>
 
   <DefaultSettings>
-    <SourceLocation DefaultValue="{{ADDIN_BASE_URL}}/src/index.html" />
+    <SourceLocation DefaultValue="{{ADDIN_BASE_URL}}/index.html" />
   </DefaultSettings>
 
   <Permissions>ReadWriteDocument</Permissions>
@@ -73,7 +73,7 @@
       </bt:Images>
       <bt:Urls>
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://github.com/docstudio/docstudio" />
-        <bt:Url id="Taskpane.Url" DefaultValue="{{ADDIN_BASE_URL}}/src/index.html" />
+        <bt:Url id="Taskpane.Url" DefaultValue="{{ADDIN_BASE_URL}}/index.html" />
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="GetStarted.Title" DefaultValue="开始使用 i-Write" />

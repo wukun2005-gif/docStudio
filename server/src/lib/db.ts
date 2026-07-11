@@ -285,13 +285,21 @@ function migrate(db: Database.Database): void {
       db.exec("ALTER TABLE generation_runs ADD COLUMN conflict_resolution TEXT");
       logger.info("[DB] Migration: added generation_runs.conflict_resolution");
     }
+    if (!runColNames2.has("excel_payload")) {
+      db.exec("ALTER TABLE generation_runs ADD COLUMN excel_payload TEXT");
+      logger.info("[DB] Migration: added generation_runs.excel_payload");
+    }
+    if (!runColNames2.has("progress_json")) {
+      db.exec("ALTER TABLE generation_runs ADD COLUMN progress_json TEXT");
+      logger.info("[DB] Migration: added generation_runs.progress_json");
+    }
   } catch (e) {
     // 表可能还不存在，CREATE TABLE 已经处理了
   }
 
   // 设置版本号
-  if (versionRow < 4) {
-    db.pragma("user_version = 4");
+  if (versionRow < 5) {
+    db.pragma("user_version = 5");
   }
 
   // ── 种子数据：当前用户（黄薇）──

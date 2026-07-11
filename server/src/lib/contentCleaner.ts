@@ -173,6 +173,27 @@ function convertCitationsToLinks(text: string, citations: CitationLink[]): strin
 }
 
 /**
+ * 判断一行是否为 markdown 表格行
+ * 匹配两种模式：
+ * 1. 以 | 开头并以 | 结尾（标准 GFM 表格行）
+ * 2. 不以 | 开头，但以 | 结尾且含 2+ 个 | 作为列分隔符
+ *    （LLM 有时省略首行的前导 |，如 "0 升级 | 进行中 | 45% | 赵强 | ... |"）
+ */
+function isTableRow(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  // 标准 GFM 表格行：| col1 | col2 |
+  if (/^\|.+\|/.test(trimmed)) return true;
+  // 分隔行：|---|---| 或 :---:|---:
+  if (/^\|?[\s\-:|]+\|?$/.test(trimmed) && trimmed.includes("-") && trimmed.includes("|")) return true;
+  // 非标准但可识别的表格行：以 | 结尾且含 2+ 个 | 分隔符
+  // 如 "0 升级 | 进行中 | 45% | 赵强 | 6/5-6/25 | 性能测试中 |"
+  const pipeCount = (trimmed.match(/\|/g) || []).length;
+  if (trimmed.endsWith("|") && pipeCount >= 2) return true;
+  return false;
+}
+
+/**
  * 简易 Markdown → HTML 转换
  * 支持：标题、粗体、斜体、列表、链接、代码块
  */
@@ -194,8 +215,35 @@ function markdownToHtml(text: string): string {
       return;
     }
     // Find separator row (e.g. |---|:---:|---|)
-    const sepIdx = tableBuffer.findIndex((r) => /^\|[\s\-:|]+\|$/.test(r.trim()));
-    if (sepIdx < 0 || sepIdx === 0) {
+    const sepIdx = tableBuffer.findIndex((r) => /^\|?[\s\-:|]+\|?$/.test(r.trim()) && r.includes("-"));
+    if (sepIdx < 0) {
+      // 无分隔行 — 尝试将第一行当表头，其余当数据行
+      if (tableBuffer.length >= 2) {
+        const headerRow = tableBuffer[0];
+        const dataRows = tableBuffer.slice(1);
+        const parseRowNoFilter = (row: string) => {
+          let trimmed = row.trim();
+          if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
+          if (trimmed.endsWith("|")) trimmed = trimmed.slice(0, -1);
+          return trimmed.split("|").map((c) => c.trim());
+        };
+        let html = "<table>\n<thead><tr>" + parseRowNoFilter(headerRow).map((c) => `<th>${inlineMarkdown(c)}</th>`).join("") + "</tr></thead>\n<tbody>\n";
+        for (const dr of dataRows) {
+          html += "<tr>" + parseRowNoFilter(dr).map((c) => `<td>${inlineMarkdown(c)}</td>`).join("") + "</tr>\n";
+        }
+        html += "</tbody>\n</table>\n";
+        htmlLines.push(html);
+        tableBuffer = [];
+        return;
+      }
+      // 少于 2 行不算表格
+      for (const row of tableBuffer) {
+        htmlLines.push(`<p>${inlineMarkdown(row)}</p>`);
+      }
+      tableBuffer = [];
+      return;
+    }
+    if (sepIdx === 0) {
       // 无分隔行，或分隔行是首行（无表头）→ 不是有效表格，当 <p> 输出
       // 不以 | 开头的表头行留给 extractMarkdownTables fallback 处理
       for (const row of tableBuffer) {
@@ -215,7 +263,14 @@ function markdownToHtml(text: string): string {
       else alignments.push("");
     }
 
-    const parseRow = (row: string) => row.split("|").map((c) => c.trim()).filter(Boolean);
+    // parseRow: 保留空单元格，避免列错位
+    const parseRow = (row: string) => {
+      // 去掉首尾的 | 后按 | 分割
+      let trimmed = row.trim();
+      if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
+      if (trimmed.endsWith("|")) trimmed = trimmed.slice(0, -1);
+      return trimmed.split("|").map((c) => c.trim());
+    };
 
     let html = "<table>\n";
     for (const hr of headerRows) {
@@ -261,6 +316,15 @@ function markdownToHtml(text: string): string {
 
     // 空行 — flush table/lists
     if (line.trim() === "") {
+      // Look-ahead: 如果 tableBuffer 有内容，且下一个非空行也是表格行，则不 flush
+      // 原因：LLM 有时在表格行之间插入空行，导致每行被单独拆成 <p>
+      if (tableBuffer.length > 0) {
+        let j = i + 1;
+        while (j < lines.length && lines[j].trim() === "") j++;
+        if (j < lines.length && isTableRow(lines[j])) {
+          continue; // 跳过空行，保持 tableBuffer
+        }
+      }
       flushTable();
       if (inList) {
         htmlLines.push("</ul>");
@@ -280,8 +344,8 @@ function markdownToHtml(text: string): string {
       continue;
     }
 
-    // Markdown table row (starts with | and contains at least one more |)
-    if (/^\|.+\|/.test(line.trim())) {
+    // Markdown table row (starts with | or contains 2+ | as column separators)
+    if (isTableRow(line)) {
       if (inList) { htmlLines.push("</ul>"); inList = false; }
       tableBuffer.push(line);
       continue;

@@ -88,7 +88,7 @@ export async function startIsolatedServer(options = {}) {
   console.log(`[server-lifecycle] Server log: ${serverLogPath}`);
 
   // 2. Spawn server 子进程
-  const child = spawn("node", ["--import", "tsx", "server/src/index.ts"], {
+  const child = spawn("node", ["server/dist/index.js"], {
     env: {
       ...process.env,
       PORT: String(port),

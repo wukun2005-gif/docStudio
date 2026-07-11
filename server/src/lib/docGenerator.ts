@@ -348,7 +348,7 @@ function flattenOutline(outline: OutlineSection[]): OutlineSection[] {
   const result: OutlineSection[] = [];
   for (const s of outline) {
     result.push(s);
-    if (s.children.length > 0) result.push(...flattenOutline(s.children));
+    if ((s.children?.length ?? 0) > 0) result.push(...flattenOutline(s.children));
   }
   return result;
 }
@@ -648,7 +648,7 @@ function outlineToText(outline: OutlineSection[], indent: number = 0): string {
     const num = indent === 0 ? `${i + 1}.` : `${indent}.${i + 1}.`;
     const desc = s.description ? ` — ${s.description}` : "";
     const line = `${prefix}${num} ${s.title}${desc}`;
-    const children = s.children.length > 0 ? outlineToText(s.children, indent + 1) : "";
+    const children = (s.children?.length ?? 0) > 0 ? outlineToText(s.children, indent + 1) : "";
     return children ? `${line}\n${children}` : line;
   }).join("\n");
 }
@@ -1679,7 +1679,7 @@ async function generateSections(
     const globalIndex = sections.length;
     const isLastInCurrentLevel = i === outline.length - 1;
 
-    if (section.children.length > 0) {
+    if ((section.children?.length ?? 0) > 0) {
       // ── 合并模式: 父章节 + 所有直接子章节 → 一次 LLM 调用 ──
       const isLastSection = isLastInCurrentLevel && lastSectionIsDocEnd;
       // 章节开始 — 推送进度事件

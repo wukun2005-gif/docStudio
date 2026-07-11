@@ -1,14 +1,16 @@
 /**
  * excelWriteService.ts — Excel.run() 封装
  *
- * 核心：将服务端返回的结构化数据（ExcelWritePayload）
- * 通过 Excel JS API 写入当前工作簿。
+ * 使用 Office.js 官方推荐的布局模式：
+ * - `worksheet.getUsedRange()` 自动追踪内容边界（不手动计算行号）
+ * - `chart.setPosition(startCell, endCell)` 锚定图表到指定单元格区域
+ * - 每次写入后 sync → getUsedRange → 获取下一个空闲行
  *
- * 使用 Excel JS API 1.10 子集：
- * - Sheet 创建 / Range 写入
- * - Table 对象
- * - ChartCollection.add()
- * - ConditionalFormatCollection
+ * 参考：
+ * - https://learn.microsoft.com/zh-cn/office/dev/add-ins/excel/excel-add-ins-ranges-unbounded
+ * - https://learn.microsoft.com/zh-cn/javascript/api/excel/excel.chart#excel-excel-chart-setposition-member(1)
+ *
+ * Excel JS API 1.10 兼容（getUsedRange / setPosition 自 1.1 起可用）
  */
 
 export interface ExcelWritePayload {
@@ -34,6 +36,7 @@ export interface ExcelWritePayload {
       series: Array<{ name: string; values: number[] }>;
       afterRow?: number;
     }>;
+    citations?: Array<{ index: number; title: string; url: string }>;
     conditionalFormats?: Array<{
       range: string;
       type: 'colorScale' | 'dataBar';
@@ -41,27 +44,54 @@ export interface ExcelWritePayload {
   }>;
 }
 
+// ── 布局常量 ──────────────────────────────────────────────────
+/** 图表可视区域占用的行数 */
+const CHART_HEIGHT_ROWS = 15;
+/** 图表之间的间隔行数 */
+const CHART_SPACING = 2;
+/** 图表源数据写入的起始列（K 列，0-based = 10），避免与正文混排 */
+const CHART_DATA_COL = 10;
+/** 图表可视区域占用的列数（A-H，8 列） */
+const CHART_WIDTH_COLS = 8;
+
 // ── Sheet 名称清理 ────────────────────────────────────────────
 function sanitizeSheetName(name: string): string {
-  // Excel Sheet 名称限制：最多 31 字符，不能包含 \ / * ? : [ ]
   return name
     .replace(/[\\/*?:\[\]]/g, '')
     .slice(0, 31)
     .trim();
 }
 
+// ── 工具：获取 usedRange 的最后一行（0-based） ────────────────
+/**
+ * 调用 sheet.getUsedRange() 获取当前工作表中已使用的区域，
+ * 返回其 rowCount（即内容占据的行数）。
+ *
+ * 必须在 context.sync() 之后调用，因为需要 load 属性。
+ */
+async function getUsedRowCount(context: Excel.RequestContext, sheet: Excel.Worksheet): Promise<number> {
+  const usedRange = sheet.getUsedRange();
+  usedRange.load('rowCount');
+  await context.sync();
+  return usedRange.rowCount;
+}
+
 // ── 段落写入 ──────────────────────────────────────────────────
-function writeParagraphs(
+/**
+ * 从指定行开始写入段落，返回写入的段落数。
+ * 调用方应在 sync 后用 getUsedRange 获取实际边界。
+ */
+function writeParagraphsAt(
   sheet: Excel.Worksheet,
-  paragraphs: ExcelWritePayload['sheets'][number]['paragraphs']
+  paragraphs: ExcelWritePayload['sheets'][number]['paragraphs'],
+  startRow: number  // 0-based
 ): number {
-  let currentRow = 2; // 从第 2 行开始（第 1 行留给可能的标题）
+  let row = startRow;
 
   for (const para of paragraphs) {
-    const cell = sheet.getRangeByIndexes(currentRow - 1, 0, 1, 1);
-    cell.values = [[para.text]];
+    const cell = sheet.getRangeByIndexes(row, 0, 1, 1);
+    cell.values = [[para.text ?? '']];
 
-    // 根据样式设置格式
     switch (para.style) {
       case 'heading1':
         cell.format.font.bold = true;
@@ -75,87 +105,94 @@ function writeParagraphs(
         cell.format.font.size = 11;
         break;
       case 'bullet':
-        cell.values = [[`• ${para.text}`]];
+        cell.values = [[`• ${para.text ?? ''}`]];
         cell.format.font.size = 11;
         break;
       case 'citation':
         cell.format.font.italic = true;
         cell.format.font.size = 10;
-        cell.format.font.color = 'rgb(128,128,128)';
+        cell.format.font.color = '#808080';
         break;
     }
 
-    // 自动调整列宽
-    sheet.getUsedRange().format.autofitColumns();
-
-    currentRow++;
+    row++;
   }
 
-  return currentRow;
+  return paragraphs.length;
 }
 
 // ── 表格写入 ──────────────────────────────────────────────────
-function writeTables(
+/**
+ * 从指定行开始写入表格，返回占用的总行数。
+ */
+function writeTablesAt(
   sheet: Excel.Worksheet,
   tables: ExcelWritePayload['sheets'][number]['tables'],
-  startRow: number
+  startRow: number  // 0-based
 ): number {
-  if (!tables || tables.length === 0) return startRow;
+  if (!tables || tables.length === 0) return 0;
 
-  let currentRow = startRow;
+  let row = startRow;
+  let totalRows = 0;
 
   for (const table of tables) {
+    // 标题行
     if (table.title) {
-      const titleCell = sheet.getRangeByIndexes(currentRow - 1, 0, 1, 1);
+      const titleCell = sheet.getRangeByIndexes(row, 0, 1, 1);
       titleCell.values = [[table.title]];
       titleCell.format.font.bold = true;
       titleCell.format.font.size = 12;
-      currentRow++;
+      row++;
+      totalRows++;
     }
 
     const headerCount = table.headers.length;
     const rowCount = table.rows.length;
-    const tableRange = sheet.getRangeByIndexes(
-      currentRow - 1,
-      0,
-      rowCount + 1,
-      headerCount
-    );
 
-    // 写入表头
-    const headerRow = sheet.getRangeByIndexes(currentRow - 1, 0, 1, headerCount);
+    // 表头
+    const headerRow = sheet.getRangeByIndexes(row, 0, 1, headerCount);
     headerRow.values = [table.headers];
-    headerRow.format.fill.color = 'rgb(68,114,196)';
+    headerRow.format.fill.color = '#4472C4';
     headerRow.format.font.bold = true;
-    headerRow.format.font.color = 'rgb(255,255,255)';
+    headerRow.format.font.color = '#FFFFFF';
 
-    // 写入数据行
+    // 数据行
     if (rowCount > 0) {
-      const dataRange = sheet.getRangeByIndexes(currentRow, 0, rowCount, headerCount);
-      dataRange.values = table.rows;
+      const dataRange = sheet.getRangeByIndexes(row + 1, 0, rowCount, headerCount);
+      const rows2d = table.rows.map(r => {
+        const padded = [...r];
+        while (padded.length < headerCount) padded.push('');
+        return padded.slice(0, headerCount);
+      });
+      dataRange.values = rows2d;
     }
 
-    // 创建 Excel Table 对象
-    sheet.tables.add(tableRange, true);
-
-    // 自动调整列宽
-    sheet.getUsedRange().format.autofitColumns();
-
-    currentRow += rowCount + 2; // +1 for header, +1 for spacing
+    const tableRows = (table.title ? 1 : 0) + 1 + rowCount + 1; // title + header + data + spacing
+    row += tableRows;
+    totalRows += tableRows;
   }
 
-  return currentRow;
+  return totalRows;
 }
 
-// ── 图表写入 ──────────────────────────────────────────────────
-function writeCharts(
+// ── 图表写入（使用 setPosition 锚定） ────────────────────────
+/**
+ * 从指定行开始写入图表。
+ *
+ * 布局策略：
+ * 1. 图表源数据写入 K 列（CHART_DATA_COL）起的侧栏区域，不与正文混排
+ * 2. 用 chart.setPosition("A{row}", "H{row+15}") 锚定图表到正文区域
+ * 3. 每个图表占 CHART_HEIGHT_ROWS 行 + CHART_SPACING 行间隔
+ *
+ * 返回占用的总行数（用于后续 getUsedRange 校准）。
+ */
+function writeChartsAt(
   sheet: Excel.Worksheet,
   charts: ExcelWritePayload['sheets'][number]['charts'],
-  afterRow: number
-): void {
-  if (!charts || charts.length === 0) return;
+  startRow: number  // 0-based
+): number {
+  if (!charts || charts.length === 0) return 0;
 
-  // Excel JS API 1.10 支持的图表类型映射（驼峰命名）
   const chartTypeMap: Record<string, Excel.ChartType> = {
     bar: Excel.ChartType.barClustered,
     column: Excel.ChartType.columnClustered,
@@ -165,113 +202,131 @@ function writeCharts(
     scatter: Excel.ChartType.xyscatter,
   };
 
-  for (const chart of charts) {
-    const chartType = chartTypeMap[chart.type] ?? Excel.ChartType.columnClustered;
+  let row = startRow;
+  let totalRows = 0;
 
-    // 构建图表数据范围
+  for (const chart of charts) {
+    // guard：空数据跳过
+    if (!chart.series || chart.series.length === 0 || !chart.categories || chart.categories.length === 0) {
+      console.warn(`[excelWriteService] 图表 "${chart.title}" 数据为空，跳过`);
+      continue;
+    }
+
+    const chartType = chartTypeMap[chart.type] ?? Excel.ChartType.columnClustered;
     const seriesCount = chart.series.length;
     const categoryCount = chart.categories.length;
 
-    // 在工作簿中预留数据区域
-    const dataStartRow = afterRow + 1;
+    // 1. 图表源数据写入侧栏列（K 列起）
     const dataRange = sheet.getRangeByIndexes(
-      dataStartRow - 1,
-      0,
-      categoryCount + 1,
-      seriesCount + 1
+      row,
+      CHART_DATA_COL,
+      categoryCount + 1,  // +1 for header row
+      seriesCount + 1     // +1 for category column
     );
 
-    // 构建数据矩阵
     const dataMatrix: (string | number)[][] = [];
-    // 第一行：系列名称
     dataMatrix.push(['', ...chart.series.map(s => s.name)]);
-    // 数据行
     for (let i = 0; i < categoryCount; i++) {
-      const row: (string | number)[] = [chart.categories[i]];
+      const dataRow: (string | number)[] = [chart.categories[i]];
       for (const s of chart.series) {
-        row.push(s.values[i] ?? 0);
+        dataRow.push(s.values?.[i] ?? 0);
       }
-      dataMatrix.push(row);
+      dataMatrix.push(dataRow);
     }
-
     dataRange.values = dataMatrix;
 
-    // 创建图表
-    const chartObj = sheet.charts.add(
-      chartType,
-      dataRange,
-      Excel.ChartSeriesBy.columns
-    );
+    // 2. 创建图表
+    const chartObj = sheet.charts.add(chartType, dataRange, Excel.ChartSeriesBy.columns);
     chartObj.title.text = chart.title;
 
-    // 移动图表位置（在数据区域右侧）
-    chartObj.setPosition(
-      sheet.getRangeByIndexes(dataStartRow - 1, seriesCount + 2, 1, 1)
-    );
-
-    afterRow += categoryCount + 3;
-  }
-}
-
-// ── 条件格式 ──────────────────────────────────────────────────
-function writeConditionalFormats(
-  sheet: Excel.Worksheet,
-  formats: ExcelWritePayload['sheets'][number]['conditionalFormats']
-): void {
-  if (!formats || formats.length === 0) return;
-
-  for (const cf of formats) {
-    const range = sheet.getRange(cf.range);
-
-    if (cf.type === 'colorScale') {
-      const cfObj = range.conditionalFormats.add(Excel.ConditionalFormatType.colorScale);
-      // 默认三色阶：红-黄-绿
-      cfObj.colorScale.criteria = {
-        minimum: {
-          type: Excel.ConditionalFormatColorCriterionType.lowestValue,
-          color: 'rgb(248,105,107)',
-        },
-        midpoint: {
-          type: Excel.ConditionalFormatColorCriterionType.percentile,
-          color: 'rgb(255,235,132)',
-          formula: '50',
-        },
-        maximum: {
-          type: Excel.ConditionalFormatColorCriterionType.highestValue,
-          color: 'rgb(99,190,123)',
-        },
-      };
-    } else if (cf.type === 'dataBar') {
-      const cfObj = range.conditionalFormats.add(Excel.ConditionalFormatType.dataBar);
-      cfObj.dataBar.barDirection = Excel.ConditionalDataBarDirection.leftToRight;
-    }
-  }
-}
-
-// ── 来源批注 ──────────────────────────────────────────────────
-// Note: Range.comments 需要 ExcelApi 1.12+，当前声明 1.10
-// 使用 try-catch 降级，不支持时静默跳过
-function writeSourceComments(
-  sheet: Excel.Worksheet,
-  paragraphs: ExcelWritePayload['sheets'][number]['paragraphs']
-): void {
-  let row = 2; // 从第 2 行开始
-  for (const para of paragraphs) {
-    if (para.sourceName || para.sourceChunkId) {
+    // 3. 用 setPosition 锚定图表到正文区域 A{row+1}:H{row+CHART_HEIGHT_ROWS}
+    //    setPosition 自 ExcelApi 1.1 起可用，按单元格锚定
+    const startCell = `A${row + 1}`;
+    const endCell = `${getColumnLetter(CHART_WIDTH_COLS)}${row + CHART_HEIGHT_ROWS}`;
+    try {
+      chartObj.setPosition(startCell, endCell);
+    } catch {
+      // Fallback: left/top (points)
       try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const cell = (sheet as any).getRangeByIndexes(row - 1, 0, 1, 1);
-        const commentText = `来源: ${para.sourceName ?? para.sourceChunkId}\n可信度: ${(para.groundingScore ?? 0).toFixed(2)}`;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (cell as any).comments.add(commentText);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (cell as any).comments.visible = false;
+        chartObj.left = 0;
+        chartObj.top = row * 15;
+        chartObj.width = 400;
+        chartObj.height = 220;
       } catch {
-        // 静默跳过（ExcelApi < 1.12 不支持批注）
+        console.warn(`[excelWriteService] 图表 "${chart.title}" 定位失败，使用默认位置`);
       }
     }
+
+    const chartRows = CHART_HEIGHT_ROWS + CHART_SPACING;
+    row += chartRows;
+    totalRows += chartRows;
+  }
+
+  return totalRows;
+}
+
+/** 将 0-based 列号转换为 Excel 字母（0=A, 7=H, 25=Z） */
+function getColumnLetter(col: number): string {
+  let letter = '';
+  let c = col;
+  while (c >= 0) {
+    letter = String.fromCharCode(65 + (c % 26)) + letter;
+    c = Math.floor(c / 26) - 1;
+  }
+  return letter;
+}
+
+// ── 参考来源写入（带 HYPERLINK 公式，兼容 Excel Online） ──────────
+function writeCitationsAt(
+  sheet: Excel.Worksheet,
+  citations: ExcelWritePayload['sheets'][number]['citations'],
+  startRow: number  // 0-based
+): number {
+  if (!citations || citations.length === 0) return 0;
+
+  let row = startRow;
+
+  // 标题
+  const titleCell = sheet.getRangeByIndexes(row, 0, 1, 3);
+  titleCell.values = [['参考来源', '', '']];
+  titleCell.format.font.bold = true;
+  titleCell.format.font.size = 12;
+  titleCell.format.fill.color = '#E2EFDA';
+  row++;
+
+  // 表头
+  const headerRow = sheet.getRangeByIndexes(row, 0, 1, 3);
+  headerRow.values = [['编号', '标题', '链接']];
+  headerRow.format.font.bold = true;
+  headerRow.format.fill.color = '#4472C4';
+  headerRow.format.font.color = '#FFFFFF';
+  row++;
+
+  // 数据行（用 HYPERLINK 公式实现可点击链接，兼容 Excel Online）
+  for (const cit of citations) {
+    const dataRow = sheet.getRangeByIndexes(row, 0, 1, 3);
+    dataRow.values = [[`[${cit.index}]`, cit.title, '']];
+    dataRow.format.font.size = 10;
+
+    // 标题列：HYPERLINK 公式
+    if (cit.url) {
+      const titleCell2 = sheet.getRangeByIndexes(row, 1, 1, 1);
+      const safeTitle = cit.title.replace(/"/g, '""');
+      titleCell2.formulas = [[`=HYPERLINK("${cit.url}","${safeTitle}")`]];
+      titleCell2.format.font.color = '#0563C1';
+      titleCell2.format.font.underline = 'Single';
+
+      // 链接列：也显示为可点击 URL
+      const linkCell = sheet.getRangeByIndexes(row, 2, 1, 1);
+      linkCell.formulas = [[`=HYPERLINK("${cit.url}","${cit.url}")`]];
+      linkCell.format.font.color = '#0563C1';
+      linkCell.format.font.underline = 'Single';
+    }
+
     row++;
   }
+
+  return citations.length + 2 + 1; // citations + title + header + spacing
 }
 
 // ── 主入口 ────────────────────────────────────────────────────
@@ -279,33 +334,59 @@ export async function writeToWorkbook(payload: ExcelWritePayload): Promise<void>
   await Excel.run(async (context) => {
     const workbook = context.workbook;
 
-    for (const sheetData of payload.sheets) {
-      // 创建 Sheet（名称清理）
+    for (let i = 0; i < payload.sheets.length; i++) {
+      const sheetData = payload.sheets[i];
       const safeName = sanitizeSheetName(sheetData.name);
-      let sheet: Excel.Worksheet;
+
       try {
-        sheet = workbook.worksheets.add(safeName);
-      } catch {
-        // 名称冲突时追加序号
-        sheet = workbook.worksheets.add(`${safeName}_${Date.now()}`);
+        // 创建 Sheet
+        let sheet: Excel.Worksheet;
+        try {
+          sheet = workbook.worksheets.add(safeName);
+          await context.sync();
+        } catch {
+          sheet = workbook.worksheets.add(`${safeName.slice(0, 27)}_${i + 1}`);
+          await context.sync();
+        }
+
+        // ── 1. 写入段落 ──
+        writeParagraphsAt(sheet, sheetData.paragraphs, 0);
+        await context.sync();
+
+        // 用 getUsedRange 获取实际内容边界
+        let usedRows = await getUsedRowCount(context, sheet);
+
+        // ── 2. 写入表格 ──
+        if (sheetData.tables && sheetData.tables.length > 0) {
+          writeTablesAt(sheet, sheetData.tables, usedRows + 1);
+          await context.sync();
+          usedRows = await getUsedRowCount(context, sheet);
+        }
+
+        // ── 3. 写入图表（用 setPosition 锚定） ──
+        if (sheetData.charts && sheetData.charts.length > 0) {
+          try {
+            writeChartsAt(sheet, sheetData.charts, usedRows + CHART_SPACING);
+            await context.sync();
+            usedRows = await getUsedRowCount(context, sheet);
+          } catch (chartErr) {
+            console.error(`[excelWriteService] Sheet "${safeName}" 图表写入失败:`, chartErr);
+          }
+        }
+
+        // ── 4. 写入参考来源 ──
+        if (sheetData.citations && sheetData.citations.length > 0) {
+          try {
+            writeCitationsAt(sheet, sheetData.citations, usedRows + CHART_SPACING);
+            await context.sync();
+          } catch (citErr) {
+            console.error(`[excelWriteService] Sheet "${safeName}" 参考来源写入失败:`, citErr);
+          }
+        }
+
+      } catch (err) {
+        console.error(`[excelWriteService] Sheet "${safeName}" 写入失败:`, err);
       }
-
-      // 写入段落
-      const paragraphEndRow = writeParagraphs(sheet, sheetData.paragraphs);
-
-      // 写入表格
-      const tableEndRow = writeTables(sheet, sheetData.tables, paragraphEndRow + 1);
-
-      // 写入图表
-      writeCharts(sheet, sheetData.charts, tableEndRow);
-
-      // 条件格式
-      writeConditionalFormats(sheet, sheetData.conditionalFormats);
-
-      // 来源批注（降级处理）
-      writeSourceComments(sheet, sheetData.paragraphs);
     }
-
-    await context.sync();
   });
 }

@@ -25,6 +25,7 @@ const useStyles = makeStyles({
     display: 'flex',
     flexDirection: 'column',
     height: '100%',
+    width: '100%',
     gap: tokens.spacingVerticalS,
   },
   messages: {
@@ -75,6 +76,27 @@ const useStyles = makeStyles({
   inputRow: {
     display: 'flex',
     gap: tokens.spacingHorizontalXS,
+    alignItems: 'flex-end',
+    position: 'relative',
+  },
+  textareaWrap: {
+    flex: 1,
+    width: '100%',
+    position: 'relative',
+  },
+  sendButton: {
+    position: 'absolute',
+    right: '6px',
+    bottom: '6px',
+    width: '28px',
+    height: '28px',
+    minWidth: '28px',
+    padding: 0,
+    borderRadius: tokens.borderRadiusCircular,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1,
   },
   placeholder: {
     color: tokens.colorNeutralForeground3,
@@ -82,14 +104,42 @@ const useStyles = makeStyles({
   },
 });
 
+const STORAGE_KEY = 'iwrite-addin-chat-history';
+
+function loadHistory(): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw) as ChatMessage[];
+  } catch {}
+  return [{ role: 'ai', content: '你好！请描述你的 Excel 生成需求。' }];
+}
+
 export default function ChatPanel({ onOutlineGenerated }: ChatPanelProps) {
   const styles = useStyles();
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: 'ai', content: '你好！请描述你的 Excel 生成需求。' },
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>(loadHistory);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // 持久化聊天记录
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+  }, [messages]);
+
+  // 自动调整 textarea 高度
+  const adjustTextareaHeight = () => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    const maxHeight = 200;
+    textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+  };
+
+  // input 变化时调整高度
+  useEffect(() => {
+    adjustTextareaHeight();
+  }, [input]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -117,12 +167,12 @@ export default function ChatPanel({ onOutlineGenerated }: ChatPanelProps) {
       const aiMsg: ChatMessage = { role: 'ai', content: aiContent };
       setMessages(prev => [...prev, aiMsg]);
 
-      // 尝试从 AI 回复中提取大纲
-      // 如果回复中包含 JSON 格式的大纲数据，触发大纲面板
-      if (response.data?.outline) {
-        const outlineItems: OutlineItem[] = response.data.outline.map(
-          (item: { title: string; description?: string }, idx: number) => ({
-            id: `outline-${idx}`,
+      // 后端返回 outline_request 类型时，提取 suggestedOutline 触发大纲面板
+      const suggestedOutline = response.data?.suggestedOutline ?? response.data?.outline;
+      if (response.data?.type === 'outline_request' && suggestedOutline) {
+        const outlineItems: OutlineItem[] = suggestedOutline.map(
+          (item: { id?: string; title: string; description?: string }, idx: number) => ({
+            id: item.id ?? `outline-${idx}`,
             title: item.title,
             description: item.description,
           })
@@ -157,29 +207,32 @@ export default function ChatPanel({ onOutlineGenerated }: ChatPanelProps) {
 
       <div className={styles.inputArea}>
         <div className={styles.inputRow}>
-          <Textarea
-            value={input}
-            onChange={(_: React.FormEvent<HTMLElement | HTMLTextAreaElement>, data: TextareaOnChangeData) => setInput(data.value ?? '')}
-            onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            placeholder="例如：帮我生成一份 Q3 季度销售报告..."
-            resize="vertical"
-            rows={2}
-            style={{ minHeight: 60 }}
-          />
-          <Button
-            appearance="primary"
-            icon={<Send24Regular />}
-            disabled={loading || !input.trim()}
-            onClick={handleSend}
-            style={{ alignSelf: 'flex-end' }}
-          >
-            发送
-          </Button>
+          <div className={styles.textareaWrap}>
+            <Textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(_: React.FormEvent<HTMLElement | HTMLTextAreaElement>, data: TextareaOnChangeData) => setInput(data.value ?? '')}
+              onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              placeholder="例如：帮我生成一份 Q3 季度销售报告..."
+              resize="none"
+              rows={1}
+              style={{ minHeight: 40, width: '100%', overflowY: 'auto', paddingRight: 40 }}
+            />
+            <Button
+              appearance="primary"
+              icon={<Send24Regular style={{ width: 14, height: 14 }} />}
+              disabled={loading || !input.trim()}
+              onClick={handleSend}
+              className={styles.sendButton}
+              title="发送"
+              aria-label="发送"
+            />
+          </div>
         </div>
       </div>
     </div>

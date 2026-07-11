@@ -15,6 +15,7 @@ coverage/
 docs/backlog.md
 docs/sample-data-upgrade-plan.md
 docs/llm-parallel-optimization.md
+docs/plan-excel-addin.md
 .marscode/
 .trae/
 .qoder/

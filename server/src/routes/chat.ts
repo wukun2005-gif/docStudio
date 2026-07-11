@@ -6,6 +6,8 @@ import { Router } from "express";
 import { handleChat } from "../lib/chatRouter.js";
 import { generateOutline, getTemplates, getTemplateById } from "../lib/narrativeEngine.js";
 import { logger } from "../lib/logger.js";
+import { CASE_1782966166476 } from "../providers/fixtures/case-1782966166476.js";
+import { readOutlineFromDb } from "../lib/stubDataReader.js";
 
 export const chatRouter = Router();
 
@@ -16,6 +18,32 @@ chatRouter.post("/", async (req, res) => {
 
     if (!message) {
       res.status(400).json({ ok: false, error: "message is required" });
+      return;
+    }
+
+    // Stub mode：不调 LLM，从 DB 读取真实 case outline
+    const isStubMode = providerPreference?.includes("stub") || providerPreference?.length === 0 || !providerPreference;
+    if (isStubMode) {
+      const dbOutline = readOutlineFromDb();
+      if (dbOutline) {
+        logger.info(`[Chat] Chat stub mode (DB): returning outline with ${dbOutline.length} sections`);
+        res.json({
+          ok: true,
+          type: "outline_request",
+          reply: "已为您生成大纲，请确认后生成 Excel 文档。",
+          suggestedOutline: dbOutline,
+          stub: true,
+        });
+      } else {
+        logger.info(`[Chat] Chat stub mode (fixture fallback): returning case 1782966166476 outline`);
+        res.json({
+          ok: true,
+          type: "outline_request",
+          reply: "已为您生成大纲，请确认后生成 Excel 文档。",
+          suggestedOutline: CASE_1782966166476.outline,
+          stub: true,
+        });
+      }
       return;
     }
 
@@ -44,6 +72,20 @@ chatRouter.post("/outline", async (req, res) => {
 
     if (!userRequest) {
       res.status(400).json({ ok: false, error: "userRequest is required" });
+      return;
+    }
+
+    // Stub mode：不调 LLM，从 DB 读取真实 case outline
+    const isStubMode = providerPreference?.includes("stub") || providerPreference?.length === 0 || !providerPreference;
+    if (isStubMode) {
+      const dbOutline = readOutlineFromDb();
+      if (dbOutline) {
+        logger.info(`[Chat] Outline stub mode (DB): returning outline with ${dbOutline.length} sections`);
+        res.json({ ok: true, outline: dbOutline, stub: true });
+      } else {
+        logger.info(`[Chat] Outline stub mode (fixture fallback): returning case 1782966166476 outline`);
+        res.json({ ok: true, outline: CASE_1782966166476.outline, stub: true });
+      }
       return;
     }
 
