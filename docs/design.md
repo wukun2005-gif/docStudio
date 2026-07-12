@@ -72,7 +72,7 @@ docStudio/
 │   │       ├── evaluation.ts        # 评估类型
 │   │       └── metrics.ts           # 指标类型
 │   └── package.json
-├── office-addin/                    # Office Add-in
+├── excel-addin/                    # Office Add-in
 │   ├── manifest.xml
 │   ├── src/
 │   │   ├── taskpane/
@@ -847,7 +847,7 @@ async function importPaper(paperId: string): Promise<Document> {
     <Host Name="Presentation"/> <!-- PowerPoint -->
   </Hosts>
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://localhost:3000/office-addin/taskpane.html"/>
+    <SourceLocation DefaultValue="https://localhost:3000/excel-addin/taskpane.html"/>
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
 </OfficeApp>
