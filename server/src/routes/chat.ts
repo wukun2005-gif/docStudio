@@ -7,7 +7,8 @@ import { handleChat } from "../lib/chatRouter.js";
 import { generateOutline, getTemplates, getTemplateById } from "../lib/narrativeEngine.js";
 import { logger } from "../lib/logger.js";
 import { CASE_1782966166476 } from "../providers/fixtures/case-1782966166476.js";
-import { readOutlineFromDb } from "../lib/stubDataReader.js";
+import { CASE_1783257530743 } from "../providers/fixtures/case-1783257530743.js";
+import { readOutlineFromDb, readWordOutlineFromDb } from "../lib/stubDataReader.js";
 
 export const chatRouter = Router();
 
@@ -24,23 +25,41 @@ chatRouter.post("/", async (req, res) => {
     // Stub mode：不调 LLM，从 DB 读取真实 case outline
     const isStubMode = providerPreference?.includes("stub") || providerPreference?.length === 0 || !providerPreference;
     if (isStubMode) {
-      const dbOutline = readOutlineFromDb();
-      if (dbOutline) {
-        logger.info(`[Chat] Chat stub mode (DB): returning outline with ${dbOutline.length} sections`);
+      const format = req.body.format as string | undefined;
+      const isWord = format === "word";
+      const isPpt = format === "ppt";
+
+      if (isPpt) {
+        // PPT stub 模式：使用 case-1783257530743 fixture 大纲
+        const pptOutline = CASE_1783257530743.outline;
+        logger.info(`[Chat] Chat stub mode (PPT fixture): returning outline with ${pptOutline.length} sections`);
         res.json({
           ok: true,
           type: "outline_request",
-          reply: "已为您生成大纲，请确认后生成 Excel 文档。",
+          reply: "已为您生成大纲，请确认后生成 PPT 演示文稿。",
+          suggestedOutline: pptOutline,
+          stub: true,
+        });
+        return;
+      }
+
+      const dbOutline = isWord ? readWordOutlineFromDb() : readOutlineFromDb();
+      if (dbOutline) {
+        logger.info(`[Chat] Chat stub mode (${isWord ? "Word" : "Excel"} DB): returning outline with ${dbOutline.length} sections`);
+        res.json({
+          ok: true,
+          type: "outline_request",
+          reply: isWord ? "已为您生成大纲，请确认后生成 Word 文档。" : "已为您生成大纲，请确认后生成 Excel 文档。",
           suggestedOutline: dbOutline,
           stub: true,
         });
       } else {
-        logger.info(`[Chat] Chat stub mode (fixture fallback): returning case 1782966166476 outline`);
+        logger.info(`[Chat] Chat stub mode (${isWord ? "Word" : "Excel"} fixture fallback): returning case outline`);
         res.json({
           ok: true,
           type: "outline_request",
-          reply: "已为您生成大纲，请确认后生成 Excel 文档。",
-          suggestedOutline: CASE_1782966166476.outline,
+          reply: isWord ? "已为您生成大纲，请确认后生成 Word 文档。" : "已为您生成大纲，请确认后生成 Excel 文档。",
+          suggestedOutline: isWord ? [] : CASE_1782966166476.outline,
           stub: true,
         });
       }
@@ -78,13 +97,25 @@ chatRouter.post("/outline", async (req, res) => {
     // Stub mode：不调 LLM，从 DB 读取真实 case outline
     const isStubMode = providerPreference?.includes("stub") || providerPreference?.length === 0 || !providerPreference;
     if (isStubMode) {
-      const dbOutline = readOutlineFromDb();
+      const format = req.body.format as string | undefined;
+      const isWord = format === "word";
+      const isPpt = format === "ppt";
+
+      if (isPpt) {
+        // PPT stub 模式：使用 case-1783257530743 fixture 大纲
+        const pptOutline = CASE_1783257530743.outline;
+        logger.info(`[Chat] Outline stub mode (PPT fixture): returning outline with ${pptOutline.length} sections`);
+        res.json({ ok: true, outline: pptOutline, stub: true });
+        return;
+      }
+
+      const dbOutline = isWord ? readWordOutlineFromDb() : readOutlineFromDb();
       if (dbOutline) {
-        logger.info(`[Chat] Outline stub mode (DB): returning outline with ${dbOutline.length} sections`);
+        logger.info(`[Chat] Outline stub mode (${isWord ? "Word" : "Excel"} DB): returning outline with ${dbOutline.length} sections`);
         res.json({ ok: true, outline: dbOutline, stub: true });
       } else {
-        logger.info(`[Chat] Outline stub mode (fixture fallback): returning case 1782966166476 outline`);
-        res.json({ ok: true, outline: CASE_1782966166476.outline, stub: true });
+        logger.info(`[Chat] Outline stub mode (${isWord ? "Word" : "Excel"} fixture fallback): returning case outline`);
+        res.json({ ok: true, outline: isWord ? [] : CASE_1782966166476.outline, stub: true });
       }
       return;
     }

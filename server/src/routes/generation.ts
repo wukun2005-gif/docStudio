@@ -9,6 +9,8 @@ import { generateDocument, toHtml, sanitizeCitationHtml, getQueryAnalysis, type 
 import { exportDocument, type ExportFormat, type ExportSection, type ChartSpec } from "../lib/docExporter.js";
 import { extractChartSpecs } from "../lib/chartSpecParser.js";
 import { toExcelPayload } from "../lib/excelPayloadBuilder.js";
+import { toWordPayload } from "../lib/wordPayloadBuilder.js";
+import { toPptPayload } from "../lib/pptPayloadBuilder.js";
 import { buildProvenanceTree, getProvenanceByRunId } from "../lib/provenanceTree.js";
 import { dbRun, dbGet, dbAll, dbTransaction } from "../lib/dbQuery.js";
 import { logger } from "../lib/logger.js";
@@ -16,7 +18,8 @@ import type { OutlineSection } from "../lib/narrativeEngine.js";
 import type { QueryAnalysis } from "../lib/queryAnalyzer.js";
 import { CASE_1783257530743 } from "../providers/fixtures/case-1783257530743.js";
 import { CASE_1782966166476 } from "../providers/fixtures/case-1782966166476.js";
-import { readCaseFromDb, type CitationItem, type ProvenanceNodeRow } from "../lib/stubDataReader.js";
+import { readCaseFromDb, readWordCaseFromDb, type CitationItem, type ProvenanceNodeRow } from "../lib/stubDataReader.js";
+import type { CitationLink } from "../lib/contentCleaner.js";
 
 export const generationRouter = Router();
 
@@ -868,12 +871,404 @@ generationRouter.post("/excel", async (req, res) => {
   }
 });
 
+/** POST /api/generation/word — 触发 Word 生成，立即返回 runId */
+generationRouter.post("/word", async (req, res) => {
+  let runId = "";
+  try {
+    const { title, outline, format, providerPreference, modelId, apiKey, providerBaseUrls, userRequest } = req.body;
+
+    if (!title || !outline) {
+      res.status(400).json({ ok: false, error: "title and outline are required" });
+      return;
+    }
+
+    // 并发去重
+    const isStubMode = providerPreference?.includes("stub") || providerPreference?.length === 0 || !providerPreference;
+    const existing = dbGet<{ id: string; created_at: string }>(
+      "SELECT id, created_at FROM generation_runs WHERE title = ? AND status = 'generating'",
+      [title],
+    );
+    if (existing) {
+      const STALE_THRESHOLD_SECONDS = 10 * 60;
+      const staleCheck = dbGet<{ stale: number }>(
+        `SELECT (strftime('%s', 'now', 'localtime') - strftime('%s', ?)) > ${STALE_THRESHOLD_SECONDS} AS stale`,
+        [existing.created_at],
+      );
+      if (staleCheck?.stale === 1) {
+        dbRun(`UPDATE generation_runs SET status = 'crashed' WHERE id = ?`, [existing.id],
+          { table: "generation_runs", recordId: existing.id, source: "generation" });
+      } else if (isStubMode) {
+        logger.info(`[Generation] Word POST stub mode: 检测到同名 generating 记录 ${existing.id}，直接返回`);
+        res.json({ ok: true, runId: existing.id });
+        return;
+      } else {
+        res.status(409).json({ ok: false, error: "同名文档正在生成中，请等待完成", existingRunId: existing.id });
+        return;
+      }
+    }
+
+    runId = crypto.randomUUID();
+    const effectiveFormat = format ?? "word";
+    dbRun(`INSERT INTO generation_runs (id, title, outline, format, status) VALUES (?, ?, ?, ?, ?)`,
+      [runId, title, JSON.stringify(outline), effectiveFormat, "generating"],
+      { table: "generation_runs", recordId: runId, source: "generation", newData: { title, format: effectiveFormat, status: "generating" } });
+
+    logger.info(`[Generation] Word POST 触发生成: ${title}, runId=${runId}, 章节数=${outline.length}`);
+
+    // 立即返回 runId
+    res.json({ ok: true, runId });
+
+    // 后台异步执行生成
+    setImmediate(async () => {
+      try {
+        const isStubMode = providerPreference?.includes("stub") || providerPreference?.length === 0 || !providerPreference;
+        let result: GenerateDocResult;
+
+        if (isStubMode) {
+          const dbCase = readWordCaseFromDb();
+          if (dbCase) {
+            logger.info(`[Generation] Word POST stub mode (DB case 1782961869584): ${dbCase.sections.length} sections, title=${dbCase.title}`);
+            await new Promise(r => setTimeout(r, 500));
+            result = dbCase;
+          } else {
+            throw new Error("Word demo case 1782961869584 在数据库中未找到或数据不完整，请确认该记录存在且 status='done'");
+          }
+        } else {
+          let sectionIndex = 0;
+          const totalSections = outline.length;
+          result = await generateDocument({
+            title, outline, userRequest,
+            format: effectiveFormat,
+            modelId, apiKey,
+            providerPreference: providerPreference ?? [],
+            providerBaseUrls,
+          }, (section, phase) => {
+            if (phase === "start") {
+              const progressJson = JSON.stringify({ currentChapter: section.title, index: sectionIndex, total: totalSections });
+              dbRun(`UPDATE generation_runs SET progress_json = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+                [progressJson, runId]);
+              logger.info(`[Generation] Word POST 进度: [${sectionIndex + 1}/${totalSections}] ${section.title}`);
+            } else {
+              sectionIndex++;
+            }
+          });
+        }
+
+        const stubExtra = result as GenerateDocResult & { citations?: CitationItem[]; provenanceNodes?: ProvenanceNodeRow[]; sourceRunId?: string };
+
+        const htmlContent = stubExtra.sourceRunId && stubExtra.content && stubExtra.content.length > 0
+          ? stubExtra.content
+          : toHtml(result, `${req.protocol || "http"}://${req.get("host") || "localhost:3000"}`);
+        const wordPayload = toWordPayload(result, {
+          citations: stubExtra.citations,
+          provenanceNodes: stubExtra.provenanceNodes,
+        });
+
+        dbRun(`UPDATE generation_runs SET title = ?, content = ?, word_payload = ?, status = 'done', trust_score = ?, document_style = ?, conflict_resolution = ?, progress_json = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+          [result.title, htmlContent, JSON.stringify(wordPayload), result.trustScore, result.documentStyle, result.conflictResolution ? JSON.stringify(result.conflictResolution) : null, JSON.stringify({ currentChapter: '', index: result.sections.length, total: result.sections.length }), runId],
+          { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "done" } });
+
+        // 复制原始 run 的 provenance_nodes 到新 runId
+        if (stubExtra.sourceRunId) {
+          try {
+            dbRun(
+              `INSERT INTO provenance_nodes (run_id, paragraph_idx, paragraph_title, chunk_id, web_url, web_title, score, grounding_score, is_manual, created_at)
+               SELECT ?, paragraph_idx, paragraph_title, chunk_id, web_url, web_title, score, grounding_score, is_manual, datetime('now','localtime')
+               FROM provenance_nodes WHERE run_id = ?`,
+              [runId, stubExtra.sourceRunId],
+              { table: "provenance_nodes", recordId: runId, source: "generation-word-stub" },
+            );
+            logger.info(`[Generation] Word POST 复制 provenance_nodes: ${stubExtra.sourceRunId} → ${runId}`);
+          } catch (provErr) {
+            logger.warn(`[Generation] Word POST 复制 provenance_nodes 失败: ${provErr instanceof Error ? provErr.message : String(provErr)}`);
+          }
+
+          // 复制原始 run 的 trust_evaluations 到新 runId
+          try {
+            const sourceEval = dbGet<{ metrics: string }>(
+              "SELECT metrics FROM trust_evaluations WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
+              [stubExtra.sourceRunId],
+            );
+            if (sourceEval?.metrics) {
+              const evalId = crypto.randomUUID();
+              dbRun(
+                `INSERT INTO trust_evaluations (id, run_id, metrics, created_at) VALUES (?, ?, ?, datetime('now','localtime'))`,
+                [evalId, runId, sourceEval.metrics],
+                { table: "trust_evaluations", recordId: evalId, source: "generation-word-stub" },
+              );
+              logger.info(`[Generation] Word POST 复制 trust_evaluations: ${stubExtra.sourceRunId} → ${runId}`);
+            }
+          } catch (evalErr) {
+            logger.warn(`[Generation] Word POST 复制 trust_evaluations 失败: ${evalErr instanceof Error ? evalErr.message : String(evalErr)}`);
+          }
+        }
+
+        logger.info(`[Generation] Word POST 生成完成: ${result.title}, sections=${wordPayload.sections.length}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[Generation] Word POST 生成失败: ${msg}`);
+        dbRun(`UPDATE generation_runs SET status = 'crashed', progress_json = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+          [JSON.stringify({ error: msg }), runId],
+          { table: "generation_runs", recordId: runId, source: "generation" });
+      }
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Generation] Word POST 触发失败: ${msg}`);
+    if (!res.headersSent) {
+      res.status(500).json({ ok: false, error: msg });
+    }
+  }
+});
+
+/** POST /api/generation/ppt — 触发 PPT 生成，立即返回 runId */
+generationRouter.post("/ppt", async (req, res) => {
+  let runId = "";
+  try {
+    const { title, outline, format, providerPreference, modelId, apiKey, providerBaseUrls, userRequest } = req.body;
+
+    if (!title || !outline) {
+      res.status(400).json({ ok: false, error: "title and outline are required" });
+      return;
+    }
+
+    // 并发去重
+    const isStubMode = providerPreference?.includes("stub") || providerPreference?.length === 0 || !providerPreference;
+    const existing = dbGet<{ id: string; created_at: string }>(
+      "SELECT id, created_at FROM generation_runs WHERE title = ? AND status = 'generating' AND format = 'ppt'",
+      [title],
+    );
+    if (existing) {
+      const STALE_THRESHOLD_SECONDS = 10 * 60;
+      const staleCheck = dbGet<{ stale: number }>(
+        `SELECT (strftime('%s', 'now', 'localtime') - strftime('%s', ?)) > ${STALE_THRESHOLD_SECONDS} AS stale`,
+        [existing.created_at],
+      );
+      if (staleCheck?.stale === 1) {
+        dbRun(`UPDATE generation_runs SET status = 'crashed' WHERE id = ?`, [existing.id],
+          { table: "generation_runs", recordId: existing.id, source: "generation" });
+      } else if (isStubMode) {
+        logger.info(`[Generation] PPT POST stub mode: 检测到同名 generating 记录 ${existing.id}，直接返回`);
+        res.json({ ok: true, runId: existing.id });
+        return;
+      } else {
+        res.status(409).json({ ok: false, error: "同名文档正在生成中，请等待完成", existingRunId: existing.id });
+        return;
+      }
+    }
+
+    runId = crypto.randomUUID();
+    const effectiveFormat = format ?? "ppt";
+    dbRun(`INSERT INTO generation_runs (id, title, outline, format, status) VALUES (?, ?, ?, ?, ?)`,
+      [runId, title, JSON.stringify(outline), effectiveFormat, "generating"],
+      { table: "generation_runs", recordId: runId, source: "generation", newData: { title, format: effectiveFormat, status: "generating" } });
+
+    logger.info(`[Generation] PPT POST 触发生成: ${title}, runId=${runId}, 章节数=${outline.length}`);
+
+    // 立即返回 runId
+    res.json({ ok: true, runId });
+
+    // 后台异步执行生成
+    setImmediate(async () => {
+      try {
+        const isStubMode = providerPreference?.includes("stub") || providerPreference?.length === 0 || !providerPreference;
+        let result: GenerateDocResult;
+
+        if (isStubMode) {
+          // PPT stub 模式：直接使用 case-1783257530743 fixture 数据
+          const fixture = CASE_1783257530743;
+          logger.info(`[Generation] PPT POST stub mode (case ${fixture.caseId}): ${fixture.sections.length} sections, title=${fixture.title}`);
+          await new Promise(r => setTimeout(r, 500));
+
+          // 构建全局 citationLinks：按 URL/文件名去重，分配连续编号 [1], [2], [3]...
+          // 这与 toHtml() 中的去重逻辑一致，确保正文中的 [N] 引用标记不被清除
+          const citeSourceKey = (src: { sourceName?: string; sourceUrl?: string; sourceId?: string }) => {
+            if (src.sourceUrl && src.sourceUrl.trim()) return `url:${src.sourceUrl.trim()}`;
+            if (src.sourceId && src.sourceId.trim()) return `sid:${src.sourceId.trim()}`;
+            return `name:${src.sourceName || ""}`;
+          };
+          const buildCiteUrl = (src: { sourceUrl?: string; sourceId?: string }): string => {
+            if (src.sourceUrl && src.sourceUrl.trim()) return src.sourceUrl.trim();
+            if (src.sourceId && src.sourceId.trim()) return `http://localhost:3000/api/knowledge/sources/${src.sourceId.trim()}/file`;
+            return "";
+          };
+          const citeSeen = new Map<string, number>();
+          const citationLinksList: CitationLink[] = [];
+          let citeNextIdx = 1;
+          for (const s of fixture.sections) {
+            for (const src of (s.sources ?? [])) {
+              if (!src.sourceName) continue;
+              const key = citeSourceKey(src as { sourceName?: string; sourceUrl?: string; sourceId?: string });
+              if (!citeSeen.has(key)) {
+                citeSeen.set(key, citeNextIdx);
+                citationLinksList.push({
+                  index: citeNextIdx,
+                  title: src.sourceName,
+                  url: buildCiteUrl(src as { sourceUrl?: string; sourceId?: string }),
+                  sourceId: (src.sourceId as string) ?? "",
+                });
+                citeNextIdx++;
+              }
+            }
+          }
+
+          result = {
+            content: fixture.htmlContent,
+            sections: fixture.sections.map(s => ({
+              title: s.title,
+              content: s.content,
+              sources: (s.sources ?? []).map((src: Record<string, unknown>) => ({
+                chunkId: src.chunkId as string,
+                content: (src.content as string) ?? '',
+                score: src.score as number,
+                sourceId: src.sourceId as string,
+                sourceName: src.sourceName as string | undefined,
+                sourceUrl: src.sourceUrl as string | undefined,
+              })),
+              webCitations: [],
+              groundingScore: s.groundingScore ?? 0,
+              citationLinks: citationLinksList, // 提供正确的 citationLinks，防止 toHtml() 清除 [N] 标记
+            })),
+            trustScore: fixture.trustScore ?? 0.5,
+            documentStyle: fixture.documentStyle ?? "presentation",
+            title: fixture.title,
+            conflictResolution: fixture.conflictResolution,
+            sourceRunId: fixture.caseId, // 标记为 fixture 数据，用于后续判断
+            provenanceNodes: fixture.provenanceNodes ?? [],
+          } as GenerateDocResult & { sourceRunId: string; provenanceNodes: Record<string, unknown>[] };
+        } else {
+          let sectionIndex = 0;
+          const totalSections = outline.length;
+          result = await generateDocument({
+            title, outline, userRequest,
+            format: effectiveFormat,
+            modelId, apiKey,
+            providerPreference: providerPreference ?? [],
+            providerBaseUrls,
+          }, (section, phase) => {
+            if (phase === "start") {
+              const progressJson = JSON.stringify({ currentChapter: section.title, index: sectionIndex, total: totalSections });
+              dbRun(`UPDATE generation_runs SET progress_json = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+                [progressJson, runId]);
+              logger.info(`[Generation] PPT POST 进度: [${sectionIndex + 1}/${totalSections}] ${section.title}`);
+            } else {
+              sectionIndex++;
+            }
+          });
+        }
+
+        const stubExtra = result as GenerateDocResult & { citations?: CitationItem[]; provenanceNodes?: ProvenanceNodeRow[]; sourceRunId?: string };
+
+        const htmlContent = stubExtra.sourceRunId && stubExtra.content && stubExtra.content.length > 0
+          ? stubExtra.content
+          : toHtml(result, `${req.protocol || "http"}://${req.get("host") || "localhost:3000"}`);
+
+        // 构建 PPT 专用 payload
+        const pptPayload = toPptPayload(result);
+
+        dbRun(`UPDATE generation_runs SET title = ?, content = ?, ppt_payload = ?, status = 'done', trust_score = ?, document_style = ?, conflict_resolution = ?, progress_json = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+          [result.title, htmlContent, JSON.stringify(pptPayload), result.trustScore, result.documentStyle, result.conflictResolution ? JSON.stringify(result.conflictResolution) : null, JSON.stringify({ currentChapter: '', index: result.sections.length, total: result.sections.length }), runId],
+          { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "done" } });
+
+        // 复制/插入 provenance_nodes
+        if (stubExtra.sourceRunId) {
+          const isFixtureData = stubExtra.sourceRunId.startsWith("case-");
+          const fixtureData = isStubMode ? CASE_1783257530743 : null;
+
+          try {
+            if (isFixtureData && stubExtra.provenanceNodes && stubExtra.provenanceNodes.length > 0) {
+              // 直接从 fixture 的 provenanceNodes 插入（fixture 用 camelCase，DB 用 snake_case）
+              for (const node of stubExtra.provenanceNodes) {
+                const n = node as unknown as Record<string, unknown>;
+                dbRun(
+                  `INSERT INTO provenance_nodes (run_id, paragraph_idx, paragraph_title, chunk_id, web_url, web_title, score, grounding_score, is_manual, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))`,
+                  [
+                    runId,
+                    (n.paragraphIdx as number) ?? 0,
+                    (n.paragraphTitle as string) ?? "",
+                    (n.chunkId as string) ?? null,
+                    (n.webUrl as string) ?? null,
+                    (n.webTitle as string) ?? null,
+                    (n.score as number) ?? 0,
+                    (n.groundingScore as number) ?? 0,
+                    0,
+                  ],
+                  { table: "provenance_nodes", recordId: runId, source: "generation-ppt-stub" },
+                );
+              }
+              logger.info(`[Generation] PPT POST 插入 fixture provenance_nodes: ${stubExtra.provenanceNodes.length} 条 → ${runId}`);
+            } else {
+              // 从 DB 中已有的 sourceRunId 复制
+              dbRun(
+                `INSERT INTO provenance_nodes (run_id, paragraph_idx, paragraph_title, chunk_id, web_url, web_title, score, grounding_score, is_manual, created_at)
+                 SELECT ?, paragraph_idx, paragraph_title, chunk_id, web_url, web_title, score, grounding_score, is_manual, datetime('now','localtime')
+                 FROM provenance_nodes WHERE run_id = ?`,
+                [runId, stubExtra.sourceRunId],
+                { table: "provenance_nodes", recordId: runId, source: "generation-ppt-stub" },
+              );
+              logger.info(`[Generation] PPT POST 复制 provenance_nodes: ${stubExtra.sourceRunId} → ${runId}`);
+            }
+          } catch (provErr) {
+            logger.warn(`[Generation] PPT POST provenance_nodes 插入失败: ${provErr instanceof Error ? provErr.message : String(provErr)}`);
+          }
+
+          // 插入 trust_evaluations
+          try {
+            if (isFixtureData && fixtureData && (fixtureData as Record<string, unknown>).trustMetrics) {
+              // 从 fixture 的 trustMetrics 直接插入
+              const evalId = crypto.randomUUID();
+              dbRun(
+                `INSERT INTO trust_evaluations (id, run_id, metrics, created_at) VALUES (?, ?, ?, datetime('now','localtime'))`,
+                [evalId, runId, JSON.stringify((fixtureData as Record<string, unknown>).trustMetrics)],
+                { table: "trust_evaluations", recordId: evalId, source: "generation-ppt-stub" },
+              );
+              logger.info(`[Generation] PPT POST 插入 fixture trust_evaluations → ${runId}`);
+            } else {
+              // 从 DB 中已有的 sourceRunId 复制
+              const sourceEval = dbGet<{ metrics: string }>(
+                "SELECT metrics FROM trust_evaluations WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
+                [stubExtra.sourceRunId],
+              );
+              if (sourceEval?.metrics) {
+                const evalId = crypto.randomUUID();
+                dbRun(
+                  `INSERT INTO trust_evaluations (id, run_id, metrics, created_at) VALUES (?, ?, ?, datetime('now','localtime'))`,
+                  [evalId, runId, sourceEval.metrics],
+                  { table: "trust_evaluations", recordId: evalId, source: "generation-ppt-stub" },
+                );
+                logger.info(`[Generation] PPT POST 复制 trust_evaluations: ${stubExtra.sourceRunId} → ${runId}`);
+              }
+            }
+          } catch (evalErr) {
+            logger.warn(`[Generation] PPT POST trust_evaluations 插入失败: ${evalErr instanceof Error ? evalErr.message : String(evalErr)}`);
+          }
+        }
+
+        logger.info(`[Generation] PPT POST 生成完成: ${result.title}, slides=${pptPayload.slides.length}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[Generation] PPT POST 生成失败: ${msg}`);
+        dbRun(`UPDATE generation_runs SET status = 'crashed', progress_json = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+          [JSON.stringify({ error: msg }), runId],
+          { table: "generation_runs", recordId: runId, source: "generation" });
+      }
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Generation] PPT POST 触发失败: ${msg}`);
+    if (!res.headersSent) {
+      res.status(500).json({ ok: false, error: msg });
+    }
+  }
+});
+
 /** GET /api/generation/status/:runId — 轮询生成状态 */
 generationRouter.get("/status/:runId", (req, res) => {
   try {
     const { runId } = req.params;
-    const run = dbGet<{ id: string; title: string; status: string; content: string; excel_payload: string | null; progress_json: string | null; trust_score: number | null; document_style: string | null; outline: string; format: string }>(
-      "SELECT id, title, status, content, excel_payload, progress_json, trust_score, document_style, outline, format FROM generation_runs WHERE id = ?",
+    const run = dbGet<{ id: string; title: string; status: string; content: string; excel_payload: string | null; word_payload: string | null; ppt_payload: string | null; progress_json: string | null; trust_score: number | null; document_style: string | null; outline: string; format: string }>(
+      "SELECT id, title, status, content, excel_payload, word_payload, ppt_payload, progress_json, trust_score, document_style, outline, format FROM generation_runs WHERE id = ?",
       [runId],
     );
 
@@ -887,6 +1282,8 @@ generationRouter.get("/status/:runId", (req, res) => {
 
     if (run.status === "done") {
       const excelPayload = run.excel_payload ? JSON.parse(run.excel_payload) : null;
+      const wordPayload = run.word_payload ? JSON.parse(run.word_payload) : null;
+      const pptPayload = run.ppt_payload ? JSON.parse(run.ppt_payload) : null;
       res.json({
         ok: true,
         status: "done",
@@ -894,6 +1291,8 @@ generationRouter.get("/status/:runId", (req, res) => {
         title: run.title,
         progress: { currentChapter: '', index: outline.length, total: outline.length },
         excelPayload,
+        wordPayload,
+        pptPayload,
         trustScore: run.trust_score,
         documentStyle: run.document_style,
       });
@@ -1685,6 +2084,44 @@ generationRouter.get("/:id/export/:format", async (req, res) => {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[Generation] 导出失败: ${msg}`);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** GET /api/generation/:id/pptx-base64 — 生成 PPTX 并返回 base64（供 PowerPoint Add-in insertSlidesFromBase64 使用） */
+generationRouter.get("/:id/pptx-base64", async (req, res) => {
+  try {
+    const run = dbGet<any>("SELECT * FROM generation_runs WHERE id = ?", [req.params.id]);
+    if (!run) {
+      res.status(404).json({ ok: false, error: "Not found" });
+      return;
+    }
+
+    const sections = run.content
+      ? parseHtmlSectionsForPPT(run.content, run.title)
+      : [];
+
+    const citations = run.content ? parseCitations(run.content) : [];
+
+    const protocol = req.protocol || "http";
+    const host = req.get("host") || "localhost:3000";
+    const baseUrl = `${protocol}://${host}`;
+
+    const resolvedCitations = citations.map((c) => {
+      if (c.url && c.url.startsWith("/")) {
+        return { ...c, url: `${baseUrl}${c.url}` };
+      }
+      return c;
+    });
+
+    const result = await exportDocument("pptx", run.title, sections, resolvedCitations);
+    const base64 = result.buffer.toString("base64");
+
+    logger.info(`[Generation] PPTX base64 生成成功: ${run.title}, size=${result.buffer.length} bytes`);
+    res.json({ ok: true, base64, title: run.title, slideCount: sections.length + 2 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Generation] PPTX base64 生成失败: ${msg}`);
     res.status(500).json({ ok: false, error: msg });
   }
 });

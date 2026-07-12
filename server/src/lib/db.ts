@@ -293,13 +293,21 @@ function migrate(db: Database.Database): void {
       db.exec("ALTER TABLE generation_runs ADD COLUMN progress_json TEXT");
       logger.info("[DB] Migration: added generation_runs.progress_json");
     }
+    if (!runColNames2.has("word_payload")) {
+      db.exec("ALTER TABLE generation_runs ADD COLUMN word_payload TEXT");
+      logger.info("[DB] Migration: added generation_runs.word_payload");
+    }
+    if (!runColNames2.has("ppt_payload")) {
+      db.exec("ALTER TABLE generation_runs ADD COLUMN ppt_payload TEXT");
+      logger.info("[DB] Migration: added generation_runs.ppt_payload");
+    }
   } catch (e) {
     // 表可能还不存在，CREATE TABLE 已经处理了
   }
 
   // 设置版本号
-  if (versionRow < 5) {
-    db.pragma("user_version = 5");
+  if (versionRow < 6) {
+    db.pragma("user_version = 6");
   }
 
   // ── 种子数据：当前用户（黄薇）──

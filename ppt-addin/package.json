@@ -1,0 +1,31 @@
+{
+  "name": "i-write-ppt-addin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "i-Write PowerPoint Add-in — AI 驱动的可信演示文稿生成",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "sideload": "office-addin-debugging start manifest.xml --app powerpoint"
+  },
+  "dependencies": {
+    "@fluentui/react-components": "^9.56.0",
+    "@fluentui/react-icons": "^2.0.246",
+    "@microsoft/fetch-event-source": "^2.0.1",
+    "@tanstack/react-query": "^5.62.0",
+    "axios": "^1.7.9",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/office-js": "^1.0.376",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "office-addin-debugging": "^6.0.4",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0"
+  }
+}

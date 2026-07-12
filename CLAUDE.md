@@ -1,6 +1,17 @@
 # CLAUDE.md — i-Write 开发指南
 
 
+## 核心原则：每次改动后通读 bug-list.md
+
+**每次代码改动后，必须读一遍 `docs/bug-list.md`，确保所有已修复的 bug 没有 regression，且新改动不引入已知 bug 模式。**
+
+- `docs/bug-list.md` 记录了用户提过的所有 bug 及其根因和修复方案
+- 改动前先读一遍，避免重复犯同样的错误
+- 改动后再读一遍，确认没有引入 regression
+- 发现新 bug 时追加到 `docs/bug-list.md` 末尾
+
+---
+
 ## 核心原则：两类 Key 严格隔离
 
 1. **APP 用户 Key**：用户在 APP 设置页配置，存入 server keyStore
