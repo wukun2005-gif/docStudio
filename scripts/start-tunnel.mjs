@@ -7,9 +7,10 @@
  * Excel/Word Online 在云端运行，iframe 无法访问 localhost，必须通过隧道。
  *
  * 隧道端口映射：
- *   3001 → Excel Add-in (office-addin)
+ *   3001 → Excel Add-in (excel-addin)
  *   3002 → Word Add-in (word-addin)
  *   3003 → PowerPoint Add-in (ppt-addin)
+ *   3004 → Outlook Add-in (outlook-addin)
  *
  * 前置步骤（只需一次）：
  *   devtunnel user login
@@ -17,11 +18,13 @@
  *   devtunnel port create iwrite-addin -p 3001
  *   devtunnel port create iwrite-addin -p 3002
  *   devtunnel port create iwrite-addin -p 3003
+ *   devtunnel port create iwrite-addin -p 3004
  *
  * 输出：
- *   office-addin/.tunnel-url + manifest.xml（端口 3001）
+ *   excel-addin/.tunnel-url + manifest.xml（端口 3001）
  *   word-addin/.tunnel-url + manifest.xml（端口 3002）
  *   ppt-addin/.tunnel-url + manifest.xml（端口 3003）
+ *   outlook-addin/.tunnel-url + manifest.xml（端口 3004）
  */
 
 import { spawn } from 'node:child_process';
@@ -35,7 +38,7 @@ const ROOT = resolve(__dirname, '..');
 const ADDINS = [
   {
     name: 'Excel',
-    dir: resolve(ROOT, 'office-addin'),
+    dir: resolve(ROOT, 'excel-addin'),
     port: 3001,
     localhostUrl: 'https://localhost:3001',
   },
@@ -50,6 +53,12 @@ const ADDINS = [
     dir: resolve(ROOT, 'ppt-addin'),
     port: 3003,
     localhostUrl: 'https://localhost:3003',
+  },
+  {
+    name: 'Outlook',
+    dir: resolve(ROOT, 'outlook-addin'),
+    port: 3004,
+    localhostUrl: 'https://localhost:3004',
   },
 ];
 

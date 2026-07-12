@@ -1,0 +1,14 @@
+/* Outlook Add-in 全局样式（极简，主要靠 @fluentui/react-components） */
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  font-size: 14px;
+  color: #242424;
+  background: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}

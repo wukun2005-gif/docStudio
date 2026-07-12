@@ -301,6 +301,10 @@ function migrate(db: Database.Database): void {
       db.exec("ALTER TABLE generation_runs ADD COLUMN ppt_payload TEXT");
       logger.info("[DB] Migration: added generation_runs.ppt_payload");
     }
+    if (!runColNames2.has("email_payload")) {
+      db.exec("ALTER TABLE generation_runs ADD COLUMN email_payload TEXT");
+      logger.info("[DB] Migration: added generation_runs.email_payload");
+    }
   } catch (e) {
     // 表可能还不存在，CREATE TABLE 已经处理了
   }

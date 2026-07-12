@@ -11,6 +11,7 @@ import { extractChartSpecs } from "../lib/chartSpecParser.js";
 import { toExcelPayload } from "../lib/excelPayloadBuilder.js";
 import { toWordPayload } from "../lib/wordPayloadBuilder.js";
 import { toPptPayload } from "../lib/pptPayloadBuilder.js";
+import { toEmailPayload } from "../lib/emailPayloadBuilder.js";
 import { buildProvenanceTree, getProvenanceByRunId } from "../lib/provenanceTree.js";
 import { dbRun, dbGet, dbAll, dbTransaction } from "../lib/dbQuery.js";
 import { logger } from "../lib/logger.js";
@@ -18,7 +19,7 @@ import type { OutlineSection } from "../lib/narrativeEngine.js";
 import type { QueryAnalysis } from "../lib/queryAnalyzer.js";
 import { CASE_1783257530743 } from "../providers/fixtures/case-1783257530743.js";
 import { CASE_1782966166476 } from "../providers/fixtures/case-1782966166476.js";
-import { readCaseFromDb, readWordCaseFromDb, type CitationItem, type ProvenanceNodeRow } from "../lib/stubDataReader.js";
+import { readCaseFromDb, readWordCaseFromDb, readOutlookCaseFromDb, type CitationItem, type ProvenanceNodeRow } from "../lib/stubDataReader.js";
 import type { CitationLink } from "../lib/contentCleaner.js";
 
 export const generationRouter = Router();
@@ -1263,12 +1264,230 @@ generationRouter.post("/ppt", async (req, res) => {
   }
 });
 
+/** POST /api/generation/email — 触发 Outlook 邮件草稿生成，立即返回 runId */
+generationRouter.post("/email", async (req, res) => {
+  let runId = "";
+  try {
+    const { title, outline, format, providerPreference, modelId, apiKey, providerBaseUrls, userRequest } = req.body;
+
+    if (!title || !outline) {
+      res.status(400).json({ ok: false, error: "title and outline are required" });
+      return;
+    }
+
+    // 1. 并发去重（同 word 模式）
+    const isStubMode = providerPreference?.includes("stub") || providerPreference?.length === 0 || !providerPreference;
+    const existing = dbGet<{ id: string; created_at: string }>(
+      "SELECT id, created_at FROM generation_runs WHERE title = ? AND status = 'generating' AND format = 'email'",
+      [title],
+    );
+    if (existing) {
+      const STALE_THRESHOLD_SECONDS = 10 * 60;
+      const staleCheck = dbGet<{ stale: number }>(
+        `SELECT (strftime('%s', 'now', 'localtime') - strftime('%s', ?)) > ${STALE_THRESHOLD_SECONDS} AS stale`,
+        [existing.created_at],
+      );
+      if (staleCheck?.stale === 1) {
+        dbRun(`UPDATE generation_runs SET status = 'crashed' WHERE id = ?`, [existing.id],
+          { table: "generation_runs", recordId: existing.id, source: "generation" });
+      } else if (isStubMode) {
+        logger.info(`[Generation] Email POST stub mode: 检测到同名 generating 记录 ${existing.id}，直接返回`);
+        res.json({ ok: true, runId: existing.id });
+        return;
+      } else {
+        res.status(409).json({ ok: false, error: "同名邮件正在生成中，请等待完成", existingRunId: existing.id });
+        return;
+      }
+    }
+
+    // 2. 插入 generating 记录
+    runId = crypto.randomUUID();
+    const effectiveFormat = format ?? "email";
+    dbRun(`INSERT INTO generation_runs (id, title, outline, format, status) VALUES (?, ?, ?, ?, ?)`,
+      [runId, title, JSON.stringify(outline), effectiveFormat, "generating"],
+      { table: "generation_runs", recordId: runId, source: "generation", newData: { title, format: effectiveFormat, status: "generating" } });
+
+    logger.info(`[Generation] Email POST 触发生成: ${title}, runId=${runId}, 章节数=${outline.length}`);
+
+    // 3. 立即返回 runId
+    res.json({ ok: true, runId });
+
+    // 4. 后台异步执行
+    setImmediate(async () => {
+      try {
+        const isStubMode = providerPreference?.includes("stub") || providerPreference?.length === 0 || !providerPreference;
+        let result: GenerateDocResult;
+
+        if (isStubMode) {
+          // Email stub 模式：从 DB 读 case-1782296242386
+          const dbCase = readOutlookCaseFromDb();
+          await new Promise(r => setTimeout(r, 500));
+
+          if (!dbCase) {
+            logger.warn(`[Generation] Email POST stub mode: case-1782296242386 未在 DB 中找到，使用 fallback 构造`);
+            // Fallback：构造空邮件草稿
+            result = {
+              content: "",
+              sections: [{
+                title: "邮件正文",
+                content: "<p>（未找到 case-1782296242386 数据）</p>",
+                sources: [],
+                webCitations: [],
+                groundingScore: 0,
+                citationLinks: [],
+              }],
+              trustScore: 0.3,
+              documentStyle: "email",
+              title: title,
+            } as GenerateDocResult;
+          } else {
+            logger.info(`[Generation] Email POST stub mode: 从 DB 读 case-1782296242386, sections=${dbCase.sections.length}`);
+            // 构造 GenerateDocResult 复用 toEmailPayload
+            const allCitations: Array<{ index: number; title: string; url: string; sourceId?: string }> = [];
+            const seenCiteKeys = new Set<string>();
+            let citeIdx = 1;
+            for (const sec of dbCase.sections) {
+              for (const src of sec.sources ?? []) {
+                const key = (src.sourceUrl || src.sourceId || src.sourceName || "").trim();
+                if (!key || seenCiteKeys.has(key)) continue;
+                seenCiteKeys.add(key);
+                allCitations.push({
+                  index: citeIdx++,
+                  title: src.sourceName || `来源 ${citeIdx - 1}`,
+                  url: src.sourceUrl || "",
+                  sourceId: src.sourceId,
+                });
+              }
+            }
+
+            result = {
+              content: dbCase.content,
+              sections: dbCase.sections.map(s => ({
+                title: s.title,
+                content: s.content,
+                sources: s.sources ?? [],
+                webCitations: [],
+                groundingScore: 0,
+                citationLinks: allCitations.map(c => ({ index: c.index, title: c.title, url: c.url, sourceId: c.sourceId ?? "" })),
+              })),
+              trustScore: dbCase.trustScore ?? 0.93,
+              documentStyle: "email",
+              title: dbCase.title,
+              provenanceNodes: dbCase.provenanceNodes,
+              sourceRunId: dbCase.sourceRunId, // 用于 provenance 复制
+            } as unknown as GenerateDocResult;
+          }
+        } else {
+          // 真实 LLM 模式（与 word/ppt 一致）
+          result = await generateDocument({
+            title, outline, userRequest,
+            format: effectiveFormat,
+            modelId, apiKey,
+            providerPreference: providerPreference ?? [],
+            providerBaseUrls,
+          });
+        }
+
+        // 5. 构造 email_payload
+        const stubExtra = result as GenerateDocResult & { citations?: CitationItem[]; provenanceNodes?: ProvenanceNodeRow[]; sourceRunId?: string };
+        const emailCitations: CitationItem[] = (stubExtra.citations ?? []).map((c) => ({
+          index: c.index,
+          title: c.title,
+          url: c.url,
+        }));
+        // 如果 result 没有 citations，从 result.sections[].sources 推
+        if (emailCitations.length === 0) {
+          const seenKeys = new Set<string>();
+          let idx = 1;
+          for (const sec of result.sections) {
+            for (const src of sec.sources ?? []) {
+              const key = (src.sourceUrl || src.sourceId || src.sourceName || "").trim();
+              if (!key || seenKeys.has(key)) continue;
+              seenKeys.add(key);
+              emailCitations.push({
+                index: idx++,
+                title: src.sourceName || `来源 ${idx - 1}`,
+                url: src.sourceUrl || (src.sourceId ? `/api/knowledge/sources/${src.sourceId}/file` : ""),
+              });
+            }
+          }
+        }
+
+        const emailPayload = toEmailPayload(result, {
+          citations: emailCitations,
+        });
+
+        // 6. 写回 DB
+        const htmlContent = stubExtra.sourceRunId && stubExtra.content && stubExtra.content.length > 0
+          ? stubExtra.content
+          : toHtml(result, `${req.protocol || "http"}://${req.get("host") || "localhost:3000"}`);
+
+        dbRun(`UPDATE generation_runs SET title = ?, content = ?, email_payload = ?, status = 'done', trust_score = ?, document_style = ?, progress_json = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+          [result.title, htmlContent, JSON.stringify(emailPayload), result.trustScore, result.documentStyle, JSON.stringify({ currentChapter: '', index: result.sections.length, total: result.sections.length }), runId],
+          { table: "generation_runs", recordId: runId, source: "generation", newData: { status: "done" } });
+
+        // 7. 复制 provenance_nodes（与 ppt 模式一致）
+        if (stubExtra.sourceRunId) {
+          try {
+            dbRun(
+              `INSERT INTO provenance_nodes (run_id, paragraph_idx, paragraph_title, chunk_id, web_url, web_title, score, grounding_score, is_manual, created_at)
+               SELECT ?, paragraph_idx, paragraph_title, chunk_id, web_url, web_title, score, grounding_score, is_manual, datetime('now','localtime')
+               FROM provenance_nodes WHERE run_id = ?`,
+              [runId, stubExtra.sourceRunId],
+              { table: "provenance_nodes", recordId: runId, source: "generation-email-stub" },
+            );
+            logger.info(`[Generation] Email POST 复制 provenance_nodes: ${stubExtra.sourceRunId} → ${runId}`);
+          } catch (provErr) {
+            logger.warn(`[Generation] Email POST provenance_nodes 复制失败: ${provErr instanceof Error ? provErr.message : String(provErr)}`);
+          }
+
+          // 8. 复制 trust_evaluations
+          try {
+            const sourceEval = dbGet<{ metrics: string }>(
+              "SELECT metrics FROM trust_evaluations WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
+              [stubExtra.sourceRunId],
+            );
+            if (sourceEval?.metrics) {
+              const evalId = crypto.randomUUID();
+              dbRun(
+                `INSERT INTO trust_evaluations (id, run_id, metrics, created_at) VALUES (?, ?, ?, datetime('now','localtime'))`,
+                [evalId, runId, sourceEval.metrics],
+                { table: "trust_evaluations", recordId: evalId, source: "generation-email-stub" },
+              );
+              logger.info(`[Generation] Email POST 复制 trust_evaluations: ${stubExtra.sourceRunId} → ${runId}`);
+            }
+          } catch (evalErr) {
+            logger.warn(`[Generation] Email POST trust_evaluations 复制失败: ${evalErr instanceof Error ? evalErr.message : String(evalErr)}`);
+          }
+        }
+
+        logger.info(
+          `[Generation] Email POST 生成完成: ${result.title}, sections=${result.sections.length}, ` +
+          `bodyLen=${emailPayload.bodyCharCount}, subject="${emailPayload.subject}"`,
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[Generation] Email POST 生成失败: ${msg}`);
+        dbRun(`UPDATE generation_runs SET status = 'crashed', progress_json = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+          [JSON.stringify({ error: msg }), runId],
+          { table: "generation_runs", recordId: runId, source: "generation" });
+      }
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Generation] Email POST 触发失败: ${msg}`);
+    if (!res.headersSent) {
+      res.status(500).json({ ok: false, error: msg });
+    }
+  }
+});
+
 /** GET /api/generation/status/:runId — 轮询生成状态 */
 generationRouter.get("/status/:runId", (req, res) => {
   try {
     const { runId } = req.params;
-    const run = dbGet<{ id: string; title: string; status: string; content: string; excel_payload: string | null; word_payload: string | null; ppt_payload: string | null; progress_json: string | null; trust_score: number | null; document_style: string | null; outline: string; format: string }>(
-      "SELECT id, title, status, content, excel_payload, word_payload, ppt_payload, progress_json, trust_score, document_style, outline, format FROM generation_runs WHERE id = ?",
+    const run = dbGet<{ id: string; title: string; status: string; content: string; excel_payload: string | null; word_payload: string | null; ppt_payload: string | null; email_payload: string | null; progress_json: string | null; trust_score: number | null; document_style: string | null; outline: string; format: string }>(
+      "SELECT id, title, status, content, excel_payload, word_payload, ppt_payload, email_payload, progress_json, trust_score, document_style, outline, format FROM generation_runs WHERE id = ?",
       [runId],
     );
 
@@ -1284,6 +1503,7 @@ generationRouter.get("/status/:runId", (req, res) => {
       const excelPayload = run.excel_payload ? JSON.parse(run.excel_payload) : null;
       const wordPayload = run.word_payload ? JSON.parse(run.word_payload) : null;
       const pptPayload = run.ppt_payload ? JSON.parse(run.ppt_payload) : null;
+      const emailPayload = run.email_payload ? JSON.parse(run.email_payload) : null;
       res.json({
         ok: true,
         status: "done",
@@ -1293,6 +1513,7 @@ generationRouter.get("/status/:runId", (req, res) => {
         excelPayload,
         wordPayload,
         pptPayload,
+        emailPayload,
         trustScore: run.trust_score,
         documentStyle: run.document_style,
       });

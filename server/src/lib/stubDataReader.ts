@@ -399,6 +399,155 @@ export function readWordCaseFromDb(): StubCaseResult | null {
   };
 }
 
+// ── Outlook Add-in 专用：按 case ID 读取 case 1782296242386 ──
+
+const OUTLOOK_CASE_ID = "case-1782296242386";
+
+/**
+ * 从 DB 读取 Outlook Add-in 专用 case（case 1782296242386）的元数据。
+ *
+ * 数据存储路径：
+ *   sync_data 表 (store_name='cases', record_id='case-1782296242386')
+ *     → JSON 中 lastRunId 字段指向 generation_runs 表
+ *     → generation_runs 表有 content(HTML)、outline、trust_score
+ *     → provenance_nodes 表有来源树
+ *     → trust_evaluations 表有评估指标
+ */
+export function readOutlookOutlineFromDb(): Array<{
+  id: string;
+  title: string;
+  level: number;
+  children: unknown[];
+  description: string;
+}> | null {
+  const caseRow = dbGet<{ data: string }>(
+    "SELECT data FROM sync_data WHERE store_name = 'cases' AND record_id = ?",
+    [OUTLOOK_CASE_ID],
+  );
+
+  if (!caseRow?.data) {
+    logger.warn(`[StubDataReader] Outlook case ${OUTLOOK_CASE_ID} 未在 sync_data 表中找到`);
+    return null;
+  }
+
+  let caseData: { outline?: Array<{ title: string; description?: string; children?: unknown[] }> };
+  try {
+    caseData = JSON.parse(caseRow.data);
+  } catch {
+    logger.warn(`[StubDataReader] Outlook case outline JSON 解析失败`);
+    return null;
+  }
+
+  if (!caseData.outline || caseData.outline.length === 0) {
+    logger.warn(`[StubDataReader] Outlook case outline 为空`);
+    return null;
+  }
+
+  logger.info(`[StubDataReader] Outlook case outline: ${caseData.outline.length} sections`);
+  return caseData.outline.map(
+    (item: { title: string; description?: string; children?: unknown[] }, i: number) => ({
+      id: `s${i + 1}`,
+      title: item.title,
+      level: 1,
+      children: item.children ?? [],
+      description: item.description ?? "",
+    }),
+  );
+}
+
+/**
+ * 从 DB 读取 Outlook Add-in 专用 case（case 1782296242386）数据。
+ * 复用 readWordCaseFromDb 的实现，区别仅在 caseId 常量与 documentStyle 默认值。
+ */
+export function readOutlookCaseFromDb(): StubCaseResult | null {
+  // 1. 从 sync_data 表读取 case 元数据
+  const caseRow = dbGet<{ data: string }>(
+    "SELECT data FROM sync_data WHERE store_name = 'cases' AND record_id = ?",
+    [OUTLOOK_CASE_ID],
+  );
+
+  if (!caseRow?.data) {
+    logger.warn(`[StubDataReader] Outlook case ${OUTLOOK_CASE_ID} 未在 sync_data 表中找到`);
+    return null;
+  }
+
+  let caseData: { lastRunId?: string; title?: string; outline?: Array<{ title: string }>; trustScore?: number };
+  try {
+    caseData = JSON.parse(caseRow.data);
+  } catch {
+    logger.warn(`[StubDataReader] Outlook case ${OUTLOOK_CASE_ID} JSON 解析失败`);
+    return null;
+  }
+
+  const runId = caseData.lastRunId;
+  if (!runId) {
+    logger.warn(`[StubDataReader] Outlook case ${OUTLOOK_CASE_ID} 无 lastRunId 字段`);
+    return null;
+  }
+
+  logger.info(`[StubDataReader] Outlook case ${OUTLOOK_CASE_ID} → lastRunId=${runId}`);
+
+  // 2. 从 generation_runs 表读取生成记录
+  const run = dbGet<DbRun>(
+    "SELECT id, title, content, outline, trust_score, document_style FROM generation_runs WHERE id = ? AND status = 'done'",
+    [runId],
+  );
+
+  if (!run || !run.content) {
+    logger.warn(`[StubDataReader] Outlook case generation_runs 记录 ${runId} 未找到或无内容`);
+    return null;
+  }
+
+  logger.info(
+    `[StubDataReader] Outlook case 从 DB 读取: runId=${run.id}, title=${run.title}, contentLen=${run.content.length}`,
+  );
+
+  // 3. 解析 outline（优先用 generation_runs 的，fallback 到 sync_data 的）
+  let outline: Array<{ title: string }> = [];
+  if (run.outline) {
+    try {
+      outline = JSON.parse(run.outline);
+    } catch {
+      logger.warn("[StubDataReader] Outlook case outline JSON 解析失败，使用默认标题");
+    }
+  }
+  if (outline.length === 0 && caseData.outline) {
+    outline = caseData.outline;
+  }
+
+  // 4. 查询来源树
+  const provenanceNodes = readProvenanceFromDb(run.id);
+  logger.info(`[StubDataReader] Outlook case 查询到 ${provenanceNodes.length} 个来源树节点`);
+
+  // 5. 从 HTML footer 解析参考来源列表
+  const citations = buildCitationsFromHtml(run.content);
+  logger.info(`[StubDataReader] Outlook case 解析到 ${citations.length} 个参考来源`);
+
+  // 6. 解析 HTML 内容为 sections
+  const sections = parseHtmlIntoSections(run.content, outline);
+
+  if (sections.length === 0) {
+    logger.warn("[StubDataReader] Outlook case HTML 解析后未得到任何 section");
+    return null;
+  }
+
+  logger.info(
+    `[StubDataReader] Outlook case 解析完成: ${sections.length} sections, ` +
+      sections.map((s) => s.title).join(", "),
+  );
+
+  return {
+    content: run.content,
+    sections,
+    trustScore: run.trust_score ?? caseData.trustScore ?? 0.5,
+    documentStyle: run.document_style ?? "email",
+    title: run.title,
+    citations,
+    provenanceNodes,
+    sourceRunId: run.id,
+  };
+}
+
 // ── 内部：从 HTML footer 解析参考来源列表 ──────────────────
 
 /**
