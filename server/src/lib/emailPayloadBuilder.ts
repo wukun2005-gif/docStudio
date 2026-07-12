@@ -39,7 +39,6 @@ export interface EmailWritePayload {
 /** toEmailPayload 的额外参数 */
 export interface EmailPayloadExtra {
   citations?: CitationItem[];
-  provenanceNodes?: ProvenanceNodeRow[];
 }
 
 // ═══════════════════════════════════════════════════════════
