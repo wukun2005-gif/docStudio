@@ -21,14 +21,22 @@ export interface CitationItem {
   url: string;
 }
 
+export interface SourceTreeNode {
+  title: string;
+  score: number;
+  citations: CitationItem[];
+}
+
 export interface EmailWritePayload {
   subject: string;
   bodyHtml: string;
   bodyText: string;
   bodyCharCount: number;
-  citations: Array<{ index: number; title: string; url: string }>;
+  citations: CitationItem[];
   trustScore: number;
   documentStyle: string;
+  paragraphScores?: Array<{ title: string; score: number }>;
+  sourceTree?: SourceTreeNode[];
 }
 
 export interface OutlineSection {

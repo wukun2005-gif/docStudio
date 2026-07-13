@@ -9,6 +9,7 @@ export type SourceType =
   | "onedrive_file"    // OneDrive 文件
   | "sharepoint_file"  // SharePoint 文件
   | "outlook_email"    // Outlook 邮件
+  | "outlook_contact"  // Outlook 联系人
   | "teams_chat";      // Teams 聊天
 export type SourceStatus = "processing" | "ready" | "error";
 
@@ -59,7 +60,7 @@ export interface SearchResult {
 
 export interface RemoteIndex {
   id: string;
-  sourceType: "github_repo" | "onedrive" | "sharepoint";
+  sourceType: "github_repo" | "onedrive" | "sharepoint" | "outlook_email" | "outlook_contact";
   remoteId: string;         // 平台侧 ID（GitHub: owner/repo, OneDrive: fileId）
   name: string;
   url?: string;
@@ -87,7 +88,7 @@ export type SyncJobStatus = "pending" | "running" | "completed" | "error";
 
 export interface SyncJob {
   id: string;
-  sourceType: "github_repo" | "onedrive";
+  sourceType: "github_repo" | "onedrive" | "outlook_email" | "outlook_contact";
   config: SyncJobConfig;
   status: SyncJobStatus;
   progress?: SyncJobProgress;

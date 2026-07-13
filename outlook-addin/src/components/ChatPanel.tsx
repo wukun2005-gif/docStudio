@@ -1,123 +1,225 @@
 /**
- * ChatPanel — 用户输入需求面板
+ * ChatPanel — Chat 对话面板
+ *
+ * 用户输入邮件需求，AI 返回大纲。
+ * 严格对齐 word-addin 的 ChatPanel 模式。
+ * 消息状态由父组件(WriteTab)管理，跨阶段持久化。
  */
-import { useState, useRef, useEffect } from "react";
-import { Textarea, tokens, Card } from "@fluentui/react-components";
-import { Send24Filled } from "@fluentui/react-icons";
+import { useState, useRef, useEffect } from 'react';
+import { Card, Textarea, Button, Text, makeStyles, tokens } from '@fluentui/react-components';
+import type { TextareaOnChangeData } from '@fluentui/react-components';
+import { Send24Regular } from '@fluentui/react-icons';
+import { apiClient } from '../services/apiClient';
+import type { OutlineItem } from './WriteTab';
 
-export interface ChatPanelProps {
-  onSubmit: (request: string) => void;
-  mailSubject?: string;
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'ai' | 'error';
+  content: string;
+  timestamp: number;
 }
 
-const PRESET_PROMPTS = [
-  "帮我向王芳写一封邮件，汇报本周核心产品工作进展",
-  "给团队发一封周报邮件，列出本周完成的关键任务",
-  "回复客户的咨询邮件，礼貌说明我们的产品方案",
-];
+interface ChatPanelProps {
+  messages: ChatMessage[];
+  onMessagesChange: (updater: (prev: ChatMessage[]) => ChatMessage[]) => void;
+  onAddMessage: (msg: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
+  onOutlineGenerated: (outline: OutlineItem[], request: string) => void;
+}
 
-export function ChatPanel({ onSubmit, mailSubject }: ChatPanelProps) {
-  const [text, setText] = useState("");
+const useStyles = makeStyles({
+  container: {
+    display: 'flex',
+    flexDirection: 'column',
+    height: '100%',
+    width: '100%',
+    gap: tokens.spacingVerticalS,
+  },
+  messages: {
+    flex: 1,
+    overflowY: 'auto',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalS,
+    padding: `0 ${tokens.spacingHorizontalS}`,
+  },
+  messageUser: {
+    alignSelf: 'flex-end',
+    maxWidth: '85%',
+  },
+  messageAi: {
+    alignSelf: 'flex-start',
+    maxWidth: '85%',
+  },
+  messageError: {
+    alignSelf: 'flex-start',
+    maxWidth: '85%',
+  },
+  bubbleError: {
+    background: tokens.colorPaletteRedBackground2,
+    color: tokens.colorPaletteRedForeground1,
+  },
+  bubble: {
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    borderRadius: tokens.borderRadiusMedium,
+    fontSize: tokens.fontSizeBase200,
+    lineHeight: tokens.lineHeightBase300,
+  },
+  bubbleUser: {
+    background: tokens.colorBrandBackground2,
+    color: tokens.colorBrandForeground1,
+  },
+  bubbleAi: {
+    background: tokens.colorNeutralBackground3,
+    color: tokens.colorNeutralForeground1,
+  },
+  inputArea: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXS,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalS}`,
+    borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+  },
+  inputRow: {
+    display: 'flex',
+    gap: tokens.spacingHorizontalXS,
+    alignItems: 'flex-end',
+    position: 'relative',
+  },
+  textareaWrap: {
+    flex: 1,
+    width: '100%',
+    position: 'relative',
+  },
+  sendButton: {
+    position: 'absolute',
+    right: '6px',
+    bottom: '6px',
+    width: '28px',
+    height: '28px',
+    minWidth: '28px',
+    padding: 0,
+    borderRadius: tokens.borderRadiusCircular,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1,
+  },
+});
+
+export default function ChatPanel({ messages, onMessagesChange, onAddMessage, onOutlineGenerated }: ChatPanelProps) {
+  const styles = useStyles();
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // 自动调整高度（与 word/ppt 一致）
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-  }, [text]);
+  const adjustTextareaHeight = () => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    const maxHeight = 200;
+    textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+  };
 
-  const handleSend = () => {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    onSubmit(trimmed);
+  useEffect(() => {
+    adjustTextareaHeight();
+  }, [input]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages.length, loading]);
+
+  const handleSend = async () => {
+    const trimmed = input.trim();
+    if (!trimmed || loading) return;
+
+    // Add user message immediately
+    onAddMessage({ role: 'user', content: trimmed });
+    setInput('');
+    setLoading(true);
+
+    try {
+      const response = await apiClient.post('/chat', {
+        message: trimmed,
+        format: 'email',
+        providerPreference: ['stub'],
+      });
+
+      const aiContent = response.data?.reply ?? response.data?.content ?? response.data?.message ?? '';
+      onAddMessage({ role: 'ai', content: aiContent });
+
+      const suggestedOutline = response.data?.suggestedOutline ?? response.data?.outline;
+      if (response.data?.type === 'outline_request' && suggestedOutline) {
+        const outlineItems: OutlineItem[] = suggestedOutline.map(
+          (item: { id?: string; title: string; description?: string }, idx: number) => ({
+            id: item.id ?? `outline-${idx}`,
+            title: item.title,
+            description: item.description,
+          })
+        );
+        onOutlineGenerated(outlineItems, trimmed);
+      }
+    } catch (err) {
+      const errorContent = err instanceof Error ? err.message : '请求失败';
+      onAddMessage({ role: 'error', content: errorContent });
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
-      {mailSubject && (
-        <Card style={{ padding: 8, fontSize: 12, color: tokens.colorNeutralForeground3 }}>
-          主题参考：<strong style={{ color: tokens.colorNeutralForeground1 }}>{mailSubject}</strong>
-        </Card>
-      )}
-
-      <div>
-        <div style={{ fontSize: 12, color: tokens.colorNeutralForeground3, marginBottom: 4 }}>
-          告诉我你想写什么邮件
-        </div>
-        <div style={{ position: "relative" }}>
-          <Textarea
-            ref={textareaRef}
-            value={text}
-            onChange={(_, d) => setText(d.value)}
-            placeholder="例：帮我向王芳写一封邮件，汇报本周产品工作进展"
-            rows={1}
-            resize="none"
-            style={{
-              width: "100%",
-              minHeight: 40,
-              resize: "none",
-              paddingRight: 40, // 留 40px 给浮动发送按钮
-              fontSize: 14,
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-          />
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={!text.trim()}
-            title="发送"
-            style={{
-              position: "absolute",
-              right: 8,
-              bottom: 8,
-              width: 28,
-              height: 28,
-              borderRadius: "50%",
-              border: "none",
-              background: text.trim() ? tokens.colorBrandBackground : tokens.colorNeutralBackground3,
-              color: "#fff",
-              cursor: text.trim() ? "pointer" : "not-allowed",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <Send24Filled fontSize={16} />
-          </button>
-        </div>
+    <div className={styles.container}>
+      <div className={styles.messages}>
+        {messages.map((msg) => (
+          <div key={msg.id} className={msg.role === 'user' ? styles.messageUser : msg.role === 'error' ? styles.messageError : styles.messageAi}>
+            <Card className={`${styles.bubble} ${
+              msg.role === 'user' ? styles.bubbleUser :
+              msg.role === 'error' ? styles.bubbleError :
+              styles.bubbleAi
+            }`}>
+              <Text size={200}>{msg.content}</Text>
+            </Card>
+          </div>
+        ))}
+        {loading && (
+          <div className={styles.messageAi}>
+            <Card className={`${styles.bubble} ${styles.bubbleAi}`}>
+              <Text size={200}>正在生成大纲…</Text>
+            </Card>
+          </div>
+        )}
+        <div ref={messagesEndRef} />
       </div>
 
-      <div>
-        <div style={{ fontSize: 12, color: tokens.colorNeutralForeground3, marginBottom: 6 }}>
-          快速开始
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {PRESET_PROMPTS.map((p) => (
-            <button
-              key={p}
-              type="button"
-              onClick={() => onSubmit(p)}
-              style={{
-                textAlign: "left",
-                padding: "8px 12px",
-                fontSize: 12,
-                border: `1px solid ${tokens.colorNeutralStroke2}`,
-                borderRadius: 6,
-                background: tokens.colorNeutralBackground1,
-                cursor: "pointer",
-                color: tokens.colorNeutralForeground1,
+      <div className={styles.inputArea}>
+        <div className={styles.inputRow}>
+          <div className={styles.textareaWrap}>
+            <Textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(_: React.FormEvent<HTMLElement | HTMLTextAreaElement>, data: TextareaOnChangeData) => setInput(data.value ?? '')}
+              onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
               }}
-            >
-              {p}
-            </button>
-          ))}
+              placeholder="例如：帮我写一封邮件汇报本周工作进展..."
+              resize="none"
+              rows={1}
+              disabled={loading}
+              style={{ minHeight: 40, width: '100%', overflowY: 'auto', paddingRight: 40 }}
+            />
+            <Button
+              appearance="primary"
+              icon={<Send24Regular style={{ width: 14, height: 14 }} />}
+              disabled={loading || !input.trim()}
+              onClick={handleSend}
+              className={styles.sendButton}
+              title="发送"
+              aria-label="发送"
+            />
+          </div>
         </div>
       </div>
     </div>

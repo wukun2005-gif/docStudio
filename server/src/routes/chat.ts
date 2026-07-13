@@ -8,7 +8,7 @@ import { generateOutline, getTemplates, getTemplateById } from "../lib/narrative
 import { logger } from "../lib/logger.js";
 import { CASE_1782966166476 } from "../providers/fixtures/case-1782966166476.js";
 import { CASE_1783257530743 } from "../providers/fixtures/case-1783257530743.js";
-import { readOutlineFromDb, readWordOutlineFromDb } from "../lib/stubDataReader.js";
+import { readOutlineFromDb, readWordOutlineFromDb, readOutlookOutlineFromDb } from "../lib/stubDataReader.js";
 
 export const chatRouter = Router();
 
@@ -28,6 +28,7 @@ chatRouter.post("/", async (req, res) => {
       const format = req.body.format as string | undefined;
       const isWord = format === "word";
       const isPpt = format === "ppt";
+      const isEmail = format === "email";
 
       if (isPpt) {
         // PPT stub 模式：使用 case-1783257530743 fixture 大纲
@@ -38,6 +39,23 @@ chatRouter.post("/", async (req, res) => {
           type: "outline_request",
           reply: "已为您生成大纲，请确认后生成 PPT 演示文稿。",
           suggestedOutline: pptOutline,
+          stub: true,
+        });
+        return;
+      }
+
+      if (isEmail) {
+        const emailOutline = readOutlookOutlineFromDb();
+        logger.info(`[Chat] Chat stub mode (Email DB): returning outline with ${emailOutline?.length ?? 0} sections`);
+        res.json({
+          ok: true,
+          type: "outline_request",
+          reply: "已为您生成邮件大纲，请确认后生成邮件。",
+          suggestedOutline: emailOutline ?? [
+            { title: "邮件开头（问候+简要目的）" },
+            { title: "本周核心工作进展" },
+            { title: "下周计划与需要协调事项" },
+          ],
           stub: true,
         });
         return;

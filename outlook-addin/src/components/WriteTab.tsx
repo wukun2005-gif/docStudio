@@ -1,181 +1,112 @@
 /**
- * WriteTab — Outlook Add-in 主交互面板
+ * WriteTab — 写入面板状态机
  *
- * 状态机：
- *   chat（默认）→ user 输入需求 → 触发生成 → outline 显示大纲 → 用户确认
- *   → generating（轮询 status）→ results（显示结果 + 写回邮件按钮）
- *
- * 模式：
- * - Read 模式：只显示结果（写回按钮禁用）
- * - Compose 模式：可写回邮件正文
+ * 四个阶段：chat → outline → generating → results
+ * 严格对齐 word-addin 的 WriteTab 模式。
+ * 聊天消息状态提升到 WriteTab，跨阶段持久化。
  */
-import { useState, useRef } from "react";
-import {
-  Button,
-  MessageBar,
-  MessageBarBody,
-} from "@fluentui/react-components";
-import { ArrowRight24Regular, Checkmark24Regular } from "@fluentui/react-icons";
-import type { MailContext } from "../services/mailContextReader";
-import { generateEmail, getGenerationStatus, type StatusResponse } from "../services/apiClient";
-import { ChatPanel } from "./ChatPanel";
-import { OutlinePanel } from "./OutlinePanel";
-import { WriteProgress } from "./WriteProgress";
-import { ResultsPanel } from "./ResultsPanel";
+import { useState, useCallback } from 'react';
+import ChatPanel, { type ChatMessage } from './ChatPanel';
+import OutlinePanel from './OutlinePanel';
+import WriteProgress, { type GenerationSection } from './WriteProgress';
+import ResultsPanel from './ResultsPanel';
 
-type Stage = "chat" | "outline" | "generating" | "results" | "error";
-
-export interface WriteTabProps {
-  context: MailContext;
+export interface OutlineItem {
+  id: string;
+  title: string;
+  description?: string;
 }
 
-export function WriteTab({ context }: WriteTabProps) {
-  const [stage, setStage] = useState<Stage>("chat");
-  const [userRequest, setUserRequest] = useState("");
-  const [runId, setRunId] = useState<string | null>(null);
-  const [outline, setOutline] = useState<Array<{ title: string; description?: string }>>([]);
-  const [status, setStatus] = useState<StatusResponse | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const startedRef = useRef(false);
+export type WriteStage = 'chat' | 'outline' | 'generating' | 'results';
 
-  /** 1. Chat 提交 → 触发生成 */
-  const handleChatSubmit = async (request: string) => {
-    if (startedRef.current) return;
-    startedRef.current = true;
+const STORAGE_KEY = 'iwrite-outlook-addin-chat-history';
+
+function loadHistory(): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw) as ChatMessage[];
+  } catch {}
+  return [{ id: 'welcome', role: 'ai', content: '你好！请描述你的邮件生成需求。', timestamp: Date.now() }];
+}
+
+export default function WriteTab() {
+  const [stage, setStage] = useState<WriteStage>('chat');
+  const [messages, setMessages] = useState<ChatMessage[]>(loadHistory);
+  const [outline, setOutline] = useState<OutlineItem[]>([]);
+  const [runId, setRunId] = useState<string>('');
+  const [sections, setSections] = useState<GenerationSection[]>([]);
+  const [userRequest, setUserRequest] = useState('');
+
+  const addMessage = useCallback((msg: Omit<ChatMessage, 'id' | 'timestamp'>) => {
+    setMessages(prev => {
+      const next = [...prev, { ...msg, id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), timestamp: Date.now() }];
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next.slice(-50))); } catch {}
+      return next;
+    });
+  }, []);
+
+  const setMessagesDirect = useCallback((updater: React.SetStateAction<ChatMessage[]>) => {
+    setMessages(prev => {
+      const next = typeof updater === 'function' ? (updater as (p: ChatMessage[]) => ChatMessage[])(prev) : updater;
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next.slice(-50))); } catch {}
+      return next;
+    });
+  }, []);
+
+  const handleOutlineGenerated = (newOutline: OutlineItem[], request: string) => {
+    setOutline(newOutline);
     setUserRequest(request);
-    setErrorMsg(null);
-
-    // 构造初始 outline（stub mode 写死 3 段以匹配 case-1782296242386）
-    const initialOutline: Array<{ title: string; description: string }> = [
-      { title: "邮件开头（问候+简要目的）", description: "向王芳致意，概述本周汇报主题" },
-      { title: "本周核心工作进展", description: "详细描述本周完成的关键产品功能 / 项目里程碑" },
-      { title: "下周计划与需要协调事项", description: "下周计划、需要王芳协调或决策的事项" },
-    ];
-    setOutline(initialOutline);
-    setStage("outline");
+    setStage('outline');
   };
 
-  /** 2. Outline 确认 → 触发 /api/generation/email */
-  const handleOutlineConfirm = async () => {
-    if (!userRequest) return;
-    setErrorMsg(null);
-    setStage("generating");
-    try {
-      const reqTitle = "eml: 产品开发汇报邮件";
-      const res = await generateEmail({
-        title: reqTitle,
-        outline: outline.map((o) => ({ title: o.title, description: o.description, children: [] })),
-        format: "email",
-        providerPreference: ["stub"], // stub 模式从 DB 读 case-1782296242386
-        userRequest,
-      });
-      if (!res.ok) {
-        setErrorMsg(res.error ?? "生成失败");
-        setStage("error");
-        return;
-      }
-      setRunId(res.runId);
-      pollStatus(res.runId);
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
-      setStage("error");
-    }
+  const handleConfirmGenerate = () => {
+    setStage('generating');
   };
 
-  /** 3. 轮询状态（2s 间隔，最多 60 次 = 2 分钟） */
-  const pollStatus = async (rid: string) => {
-    let attempt = 0;
-    const maxAttempts = 60;
-    const tick = async () => {
-      attempt++;
-      try {
-        const s = await getGenerationStatus(rid);
-        setStatus(s);
-        if (s.status === "done") {
-          setStage("results");
-          return;
-        }
-        if (s.status === "error") {
-          setErrorMsg(s.error ?? "生成失败");
-          setStage("error");
-          return;
-        }
-        if (attempt < maxAttempts) {
-          setTimeout(tick, 2000);
-        } else {
-          setErrorMsg("生成超时（>2 分钟）");
-          setStage("error");
-        }
-      } catch (err) {
-        setErrorMsg(err instanceof Error ? err.message : String(err));
-        setStage("error");
-      }
-    };
-    tick();
+  const handleGenerationComplete = (newRunId: string, newSections: GenerationSection[]) => {
+    setRunId(newRunId);
+    setSections(newSections);
+    setStage('results');
   };
 
-  const handleReset = () => {
-    setStage("chat");
-    setUserRequest("");
-    setRunId(null);
-    setOutline([]);
-    setStatus(null);
-    setErrorMsg(null);
-    startedRef.current = false;
+  const handleRegenerate = () => {
+    setStage('chat');
   };
 
-  if (stage === "chat") {
-    return <ChatPanel onSubmit={handleChatSubmit} mailSubject={context.subject} />;
-  }
-
-  return (
-    <div style={{ padding: 12 }}>
-      {errorMsg && (
-        <MessageBar intent="error" style={{ marginBottom: 12 }}>
-          <MessageBarBody>{errorMsg}</MessageBarBody>
-        </MessageBar>
-      )}
-
-      {stage === "outline" && (
-        <>
-          <OutlinePanel outline={outline} userRequest={userRequest} />
-          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-            <Button
-              appearance="subtle"
-              onClick={handleReset}
-              icon={<ArrowRight24Regular style={{ transform: "rotate(180deg)" }} />}
-            >
-              返回修改
-            </Button>
-            <Button
-              appearance="primary"
-              onClick={handleOutlineConfirm}
-              icon={<Checkmark24Regular />}
-              style={{ flex: 1 }}
-            >
-              确认生成
-            </Button>
-          </div>
-        </>
-      )}
-
-      {stage === "generating" && <WriteProgress runId={runId} status={status} />}
-
-      {stage === "results" && status?.emailPayload && (
-        <ResultsPanel
-          payload={status.emailPayload}
-          mode={context.mode}
-          onReset={handleReset}
+  switch (stage) {
+    case 'chat':
+      return (
+        <ChatPanel
+          messages={messages}
+          onMessagesChange={setMessagesDirect}
+          onAddMessage={addMessage}
+          onOutlineGenerated={handleOutlineGenerated}
         />
-      )}
-
-      {stage === "error" && (
-        <div style={{ textAlign: "center", padding: 16 }}>
-          <Button onClick={handleReset} appearance="primary">
-            重新开始
-          </Button>
-        </div>
-      )}
-    </div>
-  );
+      );
+    case 'outline':
+      return (
+        <OutlinePanel
+          outline={outline}
+          onOutlineChange={setOutline}
+          onConfirm={handleConfirmGenerate}
+          onBack={() => setStage('chat')}
+        />
+      );
+    case 'generating':
+      return (
+        <WriteProgress
+          outline={outline}
+          userRequest={userRequest}
+          onComplete={handleGenerationComplete}
+        />
+      );
+    case 'results':
+      return (
+        <ResultsPanel
+          runId={runId}
+          sections={sections}
+          onRegenerate={handleRegenerate}
+        />
+      );
+  }
 }

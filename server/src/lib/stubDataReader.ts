@@ -121,8 +121,8 @@ export function readCaseFromDb(): StubCaseResult | null {
   const citations = buildCitationsFromHtml(run.content);
   logger.info(`[StubDataReader] 解析到 ${citations.length} 个参考来源`);
 
-  // 解析 HTML 内容为 sections
-  const sections = parseHtmlIntoSections(run.content, outline);
+  // 解析 HTML 内容为 sections（传入 provenanceNodes 以计算真实 groundingScore）
+  const sections = parseHtmlIntoSections(run.content, outline, provenanceNodes);
 
   if (sections.length === 0) {
     logger.warn("[StubDataReader] HTML 解析后未得到任何 section");
@@ -374,8 +374,8 @@ export function readWordCaseFromDb(): StubCaseResult | null {
   const citations = buildCitationsFromHtml(run.content);
   logger.info(`[StubDataReader] Word case 解析到 ${citations.length} 个参考来源`);
 
-  // 6. 解析 HTML 内容为 sections
-  const sections = parseHtmlIntoSections(run.content, outline);
+  // 6. 解析 HTML 内容为 sections（传入 provenanceNodes 以计算真实 groundingScore）
+  const sections = parseHtmlIntoSections(run.content, outline, provenanceNodes);
 
   if (sections.length === 0) {
     logger.warn("[StubDataReader] Word case HTML 解析后未得到任何 section");
@@ -523,8 +523,8 @@ export function readOutlookCaseFromDb(): StubCaseResult | null {
   const citations = buildCitationsFromHtml(run.content);
   logger.info(`[StubDataReader] Outlook case 解析到 ${citations.length} 个参考来源`);
 
-  // 6. 解析 HTML 内容为 sections
-  const sections = parseHtmlIntoSections(run.content, outline);
+  // 6. 解析 HTML 内容为 sections（传入 provenanceNodes 以计算真实 groundingScore）
+  const sections = parseHtmlIntoSections(run.content, outline, provenanceNodes);
 
   if (sections.length === 0) {
     logger.warn("[StubDataReader] Outlook case HTML 解析后未得到任何 section");
@@ -577,23 +577,41 @@ function buildCitationsFromHtml(html: string): CitationItem[] {
 
   const footerHtml = footerMatch[1];
 
-  // 匹配每个 <a> 标签（citation 链接）
-  const linkRegex = /<a[^>]*href="([^"]*)"[^>]*class="cite-[^"]*-link"[^>]*>([\s\S]*?)<\/a>/gi;
-  let match: RegExpExecArray | null;
-  let index = 1;
+  // 匹配每个 citation-item：<div class="citation-item"><span class="citation-num">[N]</span> <a href="...">title</a></div>
+  const itemRegex = /<div[^>]*class="citation-item"[^>]*>([\s\S]*?)<\/div>/gi;
+  let itemMatch: RegExpExecArray | null;
 
-  while ((match = linkRegex.exec(footerHtml)) !== null) {
-    const url = match[1];
-    const title = match[2].trim();
-    citations.push({ index: index++, title, url });
+  while ((itemMatch = itemRegex.exec(footerHtml)) !== null) {
+    const itemHtml = itemMatch[1];
+
+    // 提取编号 [N]
+    const numMatch = /<span[^>]*class="citation-num"[^>]*>\s*\[(\d+)\]\s*<\/span>/i.exec(itemHtml);
+    const index = numMatch ? parseInt(numMatch[1], 10) : citations.length + 1;
+
+    // 提取链接（匹配所有 <a> 标签，不仅限于 cite-kb-link）
+    const linkMatch = /<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i.exec(itemHtml);
+    if (linkMatch) {
+      const url = linkMatch[1];
+      const title = linkMatch[2].replace(/<[^>]+>/g, "").trim();
+      citations.push({ index, title, url });
+    } else {
+      // 没有链接的纯文本引用
+      const text = itemHtml.replace(/<[^>]+>/g, "").replace(/\[\d+\]/g, "").trim();
+      if (text) {
+        citations.push({ index, title: text, url: "" });
+      }
+    }
   }
 
   if (citations.length === 0) {
-    logger.warn("[StubDataReader] footer 中未找到 citation links，尝试 fallback");
+    logger.warn("[StubDataReader] footer 中未找到 citation items，尝试 fallback");
     return buildCitationsFromProvenanceFallback(html);
   }
 
-  logger.info(`[StubDataReader] 从 HTML footer 解析到 ${citations.length} 个 citations`);
+  // 按 index 排序
+  citations.sort((a, b) => a.index - b.index);
+
+  logger.info(`[StubDataReader] 从 HTML footer 解析到 ${citations.length} 个 citations: [${citations.map(c => c.index).join(",")}]`);
   return citations;
 }
 
@@ -632,8 +650,118 @@ function buildCitationsFromProvenanceFallback(_html: string): CitationItem[] {
  */
 function parseHtmlIntoSections(
   html: string,
-  outline: Array<{ title: string }>
+  outline: Array<{ title: string }>,
+  provenanceNodes?: ProvenanceNodeRow[]
 ): GenerateDocResult["sections"] {
+  // 0. 按 paragraphIdx 分组 provenance nodes，用于计算每段 grounding score 和来源
+  const nodesByParaIdx = new Map<number, ProvenanceNodeRow[]>();
+  if (provenanceNodes && provenanceNodes.length > 0) {
+    for (const node of provenanceNodes) {
+      const idx = node.paragraphIdx;
+      if (!nodesByParaIdx.has(idx)) nodesByParaIdx.set(idx, []);
+      nodesByParaIdx.get(idx)!.push(node);
+    }
+  }
+
+  /** 计算某段落的 groundingScore（取 provenance nodes 的 groundingScore 平均值，无数据时用 0.5） */
+  const computeGroundingScore = (paraIdx: number): number => {
+    const nodes = nodesByParaIdx.get(paraIdx);
+    if (!nodes || nodes.length === 0) return 0.5;
+    const scores = nodes.map(n => n.groundingScore ?? n.score ?? 0.5).filter(s => typeof s === "number" && s >= 0 && s <= 1);
+    if (scores.length === 0) return 0.5;
+    return scores.reduce((a, b) => a + b, 0) / scores.length;
+  };
+
+  /** 计算全局平均 groundingScore（所有段落的加权平均，用于单段落 fallback） */
+  const computeGlobalGroundingScore = (): number => {
+    if (!provenanceNodes || provenanceNodes.length === 0) return 0.5;
+    const scores = provenanceNodes.map(n => n.groundingScore ?? n.score ?? 0.5).filter(s => typeof s === "number" && s >= 0 && s <= 1);
+    if (scores.length === 0) return 0.5;
+    return scores.reduce((a, b) => a + b, 0) / scores.length;
+  };
+
+  /** 从 provenance nodes 构建某段落的 sources */
+  const buildSources = (paraIdx: number): GenerateDocResult["sections"][0]["sources"] => {
+    const nodes = nodesByParaIdx.get(paraIdx);
+    if (!nodes || nodes.length === 0) return [];
+    const seenChunk = new Set<string>();
+    const sources: GenerateDocResult["sections"][0]["sources"] = [];
+    for (const node of nodes) {
+      const key = node.chunkId || node.webUrl || `${node.sourceName}-${node.sourceUrl}`;
+      if (!key || seenChunk.has(key)) continue;
+      seenChunk.add(key);
+      sources.push({
+        chunkId: node.chunkId || `web-${node.webUrl || Math.random().toString(36).slice(2)}`,
+        content: node.webTitle || node.sourceName || "",
+        score: node.score,
+        sourceId: node.chunkId || "",
+        sourceName: node.sourceName || node.webTitle || "未知来源",
+        sourceUrl: node.sourceUrl || node.webUrl || undefined,
+      });
+    }
+    return sources;
+  };
+
+  /** 从 provenance nodes 构建某段落的 webCitations */
+  const buildWebCitations = (paraIdx: number): GenerateDocResult["sections"][0]["webCitations"] => {
+    const nodes = nodesByParaIdx.get(paraIdx);
+    if (!nodes || nodes.length === 0) return [];
+    const seenUrl = new Set<string>();
+    const citations: GenerateDocResult["sections"][0]["webCitations"] = [];
+    for (const node of nodes) {
+      if (node.webUrl && !seenUrl.has(node.webUrl)) {
+        seenUrl.add(node.webUrl);
+        citations.push({
+          title: node.webTitle || node.webUrl,
+          url: node.webUrl,
+          snippet: "",
+          score: node.score,
+        });
+      }
+    }
+    return citations;
+  };
+
+  /** 构建所有段落的 sources（用于单段落 fallback） */
+  const buildAllSources = (): GenerateDocResult["sections"][0]["sources"] => {
+    if (!provenanceNodes || provenanceNodes.length === 0) return [];
+    const seenChunk = new Set<string>();
+    const sources: GenerateDocResult["sections"][0]["sources"] = [];
+    for (const node of provenanceNodes) {
+      const key = node.chunkId || node.webUrl || `${node.sourceName}-${node.sourceUrl}`;
+      if (!key || seenChunk.has(key)) continue;
+      seenChunk.add(key);
+      sources.push({
+        chunkId: node.chunkId || `web-${node.webUrl || Math.random().toString(36).slice(2)}`,
+        content: node.webTitle || node.sourceName || "",
+        score: node.score,
+        sourceId: node.chunkId || "",
+        sourceName: node.sourceName || node.webTitle || "未知来源",
+        sourceUrl: node.sourceUrl || node.webUrl || undefined,
+      });
+    }
+    return sources;
+  };
+
+  /** 构建所有段落的 webCitations（用于单段落 fallback） */
+  const buildAllWebCitations = (): GenerateDocResult["sections"][0]["webCitations"] => {
+    if (!provenanceNodes || provenanceNodes.length === 0) return [];
+    const seenUrl = new Set<string>();
+    const citations: GenerateDocResult["sections"][0]["webCitations"] = [];
+    for (const node of provenanceNodes) {
+      if (node.webUrl && !seenUrl.has(node.webUrl)) {
+        seenUrl.add(node.webUrl);
+        citations.push({
+          title: node.webTitle || node.webUrl,
+          url: node.webUrl,
+          snippet: "",
+          score: node.score,
+        });
+      }
+    }
+    return citations;
+  };
+
   // 1. 去除外层包裹和无关元素
   let content = html
     .replace(/<div class="doc-content">\s*/i, "")
@@ -667,14 +795,71 @@ function parseHtmlIntoSections(
     }
 
     if (chartSpecs.length === 0) {
-      logger.warn("[StubDataReader] 内容中未找到 chart-spec 标签，返回单个 section");
+      // 没有 <section> 也没有 chart-spec：如果有 provenance nodes 且有多段落，按 <p> 标签分割
+      // 用于邮件等无 section 标签的文档类型
+      const paraIndices = provenanceNodes
+        ? Array.from(new Set(provenanceNodes.map(n => n.paragraphIdx))).sort((a, b) => a - b)
+        : [];
+
+      if (provenanceNodes && paraIndices.length > 1) {
+        logger.info(`[StubDataReader] 无 section 标签，按 <p> 分割为 ${paraIndices.length} 个段落（provenance paraIdx=${paraIndices.join(',')}）`);
+        // 按 <p>...</p> 分割内容
+        const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
+        const paragraphs: string[] = [];
+        let pMatch: RegExpExecArray | null;
+        while ((pMatch = pRegex.exec(content)) !== null) {
+          const pContent = pMatch[1].trim();
+          if (pContent && pContent.length > 5) {
+            paragraphs.push(`<p>${pContent}</p>`);
+          }
+        }
+
+        if (paragraphs.length >= paraIndices.length) {
+          const sections: GenerateDocResult["sections"] = [];
+          for (let i = 0; i < paraIndices.length; i++) {
+            const paraIdx = paraIndices[i];
+            const title = outline[i]?.title ?? `段落 ${i + 1}`;
+            // 将属于该段落的 <p> 分配给该 section（按比例分配）
+            const startP = Math.floor((i * paragraphs.length) / paraIndices.length);
+            const endP = Math.floor(((i + 1) * paragraphs.length) / paraIndices.length);
+            const sectionContent = paragraphs.slice(startP, endP).join('\n');
+            sections.push({
+              title,
+              content: sectionContent || `<p>（段落内容）</p>`,
+              sources: buildSources(paraIdx),
+              webCitations: buildWebCitations(paraIdx),
+              groundingScore: computeGroundingScore(paraIdx),
+              citationLinks: [],
+            });
+          }
+          return sections;
+        }
+
+        // 如果 <p> 数量不够，按 provenance paraIdx 分组（每段一个 section，内容为整个 content 但带正确标题）
+        const sections: GenerateDocResult["sections"] = [];
+        for (let i = 0; i < paraIndices.length; i++) {
+          const paraIdx = paraIndices[i];
+          const title = outline[i]?.title ?? `段落 ${i + 1}`;
+          sections.push({
+            title,
+            content: i === 0 ? content : `<p>（${title}）</p>`,
+            sources: buildSources(paraIdx),
+            webCitations: buildWebCitations(paraIdx),
+            groundingScore: computeGroundingScore(paraIdx),
+            citationLinks: [],
+          });
+        }
+        return sections;
+      }
+
+      logger.warn("[StubDataReader] 内容中未找到 section/chart-spec 标签且无多段落 provenance，返回单个 section（使用全局 grounding score）");
       return [
         {
-          title: outline[0]?.title ?? "Sheet 1",
+          title: outline[0]?.title ?? "邮件正文",
           content,
-          sources: [],
-          webCitations: [],
-          groundingScore: 0.5,
+          sources: buildAllSources(),
+          webCitations: buildAllWebCitations(),
+          groundingScore: computeGlobalGroundingScore(),
           citationLinks: [],
         },
       ];
@@ -691,9 +876,9 @@ function parseHtmlIntoSections(
       sections.push({
         title,
         content: sectionContent,
-        sources: [],
-        webCitations: [],
-        groundingScore: 0.5,
+        sources: buildSources(i),
+        webCitations: buildWebCitations(i),
+        groundingScore: computeGroundingScore(i),
         citationLinks: [],
         chartSpecsRaw: chartSpecsRaw.length > 0 ? chartSpecsRaw : undefined,
       });
@@ -725,9 +910,9 @@ function parseHtmlIntoSections(
     sections.push({
       title,
       content: cleanContent,
-      sources: [],
-      webCitations: [],
-      groundingScore: 0.5,
+      sources: buildSources(i),
+      webCitations: buildWebCitations(i),
+      groundingScore: computeGroundingScore(i),
       citationLinks: [],
       chartSpecsRaw: chartSpecsRaw.length > 0 ? chartSpecsRaw : undefined,
     });

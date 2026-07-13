@@ -38,7 +38,7 @@ export interface MsGraphConnectionStatus {
 // ── 常量 ─────────────────────────────────────────────
 
 const AUTHORITY = "https://login.microsoftonline.com";
-const GRAPH_SCOPE = "Files.Read Files.Read.All Files.ReadWrite User.Read offline_access";
+const GRAPH_SCOPE = "Files.Read Files.Read.All Files.ReadWrite User.Read offline_access Mail.Read Mail.Send Contacts.Read Contacts.ReadWrite People.Read";
 const CONFIG_KEY = "msgraph_config";
 const TOKENS_KEY = "msgraph_tokens";
 

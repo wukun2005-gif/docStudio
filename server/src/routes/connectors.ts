@@ -6,6 +6,7 @@
 import { Router } from "express";
 import crypto from "node:crypto";
 import { listOneDriveFiles, downloadOneDriveFile, listOutlookEmails, listTeamsChats, listCalendarEvents, importFromMsGraph } from "../lib/connectors/msGraph.js";
+import { sendEmlFilesAsEmails, createContactsFromPeopleGraph } from "../lib/connectors/outlookKB.js";
 import { listRepos, listIssues, listPRs, listCommits, importFromGitHub } from "../lib/connectors/github.js";
 import { searchArxiv, importFromArxiv } from "../lib/connectors/arxiv.js";
 import {
@@ -397,6 +398,59 @@ connectorsRouter.post("/arxiv/import", async (req, res) => {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[Connectors] arXiv import error: ${msg}`);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** POST /api/connectors/outlook/send-emails — 将知识库中所有 .eml 逐封发到指定邮箱 */
+connectorsRouter.post("/outlook/send-emails", async (req, res) => {
+  try {
+    const token = await getValidAccessToken();
+    if (!token) {
+      res.status(400).json({ ok: false, error: "未连接 Microsoft 账户" });
+      return;
+    }
+    const { toAddress, ccAddress } = req.body;
+    if (!toAddress) {
+      res.status(400).json({ ok: false, error: "toAddress 为必填项" });
+      return;
+    }
+
+    res.json({ ok: true, message: "邮件发送已开始，请查看日志" });
+
+    try {
+      const result = await sendEmlFilesAsEmails({ accessToken: token }, toAddress, ccAddress);
+      logger.info(`[Connectors] .eml 发送完成: ${JSON.stringify(result)}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[Connectors] .eml 发送失败: ${msg}`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/** POST /api/connectors/outlook/create-contacts — 将 People Graph 联系人创建到 Outlook */
+connectorsRouter.post("/outlook/create-contacts", async (req, res) => {
+  try {
+    const token = await getValidAccessToken();
+    if (!token) {
+      res.status(400).json({ ok: false, error: "未连接 Microsoft 账户" });
+      return;
+    }
+
+    res.json({ ok: true, message: "联系人创建已开始，请查看日志" });
+
+    try {
+      const result = await createContactsFromPeopleGraph({ accessToken: token });
+      logger.info(`[Connectors] 联系人创建完成: ${JSON.stringify(result)}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[Connectors] 联系人创建失败: ${msg}`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ ok: false, error: msg });
   }
 });

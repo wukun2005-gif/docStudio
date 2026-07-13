@@ -44,6 +44,8 @@ import {
   isRepoCloned,
   removeRepo,
 } from "../lib/connectors/githubRepo.js";
+import { syncEmailsToKB, syncContactsToKB, clearOutlookKB, getOutlookKBStatus } from "../lib/connectors/outlookKB.js";
+import { getValidAccessToken } from "../lib/connectors/msGraphOAuth.js";
 
 export const knowledgeRouter = Router();
 
@@ -832,6 +834,195 @@ knowledgeRouter.get("/github/repos", (_req, res) => {
       ok: true,
       repos: Array.from(repoMap.values()),
     });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+// ── Outlook 邮箱知识库同步 ──────────────────────────────
+
+/**
+ * POST /api/knowledge/outlook/email/sync — 全量同步 Outlook 邮件
+ */
+knowledgeRouter.post("/outlook/email/sync", async (req, res) => {
+  try {
+    const token = req.body.accessToken || await getValidAccessToken();
+    if (!token) {
+      res.status(400).json({ ok: false, error: "未连接 Microsoft 账户，请先在「远程文档」中完成 OAuth 授权" });
+      return;
+    }
+
+    const embConfig = getEmbeddingConfig(req.body as Record<string, unknown>);
+    const maxEmails = req.body.maxEmails ?? 500;
+
+    const jobId = crypto.randomUUID();
+    addSyncJob({ id: jobId, sourceType: "outlook_email", config: { maxEmails }, status: "running" });
+
+    res.json({ ok: true, jobId, message: "邮件同步已开始" });
+
+    try {
+      logger.info(`[OutlookSync] 开始邮件同步, maxEmails=${maxEmails}`);
+      updateSyncJob(jobId, { progress: { total: 0, processed: 0, skipped: 0, errors: 0 } });
+
+      const result = await syncEmailsToKB(
+        { accessToken: token },
+        { maxEmails, embedding: embConfig ?? undefined },
+      );
+
+      updateSyncJob(jobId, {
+        status: "completed",
+        progress: { total: result.total, processed: result.processed, skipped: result.skipped, errors: result.errors },
+        lastSyncAt: new Date().toISOString(),
+      });
+      logger.info(`[OutlookSync] 邮件同步完成: ${JSON.stringify(result)}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      updateSyncJob(jobId, { status: "error", errorMessage: msg });
+      logger.error(`[OutlookSync] 邮件同步失败: ${msg}`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/**
+ * POST /api/knowledge/outlook/contact/sync — 全量同步 Outlook 联系人
+ */
+knowledgeRouter.post("/outlook/contact/sync", async (req, res) => {
+  try {
+    const token = req.body.accessToken || await getValidAccessToken();
+    if (!token) {
+      res.status(400).json({ ok: false, error: "未连接 Microsoft 账户，请先在「远程文档」中完成 OAuth 授权" });
+      return;
+    }
+
+    const embConfig = getEmbeddingConfig(req.body as Record<string, unknown>);
+    const maxContacts = req.body.maxContacts ?? 200;
+
+    const jobId = crypto.randomUUID();
+    addSyncJob({ id: jobId, sourceType: "outlook_contact", config: { maxContacts }, status: "running" });
+
+    res.json({ ok: true, jobId, message: "联系人同步已开始" });
+
+    try {
+      logger.info(`[OutlookSync] 开始联系人同步, maxContacts=${maxContacts}`);
+      updateSyncJob(jobId, { progress: { total: 0, processed: 0, skipped: 0, errors: 0 } });
+
+      const result = await syncContactsToKB(
+        { accessToken: token },
+        { maxContacts, embedding: embConfig ?? undefined },
+      );
+
+      updateSyncJob(jobId, {
+        status: "completed",
+        progress: { total: result.total, processed: result.processed, skipped: result.skipped, errors: result.errors },
+        lastSyncAt: new Date().toISOString(),
+      });
+      logger.info(`[OutlookSync] 联系人同步完成: ${JSON.stringify(result)}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      updateSyncJob(jobId, { status: "error", errorMessage: msg });
+      logger.error(`[OutlookSync] 联系人同步失败: ${msg}`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/**
+ * GET /api/knowledge/outlook/status — 查看 Outlook KB 同步状态
+ */
+knowledgeRouter.get("/outlook/status", (_req, res) => {
+  try {
+    const emailStatus = getOutlookKBStatus("outlook_email");
+    const contactStatus = getOutlookKBStatus("outlook_contact");
+
+    const emailJobs = getSyncJobsByType("outlook_email");
+    const contactJobs = getSyncJobsByType("outlook_contact");
+
+    res.json({
+      ok: true,
+      email: {
+        count: emailStatus.count,
+        totalChunks: emailStatus.totalChunks,
+        lastJob: emailJobs[0] ?? null,
+      },
+      contact: {
+        count: contactStatus.count,
+        totalChunks: contactStatus.totalChunks,
+        lastJob: contactJobs[0] ?? null,
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/**
+ * DELETE /api/knowledge/outlook/email — 清除已索引的邮件
+ */
+knowledgeRouter.delete("/outlook/email", (req, res) => {
+  try {
+    const count = clearOutlookKB("outlook_email");
+    res.json({ ok: true, deleted: count });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/**
+ * DELETE /api/knowledge/outlook/contact — 清除已索引的联系人
+ */
+knowledgeRouter.delete("/outlook/contact", (req, res) => {
+  try {
+    const count = clearOutlookKB("outlook_contact");
+    res.json({ ok: true, deleted: count });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/**
+ * GET /api/knowledge/outlook/email/list — 列出已索引的邮件
+ */
+knowledgeRouter.get("/outlook/email/list", (_req, res) => {
+  try {
+    const indexes = getRemoteIndexesByType("outlook_email");
+    const emails = indexes.map(idx => ({
+      id: idx.remoteId,
+      name: idx.name,
+      url: idx.url,
+      chunks: idx.chunkCount,
+      indexedAt: idx.indexedAt,
+      ...idx.metadata,
+    }));
+    res.json({ ok: true, emails });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+/**
+ * GET /api/knowledge/outlook/contact/list — 列出已索引的联系人
+ */
+knowledgeRouter.get("/outlook/contact/list", (_req, res) => {
+  try {
+    const indexes = getRemoteIndexesByType("outlook_contact");
+    const contacts = indexes.map(idx => ({
+      id: idx.remoteId,
+      name: idx.name,
+      chunks: idx.chunkCount,
+      indexedAt: idx.indexedAt,
+      ...idx.metadata,
+    }));
+    res.json({ ok: true, contacts });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ ok: false, error: msg });

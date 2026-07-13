@@ -1333,7 +1333,7 @@ generationRouter.post("/email", async (req, res) => {
                 content: "<p>（未找到 case-1782296242386 数据）</p>",
                 sources: [],
                 webCitations: [],
-                groundingScore: 0,
+                groundingScore: 0.5,
                 citationLinks: [],
               }],
               trustScore: 0.3,
@@ -1341,40 +1341,47 @@ generationRouter.post("/email", async (req, res) => {
               title: title,
             } as GenerateDocResult;
           } else {
-            logger.info(`[Generation] Email POST stub mode: 从 DB 读 case-1782296242386, sections=${dbCase.sections.length}`);
-            // 构造 GenerateDocResult 复用 toEmailPayload
-            const allCitations: Array<{ index: number; title: string; url: string; sourceId?: string }> = [];
-            const seenCiteKeys = new Set<string>();
-            let citeIdx = 1;
-            for (const sec of dbCase.sections) {
-              for (const src of sec.sources ?? []) {
-                const key = (src.sourceUrl || src.sourceId || src.sourceName || "").trim();
-                if (!key || seenCiteKeys.has(key)) continue;
-                seenCiteKeys.add(key);
-                allCitations.push({
-                  index: citeIdx++,
-                  title: src.sourceName || `来源 ${citeIdx - 1}`,
-                  url: src.sourceUrl || "",
-                  sourceId: src.sourceId,
-                });
-              }
-            }
+            logger.info(`[Generation] Email POST stub mode: 从 DB 读 case-1782296242386, sections=${dbCase.sections.length}, citations=${dbCase.citations.length}`);
 
-            result = {
-              content: dbCase.content,
-              sections: dbCase.sections.map(s => ({
+            // 使用 dbCase.citations（从 HTML footer 解析的，标题正确）作为引用来源
+            const properCitations = dbCase.citations;
+
+            // 为每个 section 构建 citationLinks：从 section 内容中提取 [N] 引用编号，映射到 properCitations
+            const sectionsWithCitationLinks = dbCase.sections.map(s => {
+              const citedNums = new Set<number>();
+              // 先去除 HTML 标签，再从纯文本中提取 [N] 模式（避免匹配到 URL/属性中的数字）
+              const plainText = s.content.replace(/<[^>]+>/g, " ");
+              const citeRegex = /\[(\d+)\]/g;
+              let cm: RegExpExecArray | null;
+              while ((cm = citeRegex.exec(plainText)) !== null) {
+                const num = parseInt(cm[1], 10);
+                if (num > 0 && num <= 200) citedNums.add(num); // 合理范围检查
+              }
+
+              // 构建 citationLinks：只包含本段落实际引用的来源
+              const citationLinks = properCitations
+                .filter(c => citedNums.has(c.index))
+                .map(c => ({ index: c.index, title: c.title, url: c.url, sourceId: "" }));
+
+              return {
                 title: s.title,
                 content: s.content,
                 sources: s.sources ?? [],
-                webCitations: [],
-                groundingScore: 0,
-                citationLinks: allCitations.map(c => ({ index: c.index, title: c.title, url: c.url, sourceId: c.sourceId ?? "" })),
-              })),
+                webCitations: s.webCitations ?? [],
+                groundingScore: s.groundingScore ?? 0.5,
+                citationLinks,
+              };
+            });
+
+            result = {
+              content: dbCase.content,
+              sections: sectionsWithCitationLinks,
               trustScore: dbCase.trustScore ?? 0.93,
               documentStyle: "email",
               title: dbCase.title,
+              citations: properCitations,
               provenanceNodes: dbCase.provenanceNodes,
-              sourceRunId: dbCase.sourceRunId, // 用于 provenance 复制
+              sourceRunId: dbCase.sourceRunId,
             } as unknown as GenerateDocResult;
           }
         } else {

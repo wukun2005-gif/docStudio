@@ -7,9 +7,9 @@
  * - 全局错误提示
  */
 import { Spinner, tokens, Badge } from "@fluentui/react-components";
-import { ArrowSync24Regular, Mail24Regular, TextBulletListSquare24Regular } from "@fluentui/react-icons";
+import { ArrowSync24Regular, Mail24Regular } from "@fluentui/react-icons";
 import { useMailContext } from "../hooks/useMailContext";
-import { WriteTab } from "./WriteTab";
+import WriteTab from "./WriteTab";
 
 export function App() {
   const { context, loading, error, refresh } = useMailContext();
@@ -36,10 +36,7 @@ export function App() {
       >
         <Mail24Regular style={{ color: tokens.colorBrandForeground1 }} />
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 14, fontWeight: 600 }}>i-Write · Outlook</div>
-          <div style={{ fontSize: 11, color: tokens.colorNeutralForeground3 }}>
-            AI 邮件草稿生成
-          </div>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>Generate Mail with Knowledge</div>
         </div>
         {context && (
           <Badge
@@ -66,30 +63,6 @@ export function App() {
         </button>
       </div>
 
-      {/* ── 当前邮件摘要 ── */}
-      {context && !loading && (
-        <div
-          style={{
-            padding: "8px 12px",
-            borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
-            background: tokens.colorNeutralBackground1,
-            fontSize: 12,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 6, color: tokens.colorNeutralForeground3 }}>
-            <TextBulletListSquare24Regular fontSize={14} />
-            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {context.subject || "（无主题）"}
-            </span>
-          </div>
-          {context.from && (
-            <div style={{ fontSize: 11, color: tokens.colorNeutralForeground3, marginTop: 2 }}>
-              {context.from}
-            </div>
-          )}
-        </div>
-      )}
-
       {/* ── 错误提示 ── */}
       {error && (
         <div
@@ -106,13 +79,13 @@ export function App() {
       )}
 
       {/* ── 主面板 ── */}
-      <div style={{ flex: 1, overflow: "auto" }}>
+      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
         {loading || !context ? (
           <div style={{ padding: 24, textAlign: "center" }}>
             <Spinner size="small" label="加载邮件上下文…" />
           </div>
         ) : (
-          <WriteTab context={context} />
+          <WriteTab />
         )}
       </div>
     </div>
