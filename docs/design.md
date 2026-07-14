@@ -13,81 +13,185 @@ docStudio/
 │   │   ├── index.ts                 # Express 入口
 │   │   ├── lib/
 │   │   │   ├── queryExpand.ts       # 查询扩展
+│   │   │   ├── queryAnalyzer.ts     # 查询分析（分离内容要点与格式要求）
 │   │   │   ├── hybridSearch.ts      # 混合检索 (BM25 + 向量 + RRF)
 │   │   │   ├── reranker.ts          # 重排序 (三级降级)
 │   │   │   ├── groundednessCheck.ts # Groundedness 验证
+│   │   │   ├── fidelityCheck.ts     # 保真度门控（章节相关性过滤）
+│   │   │   ├── conflictDetection.ts # 冲突检测与自动裁决
+│   │   │   ├── relevanceCheck.ts    # 内容相关度核查
+│   │   │   ├── completenessCheck.ts # 内容完整度核查
 │   │   │   ├── knowledgeDb.ts       # 知识库 SQLite
-│   │   │   ├── docGenerator.ts      # 文档生成 (Word/PPT/Excel)
+│   │   │   ├── docGenerator.ts      # 文档生成 (Word/PPT/Excel/Email)
+│   │   │   ├── docExporter.ts       # 文档导出（PptxGenJS 等）
 │   │   │   ├── narrativeEngine.ts   # 叙事引擎
 │   │   │   ├── provenanceTree.ts    # 生成树
 │   │   │   ├── chatRouter.ts        # Chat 智能判断
+│   │   │   ├── editImpactAnalyzer.ts # Chat 驱动编辑影响分析
 │   │   │   ├── evalMetrics.ts       # 评估指标
 │   │   │   ├── evalRunner.ts        # 评估运行器
 │   │   │   ├── multiJudge.ts        # Multi-Judge
 │   │   │   ├── goldenSetGenerator.ts# Golden Set 生成
-│   │   │   ├── sampleDataGenerator.ts # Sample 数据生成
 │   │   │   ├── metricsCollector.ts  # Metrics 采集
-│   │   │   ├── providers/           # LLM Provider
-│   │   │   │   ├── registry.ts      # Provider 注册
-│   │   │   │   └── openai.ts        # OpenAI-compatible
-│   │   │   └── connectors/          # 知识源连接器
-│   │   │       ├── msGraph.ts       # Microsoft Graph API
-│   │   │       ├── github.ts        # GitHub API
-│   │   │       ├── arxiv.ts         # arXiv API
-│   │   │       └── localFiles.ts    # 本地文件上传
+│   │   │   ├── contentCleaner.ts    # 内容清理
+│   │   │   ├── textChunker.ts       # 智能分块
+│   │   │   ├── textPreprocess.ts    # 文本预处理
+│   │   │   ├── ingestion.ts         # 统一入库 pipeline
+│   │   │   ├── auditLog.ts          # 数据库审计日志
+│   │   │   ├── logger.ts            # 本地时间日志
+│   │   │   ├── actionItemParser.ts  # Action Item 解析
+│   │   │   ├── proactiveGenerator.ts# 主动生成
+│   │   │   ├── knowledgeDiscovery.ts# 智能知识源发现
+│   │   │   ├── peopleGraph.ts       # 组织架构图谱
+│   │   │   ├── toolExecutor.ts      # 工具执行
+│   │   │   ├── workflowEngine.ts    # Workflow 引擎
+│   │   │   ├── writingRules.ts      # 写作规则
+│   │   │   ├── urlValidation.ts     # URL 验证
+│   │   │   ├── xlsxWriterGenerator.ts # Excel 写入生成
+│   │   │   ├── chartDataExtractor.ts  # 图表数据提取
+│   │   │   ├── chartSpecParser.ts     # 图表规范解析
+│   │   │   ├── wordPayloadBuilder.ts  # Word Add-in payload 构建
+│   │   │   ├── excelPayloadBuilder.ts # Excel Add-in payload 构建
+│   │   │   ├── pptPayloadBuilder.ts   # PPT Add-in payload 构建（旧版）
+│   │   │   ├── emailPayloadBuilder.ts # Outlook Add-in payload 构建
+│   │   │   ├── slideHtmlBuilder.ts    # PPT HTML 页面生成（CSS Flexbox）
+│   │   │   ├── slideElementExtractor.ts # PPT 元素坐标提取
+│   │   │   ├── slideLayoutEngine.ts   # PPT 确定性流式布局引擎
+│   │   │   ├── browserManager.ts      # Playwright 浏览器管理（html2pptx）
+│   │   │   ├── promptTemplates.ts     # Prompt 模板管理
+│   │   │   ├── stubDataReader.ts      # Stub/Demo 数据读取
+│   │   │   ├── db.ts                  # 数据库初始化
+│   │   │   ├── dbQuery.ts             # 数据库查询
+│   │   │   ├── concurrency.ts         # 并发控制
+│   │   │   ├── llmUtils.ts            # LLM 工具函数
+│   │   │   ├── remoteRetrieval.ts     # 远程检索
+│   │   │   ├── providers/             # LLM Provider
+│   │   │   │   ├── registry.ts        # Provider 注册
+│   │   │   │   ├── openai.ts          # OpenAI-compatible
+│   │   │   │   ├── demo.ts            # Demo/Stub Provider
+│   │   │   │   ├── ModelCapabilities.ts   # 模型能力声明
+│   │   │   │   └── model-capabilities-registry.ts # 模型能力注册表
+│   │   │   ├── connectors/            # 知识源连接器
+│   │   │   │   ├── msGraph.ts         # Microsoft Graph API
+│   │   │   │   ├── msGraphOAuth.ts    # MS OAuth 流程
+│   │   │   │   ├── msGraphPeople.ts   # MS Graph 人员
+│   │   │   │   ├── msGraphSearch.ts   # MS Graph 搜索
+│   │   │   │   ├── outlookKB.ts       # Outlook 邮件/联系人同步
+│   │   │   │   ├── github.ts          # GitHub API
+│   │   │   │   ├── githubRepo.ts      # GitHub Repo 读取
+│   │   │   │   └── arxiv.ts           # arXiv API
+│   │   │   ├── mcp/
+│   │   │   │   ├── mcpClient.ts       # MCP 客户端
+│   │   │   │   └── web-search-server.ts # Web 搜索 MCP
+│   │   │   └── security/
+│   │   │       ├── keyStore.ts        # API Key 安全存储
+│   │   │       └── sanitize.ts        # 输入消毒
 │   │   ├── routes/
-│   │   │   ├── chat.ts              # Chat API
-│   │   │   ├── knowledge.ts         # 知识库 API
-│   │   │   ├── generation.ts        # 文档生成 API
-│   │   │   ├── evaluation.ts        # 评估 API
-│   │   │   ├── connectors.ts        # 连接器 API
-│   │   │   └── settings.ts          # 设置 API
-│   │   └── types/
-│   │       └── index.ts
-│   ├── data/                        # SQLite 数据文件
+│   │   │   ├── chat.ts                # Chat API
+│   │   │   ├── knowledge.ts           # 知识库 API
+│   │   │   ├── generation.ts          # 文档生成 API（word/excel/ppt/email）
+│   │   │   ├── evaluation.ts          # 评估 API
+│   │   │   ├── connectors.ts          # 连接器 API
+│   │   │   ├── settings.ts            # 设置 API
+│   │   │   ├── people.ts              # People Graph API
+│   │   │   ├── provenance.ts          # 来源追溯 API
+│   │   │   ├── promptTemplates.ts     # Prompt 模板 API
+│   │   │   ├── workflows.ts           # Workflow API
+│   │   │   ├── data.ts                # 通用 KV 存储 API
+│   │   │   └── health.ts              # 健康检查 API
+│   │   └── scripts/
+│   │       ├── generatePpt.py         # PPT 样本生成
+│   │       └── generateSamples.ts     # 样本数据生成
+│   ├── data/                          # SQLite 数据文件
 │   └── package.json
-├── client/                          # 前端
+├── client/                          # 前端（Web 应用）
 │   ├── src/
 │   │   ├── App.tsx
 │   │   ├── components/
 │   │   │   ├── ChatBox.tsx           # Chat Box 交互
 │   │   │   ├── OutlineEditor.tsx     # 大纲编辑器
 │   │   │   ├── DocumentViewer.tsx    # 文档查看器（含在线编辑）
+│   │   │   ├── DocPreview.tsx        # 文档预览
+│   │   │   ├── GenerationPage.tsx    # 生成页面
 │   │   │   ├── ProvenanceTree.tsx    # 生成树可视化
 │   │   │   ├── TrustReport.tsx       # 信任度报告
-│   │   │   ├── EvalDashboard.tsx     # 离线评估面板
+│   │   │   ├── UnifiedEvaluationCard.tsx # 统一评估卡片
+│   │   │   ├── DocumentAudit.tsx     # AI 文档自审（风险雷达图）
 │   │   │   ├── KnowledgePanel.tsx    # 知识源管理
-│   │   │   ├── Settings.tsx          # 设置页
-│   │   │   └── HistoryComparison.tsx # 历史对比
+│   │   │   ├── PeoplePanel.tsx       # 人员图谱面板
+│   │   │   ├── CaseList.tsx          # Case 列表
+│   │   │   ├── DemoOverlay.tsx       # 一键 Demo（FakeCursor）
+│   │   │   └── Settings.tsx          # 设置页
+│   │   ├── lib/
+│   │   │   ├── caseRepo.ts           # Case 数据访问
+│   │   │   ├── chatRepo.ts           # Chat 数据访问
+│   │   │   └── modelCatalog.ts       # 模型目录
 │   │   ├── store/
-│   │   │   └── AppContext.tsx
+│   │   │   ├── caseStore.ts          # Case 状态管理
+│   │   │   ├── chatStore.ts          # Chat 状态管理
+│   │   │   └── index.ts              # Store 入口
 │   │   └── types/
 │   │       └── index.ts
 │   └── package.json
+├── excel-addin/                     # Excel Add-in（端口 3001）
+│   ├── manifest.xml
+│   ├── src/
+│   │   ├── components/              # 复用+定制组件（AppShell, ChatPanel, OutlinePanel, ResultsPanel, WriteProgress, WriteTab）
+│   │   ├── hooks/                   # useExcelContext, useApiServer
+│   │   ├── services/
+│   │   │   ├── apiClient.ts         # API 调用
+│   │   │   ├── contextReader.ts     # 读取工作表 usedRange/selectedRange
+│   │   │   ├── excelWriteService.ts # 原生写入（表格+6种图表+HYPERLINK）
+│   │   │   ├── eventListener.ts     # onSelectionChanged 监听
+│   │   │   └── sseClient.ts         # SSE 流式进度
+│   │   ├── index.html
+│   │   └── main.tsx
+│   └── assets/
+├── ppt-addin/                       # PowerPoint Add-in（端口 3003）
+│   ├── manifest.xml
+│   ├── src/
+│   │   ├── components/              # 同 Excel 组件集
+│   │   ├── hooks/                   # usePptContext, useApiServer
+│   │   ├── services/
+│   │   │   ├── apiClient.ts
+│   │   │   ├── contextReader.ts     # 遍历 slides/shapes 提取文本
+│   │   │   ├── pptWriteService.ts   # insertSlidesFromBase64 原生插入
+│   │   │   └── sseClient.ts
+│   │   ├── index.html
+│   │   └── main.tsx
+│   └── assets/
+├── outlook-addin/                   # Outlook Add-in（端口 3004）
+│   ├── manifest.xml
+│   ├── src/
+│   │   ├── components/              # 同 Excel 组件集
+│   │   ├── hooks/                   # useMailContext
+│   │   ├── services/
+│   │   │   ├── apiClient.ts         # 轮询 status（无 SSE）
+│   │   │   ├── mailContextReader.ts # 读取 subject/from/body
+│   │   │   └── mailWriteService.ts  # setAsync HTML 写入 + XSS 防护
+│   │   ├── index.html
+│   │   └── main.tsx
+│   └── assets/
 ├── shared/                          # 共享类型
 │   ├── src/
 │   │   └── types/
 │   │       ├── knowledge.ts         # 知识库类型
 │   │       ├── generation.ts        # 生成类型
 │   │       ├── evaluation.ts        # 评估类型
-│   │       └── metrics.ts           # 指标类型
+│   │       ├── chat.ts              # Chat 类型
+│   │       ├── case.ts              # Case 类型
+│   │       ├── provider.ts          # Provider 类型
+│   │       └── index.ts
+│   │   ├── datetime.ts              # 本地时间工具
+│   │   └── index.ts
 │   └── package.json
-├── excel-addin/                    # Office Add-in
-│   ├── manifest.xml
-│   ├── src/
-│   │   ├── taskpane/
-│   │   │   ├── index.html
-│   │   │   ├── main.tsx             # 侧边栏 React 入口
-│   │   │   └── components/          # 复用 client 组件
-│   │   └── commands/
-│   │       └── commands.ts
-│   └── assets/
 ├── samples/                         # Sample 数据
 │   ├── documents/
 │   ├── emails/
 │   ├── presentations/
 │   ├── spreadsheets/
-│   └── chats/
+│   ├── q3-report/
+│   └── charts/
 ├── tests/
 │   ├── unit/
 │   ├── integration/
@@ -95,7 +199,7 @@ docStudio/
 ├── docs/
 │   ├── PRD.md
 │   ├── design.md
-│   └── discuss.md
+│   └── backlog.md
 ├── CLAUDE.md
 ├── package.json
 ├── tsconfig.json
@@ -124,27 +228,51 @@ docStudio/
 │                        Server Layer (Express)                       │
 │                                                                     │
 │  ┌─── API Routes ───────────────────────────────────────────────┐  │
-│  │  /api/chat/*        Chat 交互 + 叙事引擎                      │  │
-│  │  /api/knowledge/*   知识库管理                                │  │
-│  │  /api/generate/*    文档生成                                  │  │
+│  │  /api/chat/*        Chat 交互 + 叙事引擎 + Query Analyzer    │  │
+│  │  /api/knowledge/*   知识库管理（含 Outlook KB 同步）          │  │
+│  │  /api/generate/*    文档生成（word/excel/ppt/email + SSE）   │  │
 │  │  /api/eval/*        评估平台                                  │  │
-│  │  /api/connectors/*  知识源连接器                              │  │
-│  │  /api/settings/*    配置管理                                  │  │
+│  │  /api/connectors/*  知识源连接器（MS Graph/GitHub/arXiv）     │  │
+│  │  /api/settings/*    配置管理（KeyStore 安全存储）             │  │
+│  │  /api/people/*      People Graph CRUD + 组织架构树            │  │
+│  │  /api/provenance/*  来源追溯树 + CRUD（拖拽重生成）           │  │
+│  │  /api/prompt-templates/* Prompt 模板管理                     │  │
+│  │  /api/workflows/*   Workflow 定义与执行                       │  │
+│  │  /api/data/*        通用 KV 存储（cases 等）                  │  │
+│  │  /api/health        健康检查                                  │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                                                                     │
 │  ┌─── Core Modules ─────────────────────────────────────────────┐  │
 │  │  chatRouter       叙事引擎 (大纲生成 + 智能判断)               │  │
 │  │  narrativeEngine  文档编排 (章节分配 + 风格)                   │  │
+│  │  queryAnalyzer    查询分析 (内容/格式分离 + 章节要点分配)      │  │
 │  │  queryExpand      查询扩展                                    │  │
 │  │  hybridSearch     混合检索 (BM25 + 向量 + RRF)                │  │
 │  │  reranker         重排序 (三级降级)                            │  │
 │  │  groundednessCheck 事实验证                                    │  │
-│  │  docGenerator     Office 文档生成                              │  │
+│  │  fidelityCheck    保真度门控 (章节相关性过滤)                  │  │
+│  │  conflictDetection 冲突检测与自动裁决                          │  │
+│  │  relevanceCheck   内容相关度核查                               │  │
+│  │  completenessCheck 内容完整度核查                              │  │
+│  │  docGenerator     Office 文档生成 (Word/PPT/Excel/Email)       │  │
+│  │  docExporter      文档导出 (PptxGenJS)                         │  │
 │  │  provenanceTree   生成树构建                                   │  │
+│  │  editImpactAnalyzer Chat 驱动编辑影响分析                      │  │
 │  │  evalMetrics      评估指标计算                                 │  │
 │  │  multiJudge       Multi-Judge 评估                            │  │
 │  │  goldenSetGenerator Golden Set 生成                           │  │
 │  │  metricsCollector  指标采集                                    │  │
+│  │  workflowEngine   Workflow 执行引擎                            │  │
+│  │  actionItemParser Action Item 解析                             │  │
+│  │  proactiveGenerator 主动生成                                   │  │
+│  │  peopleGraph      组织架构图谱                                 │  │
+│  │  wordPayloadBuilder  Word payload 构建                        │  │
+│  │  excelPayloadBuilder Excel payload 构建（原生表格+图表）       │  │
+│  │  emailPayloadBuilder Email payload 构建（Outlook HTML）        │  │
+│  │  browserManager   Playwright 浏览器管理 (html2pptx)            │  │
+│  │  slideHtmlBuilder PPT HTML 页面生成 (CSS Flexbox)              │  │
+│  │  slideElementExtractor PPT 元素坐标提取                        │  │
+│  │  slideLayoutEngine PPT 确定性流式布局引擎                      │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                                                                     │
 │  ┌─── Data Layer ───────────────────────────────────────────────┐  │
@@ -824,44 +952,203 @@ async function importPaper(paperId: string): Promise<Document> {
 }
 ```
 
+#### outlookKB.ts
+
+```typescript
+async function syncEmailsToKB(config, options): Promise<{ sources: number, chunks: number }> {
+  // 分页拉取邮件（默认最多 500 封，/me/messages）
+  // 转换为文本后走统一 ingestFile pipeline 向量化
+  // 支持增量同步（contentHash 去重）
+}
+
+async function syncContactsToKB(config, options): Promise<{ sources: number, chunks: number }> {
+  // 拉取联系人（最多 200 个，/me/contacts），同步到知识库
+}
+
+async function sendEmlFilesAsEmails(config, toAddress, ccAddress?): Promise<{ sent: number }> {
+  // 将知识库中 .eml 源逐封通过 Graph API /me/sendMail 发送
+}
+
+async function createContactsFromPeopleGraph(config): Promise<{ created: number }> {
+  // 将 People Graph 中的联系人创建到 Outlook 邮箱（POST /me/contacts）
+}
+```
+
+### 5.8 Query Analyzer (queryAnalyzer.ts)
+
+LLM 驱动的查询分析器，解决"格式指令污染检索"问题：
+
+```typescript
+interface QueryAnalysis {
+  contentPoints: string[];      // 实质性知识/数据维度
+  formatRequirements: string[]; // 排版/配色/图表类型等格式要求
+  sectionAssignments: Record<string, string[]>; // sectionId → contentPoints
+}
+
+async function analyzeQuery(
+  userRequest: string,
+  outline: Outline,
+  providerId: string,
+  apiKey: string,
+  modelId: string
+): Promise<QueryAnalysis> {
+  // 一次 LLM 调用，分离内容要点和格式要求
+  // 将 contentPoints 分配到具体章节
+}
+
+function buildRagQueryFromAnalysis(
+  sectionTitle: string,
+  description: string,
+  analysis: QueryAnalysis
+): string {
+  // 优先使用 LLM 分配的章节要点
+  // fallback 到关键词匹配（中英文混合 n-gram 分词）
+}
+```
+
+解决的问题：
+- 格式指令词（如"深色配色"、"柱状图"）污染 BM25 检索
+- 完整度检查误判格式要求为缺失内容
+
+### 5.9 Edit Impact Analyzer (editImpactAnalyzer.ts)
+
+Chat 驱动文档编辑的修改影响分析器：
+
+```typescript
+type EditSignificance = 'cosmetic' | 'stylistic' | 'substantive' | 'structural';
+
+async function analyzeSignificance(
+  oldText: string,
+  newText: string
+): Promise<{
+  significance: EditSignificance;
+  triggers: {
+    reground: boolean;    // 需要重跑 Groundedness
+    reprovenance: boolean; // 需要重建来源树
+    reeval: boolean;      // 需要重跑信任度评估
+    recheckConflicts: boolean; // 需要重跑冲突检测
+  };
+}> {
+  // 两级判断：
+  // 1. 快速过滤：Levenshtein 编辑距离
+  //    - 改动 <3字符/<1% → cosmetic
+  //    - 改动 >50% → substantive
+  // 2. LLM 语义判断：四级重要性
+  //    - cosmetic: 不改触发
+  //    - stylistic: 仅 trustScore
+  //    - substantive: groundedness + provenance + trustScore + completeness + relevance
+  //    - structural: 全部 + conflicts
+}
+```
+
+### 5.10 Evaluation System Updates
+
+4 个用户可见指标更新为：
+
+| 用户问题 | 指标 | 英文名 |
+|----------|------|--------|
+| "这段话是 AI 编的吗？" | **有据可查度** | Groundedness |
+| "有没有跑题？" | **内容相关度** | Relevance |
+| "有没有遗漏？" | **内容完整度** | Completeness |
+| "数据有没有矛盾？" | **无冲突率** | Conflict-free Rate |
+
+6 个底层支撑指标：Groundedness Check、Fidelity Check、Conflict Detection + Auto-Resolution、Relevance Check、Completeness Check、Paragraph-Level Provenance。
+
+冲突检测三级处置：
+1. **自动解决（高严重度）**：LLM 裁决 → 权威度高的胜出 → 败方排除
+2. **兜底排除（无法裁决）**：所有冲突侧全部排除
+3. **Highlight 给用户（非高严重度）**：保留所有来源 → 标注冲突
+
 ---
 
 ## 6. Office Add-in 设计
 
-### manifest.xml 结构
+### 6.1 四个 Add-in 概览
+
+| Add-in | 端口 | Host | Context 读取 | 写入方式 | 流式进度 |
+|--------|------|------|-------------|---------|---------|
+| Excel Add-in | 3001 | Workbook | usedRange/selectedRange（JSON 二维数组） | Excel.run() 逐单元格 + setPosition 锚定原生图表 | SSE |
+| PPT Add-in | 3003 | Presentation | 遍历 slides/shapes 提取文本 | insertSlidesFromBase64(base64) 整体插入 | SSE |
+| Outlook Add-in | 3004 | Mailbox | item.subject/from/body（截断 2000 字符） | item.body.setAsync(html) Compose 模式写入 | 轮询 |
+| Word Add-in | 3000 | Document | 文档正文内容 | Word.run() 段落级写入 | SSE |
+
+### 6.2 manifest.xml 结构
+
+每个 Add-in 有独立的 manifest.xml，指定对应 Host 和 SourceLocation：
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
            xsi:type="TaskPaneApp">
-  <Id>docstudio-addin-id</Id>
+  <Id>[unique-id]</Id>
   <Version>1.0.0</Version>
   <ProviderName>i-Write</ProviderName>
   <DefaultLocale>zh-CN</DefaultLocale>
   <DisplayName DefaultValue="i-Write"/>
   <Description DefaultValue="可信文档生成工作台"/>
   <Hosts>
-    <Host Name="Workbook"/>   <!-- Excel -->
-    <Host Name="Document"/>   <!-- Word -->
+    <Host Name="Workbook"/>     <!-- Excel -->
+    <Host Name="Document"/>     <!-- Word -->
     <Host Name="Presentation"/> <!-- PowerPoint -->
+    <Host Name="Mailbox"/>      <!-- Outlook -->
   </Hosts>
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://localhost:3000/excel-addin/taskpane.html"/>
+    <SourceLocation DefaultValue="https://localhost:[port]/index.html"/>
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
 </OfficeApp>
 ```
 
-### 侧边栏共享组件
+### 6.3 共享组件架构
 
-Office Add-in 的侧边栏 React 应用复用 client 的核心组件：
-- ChatBox
-- OutlineEditor
-- ProvenanceTree (简化版)
-- TrustReport
+四个 Add-in 的侧边栏 React 应用共享统一组件集：
+- `AppShell` — 侧边栏布局壳
+- `ChatPanel` — Chat 交互面板（含 Rich UI Elements）
+- `OutlinePanel` — 大纲展示与编辑
+- `ResultsPanel` — 生成结果展示 + 信任度评分
+- `WriteProgress` — SSE 流式进度条
+- `WriteTab` — 写入操作标签页
 
-通过 Office.js API 读取当前文档内容作为上下文。
+通过 `use[App]Context` Hook 读取当前宿主应用的上下文，通过统一的 `apiClient` 调用后端 `/api/*`，通过各自的 `[app]WriteService` 原生写入宿主应用。
+
+### 6.4 Payload Builders
+
+服务端为每个输出格式提供独立的 Payload Builder，将 `GenerateDocResult` 转换为 Add-in 可直接写入的结构化数据：
+
+| Builder | 输出格式 | 关键特性 |
+|---------|---------|---------|
+| `wordPayloadBuilder.ts` | `WordWritePayload` | 连续文档流、HTML 解析段落/表格、伪表格检测 |
+| `excelPayloadBuilder.ts` | `ExcelWritePayload` | 每 section 一个 Sheet、三段图表提取策略、原生图表、HYPERLINK 引用、独立"参考来源"Sheet |
+| `pptPayloadBuilder.ts` | `PptWritePayload`（旧版） | condenseSentence 压缩要点、bulletPoints 提取、引用去重编号；当前实际使用 PptxGenJS + insertSlidesFromBase64 路径 |
+| `emailPayloadBuilder.ts` | `EmailWritePayload` | cheerio HTML 解析、Outlook 友好内联样式、引用重新编号、脚注锚点、sourceTree 段落来源映射、paragraphScores 段落级评分 |
+
+### 6.5 Excel Add-in 图表写入
+
+Excel Add-in 支持 6 种原生 Office 图表类型：bar/column/pie/line/doughnut/scatter。图表源数据写入 K 列侧栏，图表对象通过 `chart.setPosition()` 锚定到 A-H 列正文区域。
+
+### 6.6 Outlook Add-in 写入保护
+
+Outlook Add-in 区分 Read/Compose 模式：
+- **Compose 模式**：`item.body.setAsync(htmlBody, {coercionType:'html'})` 覆盖草稿正文，顶部自动加"由 i-Write 起草 + 时间戳 + 主题"横幅
+- **Read 模式**：拒绝写回，避免误覆盖原邮件
+- XSS 防护：`escapeHtml` 转义所有用户内容
+
+### 6.7 PPT Add-in 写入方案
+
+PPT Add-in 采用 PptxGenJS 生成 + `insertSlidesFromBase64()` 方案：
+1. 调用 `GET /api/generation/:runId/pptx-base64` 获取服务端生成的 PPTX base64
+2. `presentation.insertSlidesFromBase64(base64, {formatting: 'useDestinationTheme'})` 插入
+3. 自动检测并删除空白首页（仅含 2 个占位符 shapes）
+4. 旧的逐 shape 创建方案已标记 deprecated
+
+### 6.8 html2pptx 高质量渲染（P2）
+
+为进一步提升 PPT 视觉质量，预留 Playwright + CSS Flexbox 渲染管线：
+- `browserManager.ts` — Playwright Chromium 单例管理（闲置 5 分钟自动关闭）
+- `slideHtmlBuilder.ts` — 为每个 section 生成 960x540px CSS Flexbox HTML
+- `slideElementExtractor.ts` — 通过 DOM 遍历提取元素坐标和样式（text/table/chart）
+- `slideLayoutEngine.ts` — 确定性流式布局引擎，估算元素高度、自动分页
 
 ---
 
