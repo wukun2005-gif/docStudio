@@ -8,6 +8,7 @@ import { readSettingsFromDb } from "./settingsReader.js";
 import { generateOutline, type OutlineSection } from "./narrativeEngine.js";
 import { logger } from "./logger.js";
 import { CASE_1783257530743 } from "../providers/fixtures/case-1783257530743.js";
+import { getDemoCase } from "../providers/fixtures/case-1783257530743-en.js";
 
 export interface DocumentContext {
   runId: string;
@@ -23,6 +24,8 @@ export interface ChatRequest {
   apiKey?: string;
   providerBaseUrls?: Record<string, string>;
   documentContext?: DocumentContext; // 当前文档上下文（用于解析修改范围）
+  /** 文档语言：zh-CN（默认中文）或 en（英文） */
+  language?: "zh-CN" | "en";
 }
 
 export interface EditTarget {
@@ -184,13 +187,18 @@ export function fallbackIntentAnalysis(message: string): IntentAnalysis {
 
 /** Chat 处理 */
 export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
+  /** 英文模式：所有面向用户的文案切换为英文 */
+  const en = req.language === "en";
+
   // ── Demo replay mode: return saved outline, skip all LLM calls ──
   if (req.providerPreference?.length === 1 && req.providerPreference[0] === "demo") {
-    const fixture = CASE_1783257530743;
+    const fixture = getDemoCase(CASE_1783257530743, req.language);
     logger.info(`[ChatRouter] Demo replay: returning saved outline from case ${fixture.caseId} (${fixture.outline.length} sections)`);
     return {
       type: "outline_request",
-      content: `我理解你想生成文档。让我为你创建一个大纲，你可以调整后再一键生成。`,
+      content: en
+        ? `I understand you want to generate a document. Let me draft an outline you can adjust, then generate it in one click.`
+        : `我理解你想生成文档。让我为你创建一个大纲，你可以调整后再一键生成。`,
       suggestedOutline: fixture.outline as OutlineSection[],
       skipEdit: true,
     };
@@ -229,7 +237,9 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
 
     return {
       type: "outline_request",
-      content: `已识别到你提供的大纲结构，将直接使用。`,
+      content: en
+        ? `I found the outline structure you provided and will use it as-is.`
+        : `已识别到你提供的大纲结构，将直接使用。`,
       suggestedOutline,
       skipEdit: true, // 告诉前端跳过编辑步骤
     };
@@ -238,12 +248,20 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
   if (analysis.intent === "unclear") {
     return {
       type: "clarification",
-      content: "我不太确定你的需求，能否提供更多细节？",
-      followUpQuestions: [
-        "你想生成什么类型的文档？",
-        "需要包含哪些内容？",
-        "有特定的格式要求吗？",
-      ],
+      content: en
+        ? "I am not quite sure what you need. Could you give me more detail?"
+        : "我不太确定你的需求，能否提供更多细节？",
+      followUpQuestions: en
+        ? [
+            "What type of document do you want to generate?",
+            "What content should it include?",
+            "Any specific format requirements?",
+          ]
+        : [
+            "你想生成什么类型的文档？",
+            "需要包含哪些内容？",
+            "有特定的格式要求吗？",
+          ],
     };
   }
 
@@ -252,7 +270,9 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
     if (!req.documentContext || req.documentContext.outline.length === 0) {
       return {
         type: "clarification",
-        content: "我检测到你想修改文档，但当前没有活跃的文档。请先生成一份文档，然后再发送修改指令。",
+        content: en
+          ? "It looks like you want to edit a document, but there is no active document. Please generate a document first, then send your edit instruction."
+          : "我检测到你想修改文档，但当前没有活跃的文档。请先生成一份文档，然后再发送修改指令。",
       };
     }
 
@@ -269,7 +289,9 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
 
     return {
       type: "edit_request",
-      content: `好的，我将对${editTarget.scope === "full" ? "全文" : editTarget.scope === "multiple" ? `第 ${editTarget.sectionIndices?.map((i) => i + 1).join(", ")} 章` : `第 ${(editTarget.sectionIndices?.[0] ?? 0) + 1} 章`}进行修改。`,
+      content: en
+        ? `Got it. I will revise ${editTarget.scope === "full" ? "the whole document" : editTarget.scope === "multiple" ? `sections ${editTarget.sectionIndices?.map((i) => i + 1).join(", ")}` : `section ${(editTarget.sectionIndices?.[0] ?? 0) + 1}`}.`
+        : `好的，我将对${editTarget.scope === "full" ? "全文" : editTarget.scope === "multiple" ? `第 ${editTarget.sectionIndices?.map((i) => i + 1).join(", ")} 章` : `第 ${(editTarget.sectionIndices?.[0] ?? 0) + 1} 章`}进行修改。`,
       editTarget,
     };
   }
@@ -288,7 +310,12 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
     }
 
     const messages = [
-      { role: "system" as const, content: "你是 i-Write 文档助手，帮助用户完成文档相关工作。简洁回答。" },
+      {
+        role: "system" as const,
+        content: en
+          ? "You are the i-Write document assistant. Help the user with document-related work. Answer concisely, in English."
+          : "你是 i-Write 文档助手，帮助用户完成文档相关工作。简洁回答。",
+      },
       ...(req.conversationHistory ?? []),
       { role: "user" as const, content: req.message },
     ];
@@ -303,7 +330,9 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
 
     return {
       type: "direct_answer",
-      content: response.error ? "抱歉，处理请求时出错了。" : response.text,
+      content: response.error
+        ? (en ? "Sorry, something went wrong while processing your request." : "抱歉，处理请求时出错了。")
+        : response.text,
     };
   }
 
@@ -322,7 +351,9 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
       const outlineText = analysis.extractedOutline.map((item, idx) =>
         `${idx + 1}. ${item.title}${item.description ? `: ${item.description}` : ""}`
       ).join("\n");
-      userRequest = `${req.message}\n\n用户已提供的大纲结构（请参考并优化）：\n${outlineText}`;
+      userRequest = en
+        ? `${req.message}\n\nOutline structure provided by the user (use as reference and refine it):\n${outlineText}`
+        : `${req.message}\n\n用户已提供的大纲结构（请参考并优化）：\n${outlineText}`;
     }
 
     const outline = await generateOutline({
@@ -331,13 +362,18 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
       modelId: req.modelId,
       apiKey: req.apiKey,
       providerBaseUrls: req.providerBaseUrls,
+      language: req.language,
     });
 
     return {
       type: "outline_request",
-      content: analysis.outlineRequested
-        ? `根据你的需求，我生成了以下大纲，你可以调整后再一键生成。`
-        : `我理解你想生成文档。让我为你创建一个大纲，你可以调整后再一键生成。`,
+      content: en
+        ? (analysis.outlineRequested
+          ? `Based on your request, here is the outline I generated. You can adjust it and then generate in one click.`
+          : `I understand you want to generate a document. Let me draft an outline you can adjust, then generate it in one click.`)
+        : (analysis.outlineRequested
+          ? `根据你的需求，我生成了以下大纲，你可以调整后再一键生成。`
+          : `我理解你想生成文档。让我为你创建一个大纲，你可以调整后再一键生成。`),
       suggestedOutline: outline,
     };
   } catch (err) {
@@ -345,12 +381,20 @@ export async function handleChat(req: ChatRequest): Promise<ChatResponse> {
     // Fallback: 返回默认大纲
     return {
       type: "outline_request",
-      content: `我理解你想生成文档。让我为你创建一个大纲，你可以调整后再一键生成。`,
-      suggestedOutline: [
-        { id: "s1", title: "概述", level: 1, description: "文档背景和目标", children: [] },
-        { id: "s2", title: "主要内容", level: 1, description: "核心信息和数据", children: [] },
-        { id: "s3", title: "总结", level: 1, description: "结论和下一步", children: [] },
-      ],
+      content: en
+        ? `I understand you want to generate a document. Let me draft an outline you can adjust, then generate it in one click.`
+        : `我理解你想生成文档。让我为你创建一个大纲，你可以调整后再一键生成。`,
+      suggestedOutline: en
+        ? [
+            { id: "s1", title: "Overview", level: 1, description: "Document background and objectives", children: [] },
+            { id: "s2", title: "Key Content", level: 1, description: "Core information and data", children: [] },
+            { id: "s3", title: "Summary", level: 1, description: "Conclusions and next steps", children: [] },
+          ]
+        : [
+            { id: "s1", title: "概述", level: 1, description: "文档背景和目标", children: [] },
+            { id: "s2", title: "主要内容", level: 1, description: "核心信息和数据", children: [] },
+            { id: "s3", title: "总结", level: 1, description: "结论和下一步", children: [] },
+          ],
     };
   }
 }

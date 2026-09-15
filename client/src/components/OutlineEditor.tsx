@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useLanguage } from "../i18n";
 
 interface OutlineSection {
   id: string;
@@ -15,6 +16,7 @@ interface OutlineEditorProps {
 }
 
 export default function OutlineEditor({ outline, onChange, onGenerate }: OutlineEditorProps) {
+  const { t } = useLanguage();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
 
@@ -39,7 +41,7 @@ export default function OutlineEditor({ outline, onChange, onGenerate }: Outline
   }
 
   function handleAdd(parentId?: string) {
-    const newTitle = "新章节";
+    const newTitle = t("outline.newSection");
     onChange(addSection(outline, parentId ?? null, newTitle));
   }
 
@@ -51,14 +53,14 @@ export default function OutlineEditor({ outline, onChange, onGenerate }: Outline
             onClick={() => handleAdd()}
             className="px-2.5 py-1 text-xs border rounded hover:bg-gray-50 transition-colors"
           >
-            + 添加章节
+            {t("outline.addSection")}
           </button>
           <button
             id="demo-generate-btn"
             onClick={onGenerate}
             className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
           >
-            🚀 一键生成
+            {t("outline.generate")}
           </button>
         </div>
       </div>
@@ -66,7 +68,7 @@ export default function OutlineEditor({ outline, onChange, onGenerate }: Outline
       <div className="divide-y">
         {outline.length === 0 ? (
           <div className="p-8 text-center text-gray-400">
-            暂无大纲，请先通过 Chat 生成或手动添加
+            {t("outline.empty")}
           </div>
         ) : (
           outline.map((section) => (
@@ -112,6 +114,7 @@ function OutlineItem({
   onAdd: (parentId?: string) => void;
   depth?: number;
 }) {
+  const { t } = useLanguage();
   const isEditing = editingId === section.id;
 
   return (
@@ -141,10 +144,10 @@ function OutlineItem({
         )}
 
         <div className="flex gap-1 opacity-0 group-hover:opacity-100">
-          <button onClick={() => onMove(section.id, "up")} className="text-gray-400 hover:text-gray-600 text-xs" title="上移">↑</button>
-          <button onClick={() => onMove(section.id, "down")} className="text-gray-400 hover:text-gray-600 text-xs" title="下移">↓</button>
-          <button onClick={() => onAdd(section.id)} className="text-gray-400 hover:text-green-600 text-xs" title="添加子章节">+</button>
-          <button onClick={() => onDelete(section.id)} className="text-gray-400 hover:text-red-600 text-xs" title="删除">×</button>
+          <button onClick={() => onMove(section.id, "up")} className="text-gray-400 hover:text-gray-600 text-xs" title={t("outline.moveUp")}>↑</button>
+          <button onClick={() => onMove(section.id, "down")} className="text-gray-400 hover:text-gray-600 text-xs" title={t("outline.moveDown")}>↓</button>
+          <button onClick={() => onAdd(section.id)} className="text-gray-400 hover:text-green-600 text-xs" title={t("outline.addChild")}>+</button>
+          <button onClick={() => onDelete(section.id)} className="text-gray-400 hover:text-red-600 text-xs" title={t("outline.delete")}>×</button>
         </div>
       </div>
 

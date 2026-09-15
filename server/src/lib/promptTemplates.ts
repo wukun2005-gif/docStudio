@@ -220,6 +220,224 @@ const BUILTIN_AUDIENCES: AudienceProfile[] = [
   },
 ];
 
+// ── 英文变体（language="en" 时替换中文模板）─────────────────
+// 与上面的中文模板一一对应，key 为模板 id
+
+const STYLE_FRAGMENT_EN: Record<string, string> = {
+  email: `This is an email. Output it in email format:
+- First line: the subject line
+- Open with a salutation (e.g. "Dear Sarah,")
+- Body in paragraphs, one key point per paragraph
+- Close with a sign-off (e.g. "Best regards", "Sincerely")
+- End with the sender's signature
+Do NOT use markdown (no # headings, no ** bold **, no - lists). Use plain-text paragraphs.`,
+  report: `This is a formal report. Output it in report format:
+- Clear title and section structure
+- A sub-heading for each section
+- Content in well-organised paragraphs with transitions between them
+- Highlight key conclusions and figures in bold
+- Present tabular data as markdown tables
+- Formal, objective and professional language; avoid colloquialisms`,
+  presentation: `This is a slide deck. Output it in PPT format:
+- Each section is one slide
+- Use sub-headings (h3) to separate information points; organise each point as "explanatory text → data table → chart"
+- Explanatory text should be punchy: 2-3 sentences capturing the core conclusion
+- Data MUST be presented as markdown tables (| Col 1 | Col 2 | ... |), not as prose
+- For data that needs visual comparison, provide a chart spec in a \`\`\`chart code block (see the output-format requirements)
+- Separate information points with blank lines to keep slides readable`,
+  technical: `This is a technical document. Output it in technical-document format:
+- Clear heading hierarchy (H1 / H2 / H3)
+- Wrap code in fenced code blocks and declare the language
+- Present parameter descriptions as lists
+- Include code examples
+- Precise terminology and exact wording`,
+  table: `This is a tabular / data document. Output it in table format:
+- Use markdown table syntax (| Col 1 | Col 2 | ... |)
+- Clear header row with concise column names
+- Aligned data, tight content
+- Add a brief note before or after the table when needed`,
+  memo: `This is a memo. Output it in memo format:
+- Open with: To (recipients), From (sender), Date, Subject
+- Body is concise and itemised
+- End with explicit next-step action items
+- Terse language, no redundancy`,
+  general: `Output in formal document format:
+- Professional, fluent language with a clear structure
+- Explicit paragraph breaks
+- Emphasise important information where appropriate
+- Suitable for formal reading and circulation`,
+};
+
+const FORMAT_CONSTRAINTS_EN: Record<string, string> = {
+  word: `Output format requirements (Word document):
+- Plain text only — do not use any Markdown syntax
+- Write headings as plain text, with no # prefix
+- Do not wrap bold text in **; emphasise with wording instead (e.g. "The key point is...")
+- Use numbered lists (1. 2. 3.), not - bullets
+- Describe tables in prose or aligned spacing, not with | pipes
+- Standard English punctuation: one space after a period, no doubled punctuation marks
+- Leave a blank line between paragraphs`,
+  ppt: `Output format requirements (PowerPoint deck):
+- Each section is a standalone slide
+- Mark each information point with ### (markdown H3)
+- Present data as markdown tables (| Col 1 | Col 2 | ... |) with a |---| separator row
+- If the outline calls for charts, you MUST attach the JSON data in a \`\`\`chart code block (at most one chart per information point):
+\`\`\`chart
+[{"type": "column", "title": "Chart Title", "categories": ["Category 1", "Category 2"], "series": [{"name": "Series Name", "values": [10, 20]}]}]
+\`\`\`
+- Supported chart types: bar / column / pie / doughnut / line / scatter
+- Keep text concise but complete; do not replace concrete data with hollow bullet points
+- Base tables and charts on the reference material; if data is insufficient you may estimate reasonably from it, but you must still produce them`,
+  excel: `Output format requirements (Excel workbook):
+- Each section contains explanatory text plus concrete data
+- Use markdown tables (| Col 1 | Col 2 | ... |)
+- Data must be concrete (numbers, percentages, dates) and grounded in the knowledge base
+- For charts, write the description first, then attach the JSON in a \`\`\`chart code block:
+\`\`\`chart
+[{"type": "column", "title": "Chart Title", "categories": ["Category 1", "Category 2"], "series": [{"name": "Series Name", "values": [10, 20]}]}]
+\`\`\`
+- Supported chart types: bar / column / pie / doughnut / line / scatter
+- Do NOT output Python scripts — only the JSON chart spec`,
+  markdown: `Output format requirements (Markdown):
+- Use standard Markdown syntax
+- Use # for heading levels
+- Use **bold** for emphasis
+- Use - or digits for lists
+- Use | pipes for tables
+- Wrap code in backticks`,
+  html: `Output format requirements (HTML):
+- You may use HTML tags to structure content
+- Use h2/h3 for headings
+- Use ul/ol for lists
+- Use table for tabular data
+- Prefer semantic tags`,
+};
+
+const AUDIENCE_GUIDANCE_EN: Record<string, string> = {
+  executive: `Reader profile: executive (CEO / COO / VP)
+- Lead with conclusions and decision recommendations; push details to an appendix
+- Use business language and avoid technical jargon; if a technical term is unavoidable, add a brief explanation
+- Data and conclusions must be backed by explicit sources
+- Focus on ROI, risk and timelines — the dimensions executives care about
+- Keep paragraphs short, one core point each
+- Use tables for comparative data where appropriate`,
+  engineer: `Reader profile: engineers / technical staff
+- Domain terminology and technical concepts are welcome
+- Code samples and API descriptions must be precise
+- Focus on implementation details, performance metrics and the rationale behind technical choices
+- Code blocks and tables are fine
+- Clear logic and explicit cause-and-effect`,
+  legal: `Reader profile: legal counsel / compliance team
+- Rigorous, precise wording with no ambiguity
+- Cite regulations accurately (e.g. GDPR Article X)
+- Focus on compliance status, risk level and deadlines
+- Use tables for compliance checklists
+- Clearly distinguish "Completed", "In progress" and "Not started"`,
+  customer: `Reader profile: external customer or partner
+- Friendly, professional language; no internal jargon or abbreviations
+- Focus on customer value and benefits
+- Explain features in the customer's usage context
+- Do not expose internal technical details or architecture
+- End with clear next steps and contact details`,
+  general: `Reader profile: general audience
+- Plain, accessible language; explain any technical term you use
+- Clear structure with an introduction and a summary
+- Use headings and lists to improve readability
+- Avoid being overly technical or overly simplistic`,
+};
+
+/** Style 模板的 prompt 片段（英文模式返回英文版，缺失时回退中文） */
+export function styleFragment(style: StyleTemplate, en: boolean): string {
+  if (!en) return style.promptFragment;
+  return STYLE_FRAGMENT_EN[style.id] ?? style.promptFragment;
+}
+
+/** Style 名称的英文映射 */
+const STYLE_NAME_EN: Record<string, string> = {
+  email: "Email", report: "Report", presentation: "Slide deck",
+  technical: "Technical document", table: "Data table", memo: "Memo", general: "General document",
+};
+
+/** Style 描述的英文映射 */
+const STYLE_DESC_EN: Record<string, string> = {
+  email: "A formal email with salutation, body, sign-off and signature",
+  report: "A formal analysis or status report, suitable for management",
+  presentation: "Slide-deck style with structured information points",
+  technical: "API docs, technical specs, README and other technical documents",
+  table: "Table-centric documents such as lists, comparison tables and reports",
+  memo: "A short internal memo or meeting note",
+  general: "A general-purpose formal document for unspecified types",
+};
+
+/** Format 名称的英文映射 */
+const FORMAT_NAME_EN: Record<string, string> = {
+  word: "Word document", ppt: "PowerPoint deck", excel: "Excel workbook",
+  markdown: "Markdown", html: "HTML",
+};
+
+/** Audience 名称的英文映射 */
+const AUDIENCE_NAME_EN: Record<string, string> = {
+  executive: "Executives", engineer: "Engineers", legal: "Legal / Compliance",
+  customer: "Customers / Partners", general: "General readers",
+};
+
+/** Style 模板名称（英文模式返回英文名） */
+export function styleName(style: StyleTemplate, en: boolean): string {
+  if (!en) return style.name;
+  return STYLE_NAME_EN[style.id] ?? style.name;
+}
+
+/** Format 模板名称（英文模式返回英文名） */
+export function formatName(format: FormatTemplate, en: boolean): string {
+  if (!en) return format.name;
+  return FORMAT_NAME_EN[format.id] ?? format.name;
+}
+
+/** Audience 模板名称（英文模式返回英文名） */
+export function audienceName(audience: AudienceProfile, en: boolean): string {
+  if (!en) return audience.name;
+  return AUDIENCE_NAME_EN[audience.id] ?? audience.name;
+}
+
+/**
+ * 输出「给人看的」模板对象：英文模式下替换 name / description / guidance。
+ * 注意 id 永远保持原值（业务逻辑按 id 索引），只翻展示层。
+ */
+export function localizeStyle(style: StyleTemplate, language?: string): StyleTemplate {
+  const en = language === "en";
+  if (!en) return style;
+  return {
+    ...style,
+    name: styleName(style, true),
+    description: STYLE_DESC_EN[style.id] ?? style.description,
+  };
+}
+
+export function localizeFormat(format: FormatTemplate, language?: string): FormatTemplate {
+  const en = language === "en";
+  if (!en) return format;
+  return { ...format, name: formatName(format, true) };
+}
+
+export function localizeAudience(audience: AudienceProfile, language?: string): AudienceProfile {
+  const en = language === "en";
+  if (!en) return audience;
+  // AudienceProfile 只有 id/name/guidance，id 保持原值供业务索引
+  return { ...audience, name: audienceName(audience, true) };
+}
+
+/** Format 模板的输出约束（英文模式返回英文版） */
+export function formatConstraints(format: FormatTemplate, en: boolean): string {
+  if (!en) return format.constraints;
+  return FORMAT_CONSTRAINTS_EN[format.id] ?? format.constraints;
+}
+
+/** Audience 模板的读者指导（英文模式返回英文版） */
+export function audienceGuidance(audience: AudienceProfile, en: boolean): string {
+  if (!en) return audience.guidance;
+  return AUDIENCE_GUIDANCE_EN[audience.id] ?? audience.guidance;
+}
+
 // ── 风格检测 ──────────────────────────────────────────────
 
 /** 从用户请求中自动推断文档风格 */

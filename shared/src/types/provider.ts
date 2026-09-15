@@ -70,15 +70,17 @@ export interface PresetSearchProvider {
   id: SearchProviderId;
   displayName: string;
   desc: string;
+  /** desc 的英文版本（locale = en 时使用） */
+  descEn?: string;
   baseUrl: string;
   keyPlaceholder: string;
 }
 
 export const PRESET_SEARCH_PROVIDERS: PresetSearchProvider[] = [
-  { id: "tavily", displayName: "Tavily", desc: "免费额度 1000 次/月，注册地址: app.tavily.com", baseUrl: "https://api.tavily.com", keyPlaceholder: "tvly-..." },
-  { id: "serpapi", displayName: "SerpAPI", desc: "Google 搜索 API，免费额度 100 次/月", baseUrl: "https://serpapi.com", keyPlaceholder: "your-serpapi-key" },
-  { id: "epo", displayName: "EPO OPS", desc: "欧洲专利局官方 API (OPS v3.2)，结构化专利数据", baseUrl: "https://ops.epo.org/3.2", keyPlaceholder: "Consumer Key / Consumer Secret" },
-  { id: "serper", displayName: "Serper.dev", desc: "Google 搜索 API，免费额度 2500 次，注册地址: serper.dev", baseUrl: "https://google.serper.dev", keyPlaceholder: "your-serper-key" },
+  { id: "tavily", displayName: "Tavily", desc: "免费额度 1000 次/月，注册地址: app.tavily.com", descEn: "Free tier: 1,000 calls/month. Sign up at app.tavily.com", baseUrl: "https://api.tavily.com", keyPlaceholder: "tvly-..." },
+  { id: "serpapi", displayName: "SerpAPI", desc: "Google 搜索 API，免费额度 100 次/月", descEn: "Google Search API. Free tier: 100 calls/month", baseUrl: "https://serpapi.com", keyPlaceholder: "your-serpapi-key" },
+  { id: "epo", displayName: "EPO OPS", desc: "欧洲专利局官方 API (OPS v3.2)，结构化专利数据", descEn: "Official European Patent Office API (OPS v3.2) for structured patent data", baseUrl: "https://ops.epo.org/3.2", keyPlaceholder: "Consumer Key / Consumer Secret" },
+  { id: "serper", displayName: "Serper.dev", desc: "Google 搜索 API，免费额度 2500 次，注册地址: serper.dev", descEn: "Google Search API. Free tier: 2,500 calls. Sign up at serper.dev", baseUrl: "https://google.serper.dev", keyPlaceholder: "your-serper-key" },
 ];
 
 // ── Knowledge Provider (Embedding / Reranker) ──────────────
@@ -100,7 +102,11 @@ export interface PresetKnowledgeProvider {
   providerType: KnowledgeProviderType;
   providerId: string;
   displayName: string;
+  /** displayName 的英文版本（locale = en 时使用） */
+  displayNameEn?: string;
   desc: string;
+  /** desc 的英文版本（locale = en 时使用） */
+  descEn?: string;
   baseUrl: string;
   defaultModelId: string;
   keyPlaceholder: string;
@@ -111,7 +117,9 @@ export const PRESET_KNOWLEDGE_PROVIDERS: PresetKnowledgeProvider[] = [
     providerType: "embedding",
     providerId: "siliconflow",
     displayName: "硅基流动 Embedding",
+    displayNameEn: "SiliconFlow Embedding",
     desc: "SiliconFlow Embedding API（免费额度）",
+    descEn: "SiliconFlow Embedding API (free tier)",
     baseUrl: "https://api.siliconflow.cn/v1",
     defaultModelId: "BAAI/bge-m3",
     keyPlaceholder: "sk-...",
@@ -120,7 +128,9 @@ export const PRESET_KNOWLEDGE_PROVIDERS: PresetKnowledgeProvider[] = [
     providerType: "reranker",
     providerId: "siliconflow",
     displayName: "硅基流动 Re-ranker",
+    displayNameEn: "SiliconFlow Re-ranker",
     desc: "SiliconFlow Re-ranker API（免费额度）",
+    descEn: "SiliconFlow Re-ranker API (free tier)",
     baseUrl: "https://api.siliconflow.cn/v1",
     defaultModelId: "BAAI/bge-reranker-v2-m3",
     keyPlaceholder: "sk-...",

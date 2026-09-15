@@ -3,6 +3,7 @@
  * 照搬 patentExaminator 的 caseSlice：write-through + load-on-mount
  */
 import { create } from "zustand";
+import { translate } from "../i18n/index.js";
 import { localIso } from "../../../shared/src/datetime.js";
 import type { DocumentCase, CaseWorkflowState } from "../../../shared/src/types/case.js";
 import type { OutlineSection, DocumentFormat } from "../../../shared/src/types/generation.js";
@@ -78,7 +79,7 @@ export const useCaseStore = create<CaseStore>((set, get) => ({
     const now = localIso();
     const c: DocumentCase = {
       id: `case-${Date.now()}`,
-      title: userRequest.slice(0, 50) || "新文档",
+      title: userRequest.slice(0, 50) || translate("caseList.newDocTitle"),
       userRequest,
       outline: [],
       format: "html",

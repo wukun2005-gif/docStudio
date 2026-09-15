@@ -11,6 +11,7 @@ import {
   updateSession as repoUpdateSession,
 } from "../lib/chatRepo.js";
 import type { ChatSession, ChatMessage } from "../../../shared/src/types/chat.js";
+import { useLanguage } from "../i18n";
 
 interface DocumentContext {
   runId: string;
@@ -26,6 +27,7 @@ interface ChatBoxProps {
 }
 
 export default function ChatBox({ collapsed, onOutlineRequest, documentContext: propDocumentContext, onEditRequest }: ChatBoxProps) {
+  const { t, locale } = useLanguage();
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -85,7 +87,7 @@ export default function ChatBox({ collapsed, onOutlineRequest, documentContext: 
         id: `edit-start-${Date.now()}`,
         sessionId: activeSessionId ?? "",
         role: "assistant",
-        content: `🔄 正在修改 ${scope}...\n\n指令：${instruction}`,
+        content: t("chat.editStarted", { scope, instruction }),
         createdAt: localIso(),
       });
     }
@@ -96,7 +98,12 @@ export default function ChatBox({ collapsed, onOutlineRequest, documentContext: 
         id: `edit-done-${Date.now()}`,
         sessionId: activeSessionId ?? "",
         role: "assistant",
-        content: `${status} ${scope} 修改完成（成功 ${successCount} 章${failCount > 0 ? `，失败 ${failCount} 章` : ""}）`,
+        content: t("chat.editCompleted", {
+          status,
+          scope,
+          successCount: String(successCount),
+          failCountPart: failCount > 0 ? t("chat.editFailedPart", { failCount: String(failCount) }) : "",
+        }),
         createdAt: localIso(),
       });
     }
@@ -106,7 +113,7 @@ export default function ChatBox({ collapsed, onOutlineRequest, documentContext: 
       window.removeEventListener("edit-started", handleEditStarted as EventListener);
       window.removeEventListener("edit-completed", handleEditCompleted as EventListener);
     };
-  }, [activeSessionId, addMessage]);
+  }, [activeSessionId, addMessage, t]);
 
   // ── 按 caseId 加载 sessions + messages（照搬 patentExaminator）──
   useEffect(() => {
@@ -184,7 +191,7 @@ export default function ChatBox({ collapsed, onOutlineRequest, documentContext: 
     const now = localIso();
     const session: ChatSession = {
       id,
-      title: "新对话",
+      title: t("chat.newSession"),
       caseId: currentCase?.id,
       createdAt: now,
       updatedAt: now,
@@ -246,6 +253,7 @@ export default function ChatBox({ collapsed, onOutlineRequest, documentContext: 
       const fetchBody: any = {
         message: userInput,
         conversationHistory: sessionMessages.map((m) => ({ role: m.role, content: m.content })),
+        language: locale,
       };
       if (activeDocumentContext) {
         fetchBody.documentContext = activeDocumentContext;
@@ -308,7 +316,7 @@ export default function ChatBox({ collapsed, onOutlineRequest, documentContext: 
         id: crypto.randomUUID(),
         sessionId,
         role: "assistant",
-        content: "请求失败，请重试。",
+        content: t("chat.requestFailed"),
         createdAt: localIso(),
       });
     } finally {
@@ -399,7 +407,7 @@ export default function ChatBox({ collapsed, onOutlineRequest, documentContext: 
                 removeSession(s.id);
               }}
               className="text-gray-400 hover:text-red-500 ml-0.5"
-              title="删除"
+              title={t("chat.deleteSession")}
             >
               ×
             </button>
@@ -408,7 +416,7 @@ export default function ChatBox({ collapsed, onOutlineRequest, documentContext: 
         <button
           onClick={handleNewSession}
           className="px-2 py-1 text-xs text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded"
-          title="新对话"
+          title={t("chat.newSession")}
         >
           +
         </button>
@@ -419,8 +427,8 @@ export default function ChatBox({ collapsed, onOutlineRequest, documentContext: 
         {sessionMessages.length === 0 && (
           <div className="text-center text-gray-400 py-12">
             <p className="text-2xl mb-2">👋</p>
-            <p className="text-sm font-medium text-gray-600">你好！我是 i-Write 文档助手</p>
-            <p className="text-xs mt-1">告诉我你想生成什么文档，我来帮你。</p>
+            <p className="text-sm font-medium text-gray-600">{t("chat.greeting")}</p>
+            <p className="text-xs mt-1">{t("chat.greetingDesc")}</p>
           </div>
         )}
         {sessionMessages.map((msg) => (
@@ -450,7 +458,7 @@ export default function ChatBox({ collapsed, onOutlineRequest, documentContext: 
         {loading && (
           <div className="flex justify-start">
             <div className="bg-gray-100 rounded-lg px-3 py-2 text-sm">
-              <span className="animate-pulse text-gray-500">思考中...</span>
+              <span className="animate-pulse text-gray-500">{t("chat.thinking")}</span>
             </div>
           </div>
         )}
@@ -470,7 +478,7 @@ export default function ChatBox({ collapsed, onOutlineRequest, documentContext: 
                 handleSend();
               }
             }}
-            placeholder="输入你的需求... (Shift+Enter 换行)"
+            placeholder={t("chat.inputPlaceholder")}
             id="demo-chat-input"
             className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none overflow-y-auto"
             style={{ minHeight: "40px", maxHeight: "200px" }}
@@ -484,7 +492,7 @@ export default function ChatBox({ collapsed, onOutlineRequest, documentContext: 
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm transition-colors shrink-0"
             style={{ height: "40px" }}
           >
-            发送
+            {t("chat.send")}
           </button>
         </div>
       </div>

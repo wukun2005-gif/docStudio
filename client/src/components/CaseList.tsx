@@ -4,15 +4,7 @@
  */
 import { useEffect, useState } from "react";
 import { useCaseStore } from "../store/caseStore.js";
-
-const STATE_LABELS: Record<string, string> = {
-  draft: "编辑中",
-  "outline-ready": "大纲就绪",
-  generating: "生成中",
-  evaluating: "评估中",
-  completed: "已完成",
-  error: "失败",
-};
+import { useLanguage } from "../i18n";
 
 const STATE_COLORS: Record<string, string> = {
   draft: "bg-gray-100 text-gray-600",
@@ -31,6 +23,7 @@ interface CaseListProps {
 type Tab = "cases" | "trash";
 
 export default function CaseList({ collapsed, onToggle }: CaseListProps) {
+  const { t, formatDate } = useLanguage();
   const {
     cases, trashedCases, currentCase, isLoading,
     loadCases, loadTrashedCases,
@@ -66,14 +59,14 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
 
   function handleDelete(e: React.MouseEvent, id: string) {
     e.stopPropagation();
-    if (confirm("确定将此文档移入回收站？")) {
+    if (confirm(t("caseList.deleteConfirm"))) {
       deleteCase(id);
     }
   }
 
   function handlePermanentDelete(e: React.MouseEvent, id: string) {
     e.stopPropagation();
-    if (confirm("确定永久删除此文档？此操作不可恢复。")) {
+    if (confirm(t("caseList.permanentDeleteConfirm"))) {
       permanentDeleteCase(id);
     }
   }
@@ -96,9 +89,9 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
     setEditingId(null);
   }
 
-  function formatDate(iso: string | undefined): string {
+  function formatDateShort(iso: string | undefined): string {
     if (!iso) return "";
-    return new Date(iso).toLocaleString("zh-CN", {
+    return formatDate(new Date(iso), {
       month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
     });
   }
@@ -110,7 +103,7 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
         <button
           onClick={handleNew}
           className="w-8 h-8 rounded flex items-center justify-center text-blue-600 hover:bg-blue-50 text-lg"
-          title="新建文档"
+          title={t("caseList.newDoc")}
         >
           +
         </button>
@@ -124,9 +117,9 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
                 ? "bg-blue-100 text-blue-700"
                 : "text-gray-500 hover:bg-gray-100"
             }`}
-            title={c.title || "未命名文档"}
+            title={c.title || t("caseList.untitled")}
           >
-            {(c.title || "文")[0]}
+            {(c.title || t("caseList.untitled"))[0]}
           </button>
         ))}
       </div>
@@ -146,7 +139,7 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
               : "text-gray-500 hover:text-gray-700"
           }`}
         >
-          文档
+          {t("caseList.documents")}
         </button>
         <button
           onClick={() => setTab("trash")}
@@ -156,7 +149,7 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
               : "text-gray-500 hover:text-gray-700"
           }`}
         >
-          回收站
+          {t("caseList.trash")}
           {trashedCases.length > 0 && (
             <span className="ml-1 text-[10px] text-gray-400">({trashedCases.length})</span>
           )}
@@ -167,14 +160,14 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
       <div className="p-3 border-b shrink-0">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-sm font-semibold text-gray-700">
-            {tab === "cases" ? "文档列表" : "回收站"}
+            {tab === "cases" ? t("caseList.docList") : t("caseList.trashList")}
           </h2>
           {tab === "cases" && (
             <button
               onClick={handleNew}
               className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
             >
-              + 新建
+              {t("caseList.newDoc")}
             </button>
           )}
         </div>
@@ -182,7 +175,7 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
           type="text"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="搜索..."
+          placeholder={t("caseList.search")}
           className="w-full border rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
         />
       </div>
@@ -190,13 +183,13 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
       {/* List */}
       <div className="flex-1 overflow-y-auto">
         {isLoading && (
-          <div className="p-4 text-center text-gray-400 text-sm">加载中...</div>
+          <div className="p-4 text-center text-gray-400 text-sm">{t("caseList.loading")}</div>
         )}
 
         {/* 文档列表 */}
         {tab === "cases" && !isLoading && filtered.length === 0 && (
           <div className="p-4 text-center text-gray-400 text-sm">
-            {search ? "无匹配结果" : "暂无文档"}
+            {search ? t("caseList.noResults") : t("caseList.noDocuments")}
           </div>
         )}
         {tab === "cases" && filtered.map((c) => (
@@ -222,20 +215,20 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
                   onClick={(e) => e.stopPropagation()}
                 />
               ) : (
-                <span className="text-sm text-gray-800 truncate flex-1">{c.title || "未命名文档"}</span>
+                <span className="text-sm text-gray-800 truncate flex-1">{c.title || t("caseList.untitled")}</span>
               )}
               <div className="flex items-center gap-1 ml-2 opacity-0 group-hover:opacity-100 transition-opacity">
                 <button
                   onClick={(e) => handleRenameStart(e, c)}
                   className="text-gray-400 hover:text-blue-600 text-xs"
-                  title="重命名"
+                  title={t("caseList.rename")}
                 >
                   ✏️
                 </button>
                 <button
                   onClick={(e) => handleDelete(e, c.id)}
                   className="text-gray-400 hover:text-red-500 text-xs"
-                  title="移入回收站"
+                  title={t("caseList.deleteToTrash")}
                 >
                   🗑
                 </button>
@@ -246,10 +239,10 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
                 {c.id}
               </span>
               <span className={`text-[10px] px-1.5 py-0.5 rounded ${STATE_COLORS[c.workflowState] || "bg-gray-100"}`}>
-                {STATE_LABELS[c.workflowState] || c.workflowState}
+                {t(`caseList.stateLabels.${c.workflowState}`) || c.workflowState}
               </span>
               <span className="text-[10px] text-gray-400">
-                {formatDate(c.updatedAt)}
+                {formatDateShort(c.updatedAt)}
               </span>
             </div>
           </div>
@@ -258,7 +251,7 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
         {/* 回收站列表 */}
         {tab === "trash" && !isLoading && filteredTrash.length === 0 && (
           <div className="p-4 text-center text-gray-400 text-sm">
-            {search ? "无匹配结果" : "回收站为空"}
+            {search ? t("caseList.noResults") : t("caseList.trashEmpty")}
           </div>
         )}
         {tab === "trash" && filteredTrash.map((c) => (
@@ -268,20 +261,20 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
           >
             <div className="flex items-center justify-between">
               <span className="text-sm text-gray-500 truncate flex-1 line-through">
-                {c.title || "未命名文档"}
+                {c.title || t("caseList.untitled")}
               </span>
               <div className="flex items-center gap-1 ml-2 opacity-0 group-hover:opacity-100 transition-opacity">
                 <button
                   onClick={(e) => handleRestore(e, c.id)}
                   className="text-gray-400 hover:text-green-600 text-xs"
-                  title="恢复"
+                  title={t("caseList.restore")}
                 >
                   ↩
                 </button>
                 <button
                   onClick={(e) => handlePermanentDelete(e, c.id)}
                   className="text-gray-400 hover:text-red-500 text-xs"
-                  title="永久删除"
+                  title={t("caseList.permanentDelete")}
                 >
                   ×
                 </button>
@@ -292,7 +285,7 @@ export default function CaseList({ collapsed, onToggle }: CaseListProps) {
                 {c.id}
               </span>
               <span className="text-[10px] text-gray-400">
-                删除于 {formatDate(c.deletedAt)}
+                {t("caseList.deletedAt")} {formatDateShort(c.deletedAt)}
               </span>
             </div>
           </div>

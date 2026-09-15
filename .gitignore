@@ -12,6 +12,7 @@ coverage/
 *.tsbuildinfo
 *.log
 *.md
+!docs/PRD_en.md
 docs/backlog.md
 docs/sample-data-upgrade-plan.md
 docs/llm-parallel-optimization.md

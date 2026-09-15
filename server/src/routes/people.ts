@@ -17,14 +17,33 @@ import {
   type PersonAttributes,
 } from "../lib/peopleGraph.js";
 import { logger } from "../lib/logger.js";
+import { readLanguage } from "../lib/serverI18n.js";
+import {
+  localizePerson,
+  localizeOrgTree,
+  localizeDepartment,
+} from "../lib/kbGlossary.js";
 import { syncPeopleFromGraph } from "../lib/connectors/msGraphPeople.js";
 
 export const peopleRouter = Router();
 
+/**
+ * 收集「当前用户」的 id 集合。
+ * 前端据此标记「我」，避免再拿人名做等值比较（本地化后必然失配）。
+ */
+function currentUserIds(): Set<string> {
+  return new Set(
+    getAllPeople()
+      .filter((p) => (p.attributes as { isCurrentUser?: boolean } | undefined)?.isCurrentUser)
+      .map((p) => p.id),
+  );
+}
+
 /** GET /api/people — 获取所有人 */
-peopleRouter.get("/", (_req, res) => {
+peopleRouter.get("/", (req, res) => {
   try {
-    const people = getAllPeople();
+    const language = readLanguage(req);
+    const people = getAllPeople().map((p) => localizePerson(p, language));
     res.json({ ok: true, people });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -33,12 +52,21 @@ peopleRouter.get("/", (_req, res) => {
 });
 
 /** GET /api/people/org-tree — 组织架构树 */
-peopleRouter.get("/org-tree", (_req, res) => {
+peopleRouter.get("/org-tree", (req, res) => {
   try {
+    const language = readLanguage(req);
     const tree = getOrgTree();
     const result: Record<string, Array<{ id: string; name: string; title?: string; email?: string }>> = {};
     for (const [dept, people] of tree) {
-      result[dept] = people.map((p) => ({ id: p.id, name: p.name, title: p.title, email: p.email }));
+      // 部门同时用作分组键，键与值都要本地化，否则界面会出现中英混杂的分组标题
+      const key = (localizeDepartment(dept, language) ?? dept) as string;
+      result[key] = people.map(
+        (p) =>
+          localizePerson(
+            { id: p.id, name: p.name, title: p.title, email: p.email },
+            language,
+          ) as { id: string; name: string; title?: string; email?: string },
+      );
     }
     res.json({ ok: true, tree: result });
   } catch (err) {
@@ -48,9 +76,10 @@ peopleRouter.get("/org-tree", (_req, res) => {
 });
 
 /** GET /api/people/org-hierarchy — 组织架构层级（基于汇报关系） */
-peopleRouter.get("/org-hierarchy", (_req, res) => {
+peopleRouter.get("/org-hierarchy", (req, res) => {
   try {
-    const hierarchy = getOrgHierarchy();
+    const language = readLanguage(req);
+    const hierarchy = localizeOrgTree(getOrgHierarchy(), language, currentUserIds());
     res.json({ ok: true, hierarchy });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -178,7 +207,7 @@ peopleRouter.get("/:id", (req, res) => {
       res.status(404).json({ ok: false, error: "Person not found" });
       return;
     }
-    res.json({ ok: true, person });
+    res.json({ ok: true, person: localizePerson(person, readLanguage(req)) });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ ok: false, error: msg });

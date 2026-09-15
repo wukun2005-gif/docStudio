@@ -80,26 +80,52 @@ export const RULES: Record<string, WritingRule> = {
   },
 };
 
+// ── 英文规则变体（language="en" 时替换）────────────────────
+// 注意：cjk-spacing / punctuation 是中文排版专属规则，英文模式下不注入
+
+const RULE_EN: Record<string, string> = {
+  "no-repeat-title": "Each heading may appear only once in the whole document. Never repeat an identical or highly similar heading; refer back to earlier content with a summary instead.",
+  "citation-format": "When citing reference material, mark the source with [N]. Put a space before the marker (e.g. score 85/100 [3]). Never place a citation marker immediately after punctuation.",
+  "list-format": "Use a consistent list numbering format: '1. ' (digit + period + space). Never use '1)' or '1.' without a trailing space. Indent sub-lists and label them a. b. c.",
+  "paragraph-length": "Keep each paragraph to at most 5 sentences. Split long paragraphs so each one carries a single core point. Separate paragraphs with a blank line.",
+  "table-consistency": "All rows of a table must have the same number of columns as the header row. Keep cell content concise — never write long paragraphs inside a cell.",
+  "no-llm-meta": "Never write meta-text or lead-ins such as \"Here is...\", \"Based on the reference documents...\", \"As an AI assistant...\" or \"It should be noted that...\". Output the content directly.",
+  "no-markdown": "Do not use Markdown syntax. Do not use # for headings, ** for bold, - for lists, or | for tables. Output plain text.",
+  "markdown-allowed": "You may use Markdown syntax to structure the content: # for heading levels, ** for bold, - or digits for lists, | for tables.",
+  "business-tone": "Use formal business English. Avoid colloquialisms, internet slang and emotional language. Stay objective, rigorous and professional.",
+  "logical-flow": "Add transitional sentences between paragraphs so the logic flows. End each section with a brief summary or a bridge to the next section.",
+  "data-citation": "Always cite the source when quoting data. Percentages, amounts and timelines must be backed by the provided references — never fabricate data.",
+  "english-punctuation": "Use standard English punctuation: one space after a period, no double punctuation marks, and use an ellipsis (…) sparingly.",
+};
+
 // ── 规则组合 ──────────────────────────────────────────────
 
 /**
  * 根据 style + format 组合返回适用的写作规则
  * 规则顺序：通用规则 → 风格规则 → 格式规则
+ * @param en 英文模式：规则文案替换为英文，并跳过中文排版专属规则
  */
-export function getRulesForContext(styleId: string, formatId: string): WritingRule[] {
+export function getRulesForContext(styleId: string, formatId: string, en = false): WritingRule[] {
   const rules: WritingRule[] = [];
 
   // 通用规则（所有场景适用）
+  // cjkSpacing / punctuation 是中文排版专属规则，英文模式下跳过，改用英文标点规则
   rules.push(
     RULES.noRepeatTitle,
-    RULES.cjkSpacing,
-    RULES.punctuation,
+    ...(en ? [] : [RULES.cjkSpacing, RULES.punctuation]),
     RULES.citationFormat,
     RULES.listFormat,
     RULES.paragraphLength,
     RULES.noLlmMeta,
     RULES.logicalFlow,
   );
+  if (en) {
+    rules.push({
+      id: "english-punctuation",
+      name: "English punctuation",
+      rule: RULE_EN["english-punctuation"],
+    });
+  }
 
   // 风格特有规则
   switch (styleId) {
@@ -148,6 +174,11 @@ export function getRulesForContext(styleId: string, formatId: string): WritingRu
       break;
     default:
       break;
+  }
+
+  // 英文模式：把规则文案替换为英文版本
+  if (en) {
+    return rules.map((r) => (RULE_EN[r.id] ? { ...r, rule: RULE_EN[r.id] } : r));
   }
 
   return rules;

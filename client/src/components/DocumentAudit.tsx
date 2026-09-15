@@ -10,6 +10,7 @@
  * 当 evaluationMetrics 不可用时 fallback 到 DEMO_AUDIT
  */
 import { useState, useMemo } from "react";
+import { useLanguage, translate as tr, getCurrentLocale } from "../i18n";
 
 interface AuditIssue {
   id: string;
@@ -63,11 +64,11 @@ function deriveAuditData(metrics: EvalMetricsProps | null | undefined, trustScor
   const conflictScore = 1 - conflictRate; // 无冲突维度
 
   const radarScores = [
-    { dimension: "有据可查", score: groundedness, maxScore: 1 },
-    { dimension: "内容相关", score: relevance, maxScore: 1 },
-    { dimension: "内容完整", score: completeness, maxScore: 1 },
-    { dimension: "一致性", score: consistency, maxScore: 1 },
-    { dimension: "无冲突", score: conflictScore, maxScore: 1 },
+    { dimension: tr("audit.dimGrounded"), score: groundedness, maxScore: 1 },
+    { dimension: tr("audit.dimRelevant"), score: relevance, maxScore: 1 },
+    { dimension: tr("audit.dimComplete"), score: completeness, maxScore: 1 },
+    { dimension: tr("audit.dimConsistency"), score: consistency, maxScore: 1 },
+    { dimension: tr("audit.dimNoConflict"), score: conflictScore, maxScore: 1 },
   ];
 
   const overall = (groundedness + relevance + completeness + consistency + conflictScore) / 5;
@@ -80,9 +81,9 @@ function deriveAuditData(metrics: EvalMetricsProps | null | undefined, trustScor
     issues.push({
       id: "i-unsupported",
       severity: trustScore < 0.5 ? "high" : "medium",
-      category: "未支撑断言",
-      description: `综合有据可查度仅 ${Math.round(trustScore * 100)}%，部分段落缺少来源支撑。建议拖拽知识源到相关章节并重新生成。`,
-      suggestion: "在 Provenance Tree 中拖拽知识源到低分段落，或补充知识源后重新生成。",
+      category: tr("audit.categoryUnsupported"),
+      description: tr("audit.unsupportedDesc", { score: Math.round(trustScore * 100) }),
+      suggestion: tr("audit.unsupportedSuggestion"),
     });
   }
 
@@ -93,9 +94,9 @@ function deriveAuditData(metrics: EvalMetricsProps | null | undefined, trustScor
       issues.push({
         id: `i-irrelevant-${i}`,
         severity: "medium",
-        category: "与需求无关",
-        description: `与需求无关的内容：${sentence.length > 100 ? sentence.substring(0, 100) + "…" : sentence}`,
-        suggestion: "在文档中搜索此句并手动编辑删除或修改。",
+        category: tr("audit.categoryIrrelevant"),
+        description: tr("audit.irrelevantDesc", { text: sentence.length > 100 ? sentence.substring(0, 100) + "…" : sentence }),
+        suggestion: tr("audit.irrelevantSuggestion"),
       });
     }
   }
@@ -107,9 +108,9 @@ function deriveAuditData(metrics: EvalMetricsProps | null | undefined, trustScor
       issues.push({
         id: `i-missing-${i}`,
         severity: "high",
-        category: "需求要点未覆盖",
-        description: `需求要点未覆盖：${point}`,
-        suggestion: "补充相关知识源后重新生成。",
+        category: tr("audit.categoryUncovered"),
+        description: tr("audit.uncoveredDesc", { point: point }),
+        suggestion: tr("audit.uncoveredSuggestion"),
       });
     }
   }
@@ -121,9 +122,9 @@ function deriveAuditData(metrics: EvalMetricsProps | null | undefined, trustScor
       issues.push({
         id: `i-lacksource-${i}`,
         severity: "medium",
-        category: "缺少来源支撑",
-        description: `缺少来源支撑：${point}`,
-        suggestion: "在知识库中搜索相关文档，拖拽到对应章节后重新生成。",
+        category: tr("audit.categoryLackSource"),
+        description: tr("audit.lackSourceDesc", { point: point }),
+        suggestion: tr("audit.lackSourceSuggestion"),
       });
     }
   }
@@ -133,18 +134,18 @@ function deriveAuditData(metrics: EvalMetricsProps | null | undefined, trustScor
     for (let i = 0; i < metrics.conflicts.items.length; i++) {
       const c = metrics.conflicts.items[i];
       const claimsDesc = c.claims?.map(cl => {
-        const src = cl.source ? `（${cl.source}）` : "";
+        const src = cl.source ? (getCurrentLocale() === "en" ? ` (${cl.source})` : `（${cl.source}）`) : "";
         return `"${cl.text?.substring(0, 60) ?? ""}${cl.text && cl.text.length > 60 ? "…" : ""}"${src}`;
       }).join("  vs  ") || "";
       const sev = c.severity === "high" ? "high" : c.severity === "medium" ? "medium" : "low";
       issues.push({
         id: `i-conflict-${i}`,
         severity: sev as "high" | "medium" | "low",
-        category: "已拦截冲突",
-        description: `拦截冲突：${c.topic}\n${claimsDesc}`,
+        category: tr("audit.categoryConflict"),
+        description: tr("audit.conflictDesc", { topic: c.topic, claims: claimsDesc }),
         suggestion: c.winnerReason
-          ? `AI 已判定可信方：${c.winnerSource ?? "未知"}\n理由：${c.winnerReason}`
-          : "已自动处理，无需操作。",
+          ? tr("audit.conflictWinner", { source: c.winnerSource ?? tr("audit.unknown"), reason: c.winnerReason })
+          : tr("audit.conflictHandled"),
       });
     }
   }
@@ -154,9 +155,9 @@ function deriveAuditData(metrics: EvalMetricsProps | null | undefined, trustScor
     issues.push({
       id: "i-ok",
       severity: "low",
-      category: "质量良好",
-      description: "文档整体质量良好，未发现明显问题。",
-      suggestion: "可直接使用或导出。",
+      category: tr("audit.categoryGood"),
+      description: tr("audit.goodDesc"),
+      suggestion: tr("audit.goodSuggestion"),
     });
   }
 
@@ -309,9 +310,9 @@ function RadarChart({
 
 function severityBadge(severity: "high" | "medium" | "low") {
   const map = {
-    high: { bg: "bg-red-100", text: "text-red-700", label: "高" },
-    medium: { bg: "bg-yellow-100", text: "text-yellow-700", label: "中" },
-    low: { bg: "bg-blue-100", text: "text-blue-700", label: "低" },
+    high: { bg: "bg-red-100", text: "text-red-700", label: tr("audit.severityHigh") },
+    medium: { bg: "bg-yellow-100", text: "text-yellow-700", label: tr("audit.severityMedium") },
+    low: { bg: "bg-blue-100", text: "text-blue-700", label: tr("audit.severityLow") },
   };
   const m = map[severity];
   return (
@@ -322,13 +323,15 @@ function severityBadge(severity: "high" | "medium" | "low") {
 }
 
 export default function DocumentAudit({ evaluationMetrics, trustScore }: Props) {
+  const { t, locale } = useLanguage();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [fixing, setFixing] = useState(false);
   const [done, setDone] = useState(false);
 
   const auditData = useMemo(
     () => deriveAuditData(evaluationMetrics, trustScore ?? null),
-    [evaluationMetrics, trustScore],
+    // locale 参与依赖：语言切换后重新生成本地化文案
+    [evaluationMetrics, trustScore, locale],
   );
 
   const toggleIssue = (id: string) => {
@@ -353,14 +356,14 @@ export default function DocumentAudit({ evaluationMetrics, trustScore }: Props) 
       {/* 头部 */}
       <div className="px-4 py-3 bg-gradient-to-r from-indigo-50 to-purple-50 border-b flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-gray-800">🔍 AI 文档自审 / 压力测试</h3>
+          <h3 className="text-sm font-semibold text-gray-800">{t("audit.title")}</h3>
           <p className="text-[11px] text-gray-500 mt-0.5">
-            综合评分 {auditData.overallScore.toFixed(2)} &middot; {auditData.issues.length} 个审查问题
+            {t("audit.summary", { score: auditData.overallScore.toFixed(2), count: auditData.issues.length })}
           </p>
         </div>
         {done && (
           <span className="text-[10px] bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">
-            修正完成
+            {t("audit.fixedBadge")}
           </span>
         )}
       </div>
@@ -374,7 +377,7 @@ export default function DocumentAudit({ evaluationMetrics, trustScore }: Props) 
 
         {/* 问题卡片列表 */}
         <div className="flex-1 p-3 max-h-[360px] overflow-y-auto min-w-[280px]">
-          <div className="text-[11px] font-medium text-gray-600 mb-2">审查问题列表</div>
+          <div className="text-[11px] font-medium text-gray-600 mb-2">{t("audit.issueList")}</div>
           <div className="space-y-2">
             {auditData.issues.map((issue) => (
               <div
@@ -413,7 +416,7 @@ export default function DocumentAudit({ evaluationMetrics, trustScore }: Props) 
       {/* 一键修正 */}
       <div className="px-4 py-3 border-t bg-gray-50 flex items-center justify-between">
         <span className="text-[11px] text-gray-500">
-          {done ? "✅ 所有问题已提示修正方向" : "AI 发现问题，建议逐一修正或一键批量修正"}
+          {done ? t("audit.allFixed") : t("audit.hint")}
         </span>
         <button
           id="demo-audit-fix"
@@ -427,7 +430,7 @@ export default function DocumentAudit({ evaluationMetrics, trustScore }: Props) 
                 : "bg-indigo-600 text-white hover:bg-indigo-700"
           }`}
         >
-          {fixing ? "正在修正..." : done ? "已完成" : "🔧 一键修正"}
+          {fixing ? t("audit.fixing") : done ? t("audit.done") : t("audit.fixAll")}
         </button>
       </div>
     </div>

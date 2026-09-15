@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useLanguage } from "../i18n";
 
 interface OrgNode {
   id: string;
@@ -6,25 +7,23 @@ interface OrgNode {
   title?: string;
   email?: string;
   department?: string;
+  /** 服务端按 id 标注（不要用 name 做等值判断 —— 本地化后必然失配） */
+  isCurrentUser?: boolean;
   children: OrgNode[];
 }
 
 export default function PeoplePanel() {
+  const { t } = useLanguage();
   const [hierarchy, setHierarchy] = useState<OrgNode[]>([]);
   const [peopleCount, setPeopleCount] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasAppConfig, setHasAppConfig] = useState(false);
   const [lastSyncCount, setLastSyncCount] = useState<number | null>(null);
-  const [currentUserName, setCurrentUserName] = useState<string | null>(null);
 
   useEffect(() => {
     checkConfig();
     loadData();
-    fetch("/api/settings/sender_profile")
-      .then(r => r.json())
-      .then(data => { if (data.value?.name) setCurrentUserName(data.value.name); })
-      .catch(() => {});
   }, []);
 
   async function checkConfig() {
@@ -66,14 +65,14 @@ export default function PeoplePanel() {
       if (result.ok) {
         setLastSyncCount(result.imported);
         if (result.errors?.length) {
-          setError(`${result.errors.length} 个警告: ${result.errors[0]}`);
+          setError(t("people.syncWarning", { count: result.errors.length, message: result.errors[0] }));
         }
         loadData();
       } else {
-        setError(result.error || "同步失败");
+        setError(result.error || t("people.syncFailed"));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "同步失败");
+      setError(err instanceof Error ? err.message : t("people.syncFailed"));
     } finally {
       setSyncing(false);
     }
@@ -93,7 +92,9 @@ export default function PeoplePanel() {
   walk(hierarchy);
 
   function OrgNodeCard({ node }: { node: OrgNode }) {
-    const isCurrentUser = currentUserName && node.name === currentUserName;
+    // 服务端按 person.id 标注，与语言无关。
+    // 旧实现用 node.name === currentUserName（人名比较），任何名字本地化都会让它静默失效。
+    const isCurrentUser = node.isCurrentUser === true;
     const hasChildren = node.children.length > 0;
 
     return (
@@ -113,7 +114,7 @@ export default function PeoplePanel() {
           <div className="text-xs font-semibold leading-tight flex items-center justify-center gap-0.5 flex-wrap">
             {node.name}
             {isCurrentUser && (
-              <span className="px-0.5 py-0 rounded text-[9px] bg-blue-500 text-white font-medium shrink-0">我</span>
+              <span className="px-0.5 py-0 rounded text-[9px] bg-blue-500 text-white font-medium shrink-0">{t("people.me")}</span>
             )}
           </div>
           {node.title && <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{node.title}</div>}
@@ -137,18 +138,16 @@ export default function PeoplePanel() {
       {/* Entra ID 连接卡片 */}
       <div className="bg-white rounded-lg shadow-sm border py-2 px-3">
         {!hasAppConfig && (
-          <div className="bg-amber-50 border border-amber-200 rounded px-2 py-1 text-xs text-amber-700">
-            ⚠️ 请先在 <strong>设置 → 知识库</strong> 中配置 Azure 应用信息
-          </div>
+            <div dangerouslySetInnerHTML={{ __html: t("people.azureHint") }} className="bg-amber-50 border border-amber-200 rounded px-2 py-1 text-xs text-amber-700" />
         )}
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-base">🏢</span>
           <span className="font-medium text-sm">Microsoft Entra ID</span>
           {allCount > 0 && (
-            <span className="px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700">已同步</span>
+            <span className="px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700">{t("people.synced")}</span>
           )}
           <span className="text-xs text-gray-400">
-            {allCount > 0 ? `${allCount} 人 · ${relCount} 关系` : "从 Entra ID 同步组织架构"}
+            {allCount > 0 ? t("people.orgStats", { count: allCount, relations: relCount }) : t("people.syncOrg")}
           </span>
           {hasAppConfig && (
             <button
@@ -156,7 +155,7 @@ export default function PeoplePanel() {
               disabled={syncing}
               className="ml-auto px-3 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50"
             >
-              {syncing ? "同步中..." : "🔗 同步"}
+              {syncing ? t("people.syncing") : t("people.syncButton")}
             </button>
           )}
         </div>
@@ -171,13 +170,13 @@ export default function PeoplePanel() {
       {allCount > 0 && (
         <div className="bg-white rounded-lg shadow-sm border">
           <div className="px-4 py-3 border-b font-medium flex items-center gap-3">
-            <span>组织架构</span>
+            <span>{t("people.orgChart")}</span>
             <span className="font-normal text-xs text-gray-400">·</span>
-            <span className="text-xs text-blue-500 font-normal">{allCount} 人</span>
+            <span className="text-xs text-blue-500 font-normal">{t("people.peopleCount", { count: allCount })}</span>
             <span className="font-normal text-xs text-gray-400">·</span>
-            <span className="text-xs text-green-500 font-normal">{depts.size} 部门</span>
+            <span className="text-xs text-green-500 font-normal">{t("people.deptCount", { count: depts.size })}</span>
             <span className="font-normal text-xs text-gray-400">·</span>
-            <span className="text-xs text-purple-500 font-normal">{relCount} 关系</span>
+            <span className="text-xs text-purple-500 font-normal">{t("people.relationCount", { count: relCount })}</span>
           </div>
           <div className="p-6 overflow-y-auto max-h-[60vh] text-center" id="demo-people-org-tree">
             {hasHierarchy ? (
@@ -190,7 +189,7 @@ export default function PeoplePanel() {
               </div>
             ) : (
               <div className="text-center text-gray-400 py-10 text-sm">
-                暂无汇报关系数据，"同步组织架构"后将展示层级架构图
+                {t("people.noData")}
               </div>
             )}
           </div>
@@ -200,7 +199,7 @@ export default function PeoplePanel() {
       {/* 空状态 */}
       {allCount === 0 && hasAppConfig && !syncing && (
         <div className="text-center text-gray-400 py-12">
-          点击"同步组织架构"从 Entra ID 拉取人员数据
+          {t("people.emptyHint")}
         </div>
       )}
     </div>

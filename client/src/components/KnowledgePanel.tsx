@@ -1,15 +1,8 @@
 import { useEffect, useState, useRef } from "react";
 import PeoplePanel from "./PeoplePanel";
+import { useLanguage } from "../i18n";
 
 type TabId = "sources" | "code" | "remote" | "people" | "outlook";
-
-const tabs: { id: TabId; label: string; demoId: string }[] = [
-  { id: "sources", label: "本地文档", demoId: "demo-kb-tab-sources" },
-  { id: "code", label: "远程 GitHub Repo", demoId: "demo-kb-tab-code" },
-  { id: "remote", label: "远程文档", demoId: "demo-kb-tab-remote" },
-  { id: "people", label: "People Graph", demoId: "demo-kb-tab-people" },
-  { id: "outlook", label: "Outlook 邮件", demoId: "demo-kb-tab-outlook" },
-];
 
 interface KnowledgeSource {
   id: string;
@@ -50,10 +43,25 @@ interface IndexedRepo {
 }
 
 export default function KnowledgePanel() {
+  const { t, locale, formatDate } = useLanguage();
   const [activeTab, setActiveTab] = useState<TabId>("sources");
+
+  const tabs: { id: TabId; label: string; demoId: string }[] = [
+    { id: "sources", label: t("knowledge.tabs.sources"), demoId: "demo-kb-tab-sources" },
+    { id: "code", label: t("knowledge.tabs.code"), demoId: "demo-kb-tab-code" },
+    { id: "remote", label: t("knowledge.tabs.remote"), demoId: "demo-kb-tab-remote" },
+    { id: "people", label: t("knowledge.tabs.people"), demoId: "demo-kb-tab-people" },
+    { id: "outlook", label: t("knowledge.tabs.outlook"), demoId: "demo-kb-tab-outlook" },
+  ];
+
   const [sources, setSources] = useState<KnowledgeSource[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessageRaw] = useState<string | null>(null);
+  const [messageIsError, setMessageIsError] = useState(false);
+  /** 普通提示（成功/中性） */
+  const setMessage = (m: string | null) => { setMessageRaw(m); setMessageIsError(false); };
+  /** 错误提示（红色） */
+  const setErrorMessage = (m: string) => { setMessageRaw(m); setMessageIsError(true); };
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // GitHub 代码 tab 状态
@@ -147,13 +155,13 @@ export default function KnowledgePanel() {
       if (data.ok) {
         const okCount = data.results.filter((r: any) => r.status === "ok").length;
         const dupCount = data.results.filter((r: any) => r.status === "duplicate").length;
-        setMessage(`上传成功: ${okCount} 个文件${dupCount > 0 ? `, ${dupCount} 个重复跳过` : ""}`);
+        setMessage(t("messages.uploadSuccess", { count: okCount }) + (dupCount > 0 ? t("messages.uploadDupSkip", { count: dupCount }) : ""));
         loadData();
       } else {
-        setMessage(`上传失败: ${data.error}`);
+        setErrorMessage(`${t("messages.uploadFailed")}: ${data.error}`);
       }
     } catch (err) {
-      setMessage(`上传失败: ${err instanceof Error ? err.message : String(err)}`);
+      setErrorMessage(`${t("messages.uploadFailed")}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -161,7 +169,7 @@ export default function KnowledgePanel() {
   }
 
   async function handleDelete(id: string, name: string) {
-    if (!confirm(`确定删除 "${name}"？`)) return;
+    if (!confirm(t("confirm.deleteSource", { name }))) return;
     try {
       await fetch(`/api/knowledge/sources/${id}`, { method: "DELETE" });
       loadData();
@@ -205,7 +213,7 @@ export default function KnowledgePanel() {
       setGithubSaved(true);
       setGithubError(null);
     } catch (err) {
-      setGithubError(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
+      setGithubError(`${t("messages.saveFailed")}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -225,10 +233,10 @@ export default function KnowledgePanel() {
       if (data.ok) {
         setGithubRepos(data.repos);
       } else {
-        setGithubError(data.error || "连接失败");
+        setGithubError(data.error || t("messages.connectionFailed"));
       }
     } catch (err) {
-      setGithubError(`验证失败: ${err instanceof Error ? err.message : String(err)}`);
+      setGithubError(`${t("messages.operationFailed")}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setGithubLoading(false);
     }
@@ -255,7 +263,7 @@ export default function KnowledgePanel() {
       setConnectedRepos(merged);
       setSelectedRepos(new Set());
     } catch (err) {
-      setGithubError(`连接失败: ${err instanceof Error ? err.message : String(err)}`);
+      setGithubError(`${t("messages.connectionFailed")}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setConnecting(false);
     }
@@ -267,7 +275,7 @@ export default function KnowledgePanel() {
       await saveGithubConfig(githubToken.trim(), updated);
       setConnectedRepos(updated);
     } catch (err) {
-      setGithubError(`断开失败: ${err instanceof Error ? err.message : String(err)}`);
+      setGithubError(`${t("messages.connectionFailed")}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -301,11 +309,11 @@ export default function KnowledgePanel() {
       if (data.ok) {
         pollSyncStatus(data.jobId, key);
       } else {
-        setGithubError(`同步失败: ${data.error}`);
+        setGithubError(`${t("messages.syncFailed")}: ${data.error}`);
         setSyncing(null);
       }
     } catch (err) {
-      setGithubError(`同步失败: ${err instanceof Error ? err.message : String(err)}`);
+      setGithubError(`${t("messages.syncFailed")}: ${err instanceof Error ? err.message : String(err)}`);
       setSyncing(null);
     }
   }
@@ -326,11 +334,11 @@ export default function KnowledgePanel() {
       if (data.ok) {
         pollSyncStatus(data.jobId, key);
       } else {
-        setGithubError(`增量同步失败: ${data.error}`);
+        setGithubError(`${t("messages.syncFailed")}: ${data.error}`);
         setSyncing(null);
       }
     } catch (err) {
-      setGithubError(`增量同步失败: ${err instanceof Error ? err.message : String(err)}`);
+      setGithubError(`${t("messages.syncFailed")}: ${err instanceof Error ? err.message : String(err)}`);
       setSyncing(null);
     }
   }
@@ -354,7 +362,7 @@ export default function KnowledgePanel() {
               delete next[repoKey];
               return next;
             });
-            setMessage(`✅ ${repoKey} 同步完成: ${job.progress?.processed ?? 0} 个文件已处理`);
+            setMessage(`✅ ${repoKey} ${t("messages.syncComplete", { count: job.progress?.processed ?? 0 })}`);
             loadIndexedRepos();
             loadData();
             return;
@@ -366,7 +374,7 @@ export default function KnowledgePanel() {
               delete next[repoKey];
               return next;
             });
-            setGithubError(`同步失败: ${job.errorMessage}`);
+            setGithubError(`${t("messages.syncFailed")}: ${job.errorMessage}`);
             return;
           }
         }
@@ -382,7 +390,7 @@ export default function KnowledgePanel() {
   }
 
   async function handleDeleteRepo(owner: string, repo: string) {
-    if (!confirm(`确定删除 ${owner}/${repo} 的所有索引数据？`)) return;
+    if (!confirm(t("confirm.deleteRepo", { owner, repo }))) return;
 
     try {
       const res = await fetch("/api/knowledge/github/repo", {
@@ -392,12 +400,12 @@ export default function KnowledgePanel() {
       });
       const data = await res.json();
       if (data.ok) {
-        setMessage(`已删除 ${owner}/${repo}，${data.deletedFiles} 个索引文件`);
+        setMessage(t("messages.deletedRepo", { owner, repo, count: data.deletedFiles }));
         loadIndexedRepos();
         loadData();
       }
     } catch (err) {
-      setGithubError(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
+      setGithubError(`${t("messages.operationFailed")}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -431,10 +439,10 @@ export default function KnowledgePanel() {
       if (data.ok) {
         setOnedriveFiles(data.files);
       } else {
-        setOnedriveError(data.error || "加载失败");
+        setOnedriveError(data.error || t("messages.loadFailed"));
       }
     } catch (err) {
-      setOnedriveError(`加载失败: ${err instanceof Error ? err.message : String(err)}`);
+      setOnedriveError(`${t("messages.loadFailed")}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setOnedriveLoading(false);
     }
@@ -446,7 +454,7 @@ export default function KnowledgePanel() {
       const res = await fetch("/api/connectors/msgraph/auth");
       const data = await res.json();
       if (!data.ok) {
-        setOnedriveError(data.error || "获取授权链接失败");
+        setOnedriveError(data.error || t("messages.getAuthLinkFailed"));
         return;
       }
       // 打开 OAuth 弹窗
@@ -455,7 +463,7 @@ export default function KnowledgePanel() {
       const top = window.screenY + (window.outerHeight - height) / 2;
       window.open(data.url, "msgraph-auth", `width=${width},height=${height},left=${left},top=${top}`);
     } catch (err) {
-      setOnedriveError(`连接失败: ${err instanceof Error ? err.message : String(err)}`);
+      setOnedriveError(`${t("messages.connectionFailed")}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -498,11 +506,11 @@ export default function KnowledgePanel() {
 
   async function handleOutlookSync(sourceType: "email" | "contact") {
     if (!msGraphStatus?.connected) {
-      setMessage("请先连接 Microsoft 账户");
+      setMessage(t("messages.connectMsFirst"));
       return;
     }
 
-    const label = sourceType === "email" ? "邮件" : "联系人";
+    const label = sourceType === "email" ? t("knowledge.email") : t("knowledge.contact");
     const endpoint = `/api/knowledge/outlook/${sourceType}/sync`;
     const progressKey = `outlook_${sourceType}`;
 
@@ -517,11 +525,11 @@ export default function KnowledgePanel() {
         pollOutlookStatus(data.jobId, progressKey, label);
       } else {
         setOutlookSyncing(null);
-        setMessage(`同步失败: ${data.error}`);
+        setErrorMessage(`${t("messages.syncFailed")}: ${data.error}`);
       }
     } catch (err) {
       setOutlookSyncing(null);
-      setMessage(`同步失败: ${err instanceof Error ? err.message : String(err)}`);
+      setErrorMessage(`${t("messages.syncFailed")}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -542,7 +550,7 @@ export default function KnowledgePanel() {
               delete next[progressKey];
               return next;
             });
-            setMessage(`${label}同步完成: ${job.progress?.processed ?? 0} 条已处理`);
+            setMessage(t("messages.syncCompleteLabel", { label, count: job.progress?.processed ?? 0 }));
             loadOutlookStatus();
             loadOutlookLists();
             loadData();
@@ -555,7 +563,7 @@ export default function KnowledgePanel() {
               delete next[progressKey];
               return next;
             });
-            setMessage(`同步失败: ${job.errorMessage}`);
+            setErrorMessage(t("messages.syncFailedLabel", { label }));
             return;
           }
         }
@@ -571,24 +579,24 @@ export default function KnowledgePanel() {
   }
 
   async function handleClearOutlook(sourceType: "email" | "contact") {
-    const label = sourceType === "email" ? "邮件" : "联系人";
-    if (!confirm(`确定清除所有已索引的${label}？`)) return;
+    const label = sourceType === "email" ? t("knowledge.email") : t("knowledge.contact");
+    if (!confirm(t("confirm.clearIndex", { label }))) return;
     try {
       const res = await fetch(`/api/knowledge/outlook/${sourceType}`, { method: "DELETE" });
       const data = await res.json();
       if (data.ok) {
-        setMessage(`已清除 ${data.deleted} 条${label}索引`);
+        setMessage(t("messages.clearedIndex", { count: data.deleted, label }));
         loadOutlookStatus();
         loadData();
       }
     } catch (err) {
-      setMessage(`清除失败: ${err instanceof Error ? err.message : String(err)}`);
+      setErrorMessage(`${t("messages.clearFailed")}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   return (
     <div className={activeTab === "people" ? "w-full" : "max-w-4xl mx-auto"}>
-      <h2 className="text-2xl font-bold mb-6">知识库管理</h2>
+      <h2 className="text-2xl font-bold mb-6">{t("knowledge.title")}</h2>
 
       {/* Tab 切换 */}
       <div className="flex border-b mb-6">
@@ -617,7 +625,7 @@ export default function KnowledgePanel() {
         {/* 已索引的 Repo（带同步状态） */}
         {indexedRepos.length > 0 && (
           <div className="bg-white rounded-lg shadow-sm border">
-            <div className="px-4 py-3 border-b font-medium">已索引的 Repo ({indexedRepos.length})</div>
+            <div className="px-4 py-3 border-b font-medium">{t("knowledge.github.indexedRepos", { count: indexedRepos.length })}</div>
             <div className="divide-y">
               {indexedRepos.map((repo) => {
                 const repoKey = `${repo.owner}/${repo.repo}`;
@@ -633,32 +641,32 @@ export default function KnowledgePanel() {
                           disabled={isSyncing}
                           className="px-3 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200 disabled:opacity-50"
                         >
-                          {isSyncing ? "同步中..." : "增量同步"}
+                          {isSyncing ? t("knowledge.github.syncing") : t("knowledge.github.incrementalSync")}
                         </button>
                         <button
                           onClick={() => handleSyncRepo(repo.owner, repo.repo)}
                           disabled={isSyncing}
                           className="px-3 py-1 bg-gray-100 text-gray-700 rounded text-xs hover:bg-gray-200 disabled:opacity-50"
                         >
-                          全量重建
+                          {t("knowledge.github.fullRebuild")}
                         </button>
                         <button
                           onClick={() => handleDeleteRepo(repo.owner, repo.repo)}
                           className="px-3 py-1 bg-red-100 text-red-700 rounded text-xs hover:bg-red-200"
                         >
-                          删除
+                          {t("knowledge.github.deleteRepo")}
                         </button>
                       </div>
                     </div>
                     <div className="text-xs text-gray-500 flex gap-4">
-                      <span>📄 {repo.fileCount} 个文件</span>
-                      <span>🧩 {repo.totalChunks} 个 chunks</span>
-                      <span>🕐 最后索引: {new Date(repo.lastIndexed).toLocaleString()}</span>
+                      <span>📄 {t("knowledge.files", { count: repo.fileCount })}</span>
+                      <span>🧩 {t("knowledge.chunks", { count: repo.totalChunks })}</span>
+                      <span>🕐 {t("knowledge.lastIndexed")}: {new Date(repo.lastIndexed).toLocaleString()}</span>
                     </div>
                     {isSyncing && progress && progress.total > 0 && (
                       <div className="mt-2">
                         <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
-                          <span>同步中...</span>
+                          <span>{t("knowledge.syncing")}</span>
                           <span>{progress.processed + progress.skipped + progress.errors} / {progress.total}</span>
                         </div>
                         <div className="w-full bg-gray-200 rounded-full h-1.5">
@@ -684,7 +692,7 @@ export default function KnowledgePanel() {
         {/* 已连接但未索引的 Repo */}
         {connectedRepos.filter(r => !indexedRepos.some(ir => `${ir.owner}/${ir.repo}` === r)).length > 0 && (
           <div className="bg-white rounded-lg shadow-sm border">
-            <div className="px-4 py-3 border-b font-medium">已连接的 Repo（未索引）</div>
+            <div className="px-4 py-3 border-b font-medium">{t("knowledge.github.connectedRepos")}</div>
             <div className="divide-y">
               {connectedRepos
                 .filter(r => !indexedRepos.some(ir => `${ir.owner}/${ir.repo}` === r))
@@ -702,20 +710,20 @@ export default function KnowledgePanel() {
                             disabled={isSyncing}
                             className="px-3 py-1 bg-green-100 text-green-700 rounded text-xs hover:bg-green-200 disabled:opacity-50"
                           >
-                            {isSyncing ? "索引中..." : "开始索引"}
+                            {isSyncing ? t("knowledge.github.indexing") : t("knowledge.github.startIndex")}
                           </button>
                           <button
                             onClick={() => handleDisconnectRepo(repo)}
                             className="text-red-500 hover:text-red-700 text-sm"
                           >
-                            断开
+                            {t("knowledge.github.disconnect")}
                           </button>
                         </div>
                       </div>
                       {isSyncing && progress && progress.total > 0 && (
                         <div className="mt-2">
                           <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
-                            <span>处理中...</span>
+                            <span>{t("knowledge.processing")}</span>
                             <span>{progress.processed + progress.skipped + progress.errors} / {progress.total}</span>
                           </div>
                           <div className="w-full bg-gray-200 rounded-full h-1.5">
@@ -742,15 +750,15 @@ export default function KnowledgePanel() {
         <div className="bg-white rounded-lg shadow-sm border p-4">
           <div className="flex items-center gap-2">
             <span className="text-lg">🔑</span>
-            <span className="font-medium">GitHub Personal Access Token</span>
+            <span className="font-medium">{t("settings.github.title")}</span>
             {githubSaved && githubToken ? (
-              <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">已配置</span>
+              <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">{t("settings.github.configured")}</span>
             ) : (
-              <span className="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-700">未配置</span>
+              <span className="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-700">{t("settings.github.notConfigured")}</span>
             )}
           </div>
           <p className="text-xs text-gray-500 mt-2">
-            请在「<span className="font-medium">设置 → 知识库 → GitHub</span>」中配置 Token，然后返回此页面查询并选择 Repo。
+            {t("knowledge.github.tokenHint")}
           </p>
         </div>
 
@@ -765,13 +773,13 @@ export default function KnowledgePanel() {
         {githubRepos.length > 0 && (
           <div className="bg-white rounded-lg shadow-sm border">
             <div className="px-4 py-3 border-b flex items-center justify-between">
-              <span className="font-medium">可选 Repos ({githubRepos.length})</span>
+              <span className="font-medium">{t("knowledge.github.availableRepos", { count: githubRepos.length })}</span>
               <button
                 onClick={handleConnectGithub}
                 disabled={selectedRepos.size === 0 || connecting}
                 className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
               >
-                {connecting ? "连接中..." : `连接选中 (${selectedRepos.size})`}
+                {connecting ? t("knowledge.github.connecting") : t("knowledge.github.connectSelected", { count: selectedRepos.size })}
               </button>
             </div>
             <div className="divide-y max-h-96 overflow-y-auto">
@@ -793,7 +801,7 @@ export default function KnowledgePanel() {
                     <div className="font-medium text-sm flex items-center gap-2">
                       {repo.fullName}
                       {connectedRepos.includes(repo.fullName) && (
-                        <span className="px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700">已连接</span>
+                        <span className="px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700">{t("knowledge.github.connected")}</span>
                       )}
                     </div>
                     {repo.description && (
@@ -802,7 +810,7 @@ export default function KnowledgePanel() {
                     <div className="text-xs text-gray-400 mt-1 flex gap-3">
                       {repo.language && <span>🔤 {repo.language}</span>}
                       <span>⭐ {repo.stargazersCount}</span>
-                      <span>更新: {new Date(repo.updatedAt).toLocaleDateString()}</span>
+                      <span>{t("knowledge.updatedAt")}: {new Date(repo.updatedAt).toLocaleDateString()}</span>
                     </div>
                   </div>
                 </label>
@@ -814,7 +822,7 @@ export default function KnowledgePanel() {
         {/* 空状态 */}
         {githubRepos.length === 0 && !githubLoading && !githubError && (
           <div className="text-center text-gray-400 py-12">
-            在「设置 → 知识库」中配置 GitHub Token 后，即可查询并选择 Repo
+            {t("knowledge.github.emptyHint")}
           </div>
         )}
       </div>
@@ -827,19 +835,18 @@ export default function KnowledgePanel() {
         <div className="bg-white rounded-lg shadow-sm border p-4">
           <div className="flex items-center gap-2 mb-3">
             <span className="text-lg">☁️</span>
-            <span className="font-medium flex-1">Microsoft OneDrive / SharePoint</span>
+            <span className="font-medium flex-1">{t("knowledge.remote.onedriveTitle")}</span>
             {msGraphStatus?.connected && (
-              <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">已连接</span>
+              <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">{t("knowledge.remote.onedriveConnected")}</span>
             )}
           </div>
           <p className="text-sm text-gray-500 mb-3">
-            连接 OneDrive 后，可以在文档生成时自动搜索和引用远程文档。
-            使用两阶段检索：先通过关键词粗筛，再对候选文件做语义匹配。
+            {t("knowledge.remote.onedriveDesc")}
           </p>
 
           {!msGraphStatus?.hasAppConfig && (
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-700">
-              ⚠️ 请先在 <strong>设置 → 知识库</strong> 中配置 Azure 应用信息（Tenant ID、Client ID、Client Secret）
+              ⚠️ {t("knowledge.remote.azureConfigHint")}
             </div>
           )}
 
@@ -848,20 +855,20 @@ export default function KnowledgePanel() {
               onClick={handleConnectOnedrive}
               className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
             >
-              🔗 连接 OneDrive
+              {t("knowledge.remote.onedriveConnect")}
             </button>
           )}
 
           {msGraphStatus?.connected && (
             <div className="flex items-center gap-3">
               <span className="text-sm text-gray-600">
-                ✅ {msGraphStatus.userDisplayName ?? msGraphStatus.userEmail ?? "Microsoft 账户"}
+                ✅ {msGraphStatus.userDisplayName ?? msGraphStatus.userEmail ?? t("knowledge.microsoftAccount")}
               </span>
               <button
                 onClick={handleDisconnectOnedrive}
                 className="text-sm text-red-500 hover:text-red-700 hover:underline"
               >
-                断开连接
+                {t("knowledge.remote.onedriveDisconnect")}
               </button>
             </div>
           )}
@@ -878,7 +885,7 @@ export default function KnowledgePanel() {
         {onedriveFiles.length > 0 && (
           <div className="bg-white rounded-lg shadow-sm border">
             <div className="px-4 py-3 border-b font-medium flex items-center justify-between">
-              <span>OneDrive 文件 ({onedriveFiles.length})</span>
+              <span>{t("knowledge.remote.onedriveFiles", { count: onedriveFiles.length })}</span>
               <button
                 onClick={() => loadOnedriveFiles()}
                 disabled={onedriveLoading}
@@ -887,19 +894,19 @@ export default function KnowledgePanel() {
                     ? "bg-gray-100 text-gray-400 cursor-not-allowed border-gray-200"
                     : "bg-white text-blue-600 border-blue-300 hover:bg-blue-50 hover:border-blue-400"
                 }`}
-                title="刷新远程文档列表"
+                title={t("knowledge.refreshRemote")}
               >
-                {onedriveLoading ? (
-                  <span className="inline-flex items-center gap-1">
-                    <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    刷新中...
-                  </span>
-                ) : (
-                  "刷新"
-                )}
+                    {onedriveLoading ? (
+                      <span className="inline-flex items-center gap-1">
+                        <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        {t("knowledge.remote.refreshing")}
+                      </span>
+                    ) : (
+                      t("knowledge.remote.onedriveRefresh")
+                    )}
               </button>
             </div>
             <div className="divide-y max-h-96 overflow-y-auto">
@@ -917,7 +924,7 @@ export default function KnowledgePanel() {
                     rel="noopener"
                     className="text-blue-500 hover:underline text-sm"
                   >
-                    打开
+                    {t("knowledge.remote.open")}
                   </a>
                 </div>
               ))}
@@ -934,7 +941,7 @@ export default function KnowledgePanel() {
         {/* Microsoft 账户状态 */}
         {!msGraphStatus?.connected && (
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-700">
-            请先在「远程文档」tab 中连接 Microsoft 账户。
+            {t("knowledge.outlook.connectHint")}
           </div>
         )}
 
@@ -944,16 +951,15 @@ export default function KnowledgePanel() {
             <div className="bg-white rounded-lg shadow-sm border p-4">
               <div className="flex items-center gap-2 mb-3">
                 <span className="text-lg">✉️</span>
-                <span className="font-medium flex-1">Outlook 邮件</span>
+                <span className="font-medium flex-1">{t("knowledge.outlook.emailTitle")}</span>
                 {outlookStatus?.email && outlookStatus.email.count > 0 && (
                   <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">
-                    已索引 ({outlookStatus.email.count} 封, {outlookStatus.email.totalChunks} 块)
+                    {t("knowledge.outlook.emailIndexed", { count: outlookStatus.email.count, chunks: outlookStatus.email.totalChunks })}
                   </span>
                 )}
               </div>
               <p className="text-sm text-gray-500 mb-3">
-                将 Outlook 邮箱中所有邮件内容向量化，支持按邮件主题、发件人、正文内容进行语义搜索。
-                建议优先选择该选项，邮件是工作中最重要的知识来源之一。
+                {t("knowledge.outlook.emailDesc")}
               </p>
               <div className="flex items-center gap-3 mb-3">
                 <label className="flex items-center gap-2 cursor-pointer">
@@ -963,7 +969,7 @@ export default function KnowledgePanel() {
                     onChange={(e) => setOutlookEmailEnabled(e.target.checked)}
                     className="w-4 h-4 text-blue-600"
                   />
-                  <span className="text-sm text-gray-700">将邮件纳入知识库</span>
+                  <span className="text-sm text-gray-700">{t("knowledge.outlook.emailEnabled")}</span>
                 </label>
               </div>
               {outlookEmailEnabled && (
@@ -973,14 +979,14 @@ export default function KnowledgePanel() {
                     disabled={outlookSyncing === "outlook_email"}
                     className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
                   >
-                    {outlookSyncing === "outlook_email" ? "同步中..." : "全量同步邮件"}
+                    {outlookSyncing === "outlook_email" ? t("knowledge.outlook.syncingEmail") : t("knowledge.outlook.syncEmail")}
                   </button>
                   {outlookStatus?.email && outlookStatus.email.count > 0 && (
                     <button
                       onClick={() => handleClearOutlook("email")}
                       className="px-4 py-2 border border-red-300 text-red-600 rounded-lg text-sm hover:bg-red-50"
                     >
-                      清除邮件索引
+                      {t("knowledge.outlook.clearEmail")}
                     </button>
                   )}
                 </div>
@@ -993,8 +999,8 @@ export default function KnowledgePanel() {
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
                     <span>
-                      邮件同步中: {outlookProgress["outlook_email"].processed}/{outlookProgress["outlook_email"].total}
-                      {outlookProgress["outlook_email"].skipped > 0 && ` (${outlookProgress["outlook_email"].skipped} 跳过)`}
+                      {t("knowledge.emailSyncing", { processed: outlookProgress["outlook_email"].processed, total: outlookProgress["outlook_email"].total })}
+                      {outlookProgress["outlook_email"].skipped > 0 && ` (${outlookProgress["outlook_email"].skipped} ${t("knowledge.skipped")})`}
                     </span>
                   </div>
                   <div className="w-full bg-gray-200 rounded-full h-2">
@@ -1015,15 +1021,15 @@ export default function KnowledgePanel() {
             <div className="bg-white rounded-lg shadow-sm border p-4">
               <div className="flex items-center gap-2 mb-3">
                 <span className="text-lg">👤</span>
-                <span className="font-medium flex-1">Outlook 联系人</span>
+                <span className="font-medium flex-1">{t("knowledge.outlook.contactTitle")}</span>
                 {outlookStatus?.contact && outlookStatus.contact.count > 0 && (
                   <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">
-                    已索引 ({outlookStatus.contact.count} 人, {outlookStatus.contact.totalChunks} 块)
+                    {t("knowledge.outlook.contactIndexed", { count: outlookStatus.contact.count, chunks: outlookStatus.contact.totalChunks })}
                   </span>
                 )}
               </div>
               <p className="text-sm text-gray-500 mb-3">
-                将 Outlook 联系人的姓名、邮箱、职位、部门等信息向量化，支持按人名、公司、职位等维度搜索。
+                {t("knowledge.outlook.contactDesc")}
               </p>
               <div className="flex items-center gap-3 mb-3">
                 <label className="flex items-center gap-2 cursor-pointer">
@@ -1033,7 +1039,7 @@ export default function KnowledgePanel() {
                     onChange={(e) => setOutlookContactEnabled(e.target.checked)}
                     className="w-4 h-4 text-blue-600"
                   />
-                  <span className="text-sm text-gray-700">将联系人纳入知识库</span>
+                  <span className="text-sm text-gray-700">{t("knowledge.outlook.contactEnabled")}</span>
                 </label>
               </div>
               {outlookContactEnabled && (
@@ -1043,14 +1049,14 @@ export default function KnowledgePanel() {
                     disabled={outlookSyncing === "outlook_contact"}
                     className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
                   >
-                    {outlookSyncing === "outlook_contact" ? "同步中..." : "全量同步联系人"}
+                    {outlookSyncing === "outlook_contact" ? t("knowledge.outlook.syncingContact") : t("knowledge.outlook.syncContact")}
                   </button>
                   {outlookStatus?.contact && outlookStatus.contact.count > 0 && (
                     <button
                       onClick={() => handleClearOutlook("contact")}
                       className="px-4 py-2 border border-red-300 text-red-600 rounded-lg text-sm hover:bg-red-50"
                     >
-                      清除联系人索引
+                      {t("knowledge.outlook.clearContact")}
                     </button>
                   )}
                 </div>
@@ -1063,7 +1069,7 @@ export default function KnowledgePanel() {
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
                     <span>
-                      联系人同步中: {outlookProgress["outlook_contact"].processed}/{outlookProgress["outlook_contact"].total}
+                      {t("knowledge.contactSyncing", { processed: outlookProgress["outlook_contact"].processed, total: outlookProgress["outlook_contact"].total })}
                     </span>
                   </div>
                   <div className="w-full bg-gray-200 rounded-full h-2">
@@ -1084,12 +1090,12 @@ export default function KnowledgePanel() {
             {outlookEmails.length > 0 && (
               <div className="bg-white rounded-lg shadow-sm border">
                 <div className="px-4 py-3 border-b font-medium flex items-center justify-between">
-                  <span>已索引邮件 ({outlookEmails.length})</span>
+                  <span>{t("knowledge.outlook.indexedEmails", { count: outlookEmails.length })}</span>
                   <button
                     onClick={loadOutlookLists}
                     className="text-xs px-3 py-1 rounded border bg-white text-blue-600 border-blue-300 hover:bg-blue-50"
                   >
-                    刷新
+                    {t("knowledge.outlook.refresh")}
                   </button>
                 </div>
                 <div className="divide-y max-h-96 overflow-y-auto">
@@ -1097,12 +1103,12 @@ export default function KnowledgePanel() {
                     <div key={email.id} className="px-4 py-3">
                       <div className="font-medium text-sm truncate">{email.name}</div>
                       <div className="text-xs text-gray-500 mt-1 space-y-0.5">
-                        <div>发件人: {email.from}</div>
-                        {email.to && <div>收件人: {email.to}</div>}
+                        <div>{t("knowledge.from")}: {email.from}</div>
+                        {email.to && <div>{t("knowledge.to")}: {email.to}</div>}
                         {email.receivedDateTime && (
-                          <div>时间: {new Date(email.receivedDateTime).toLocaleString("zh-CN")}</div>
+                          <div>{t("knowledge.time")}: {new Date(email.receivedDateTime).toLocaleString(locale)}</div>
                         )}
-                        <div>分块: {email.chunks} · 索引时间: {new Date(email.indexedAt).toLocaleString("zh-CN")}</div>
+                        <div>{t("knowledge.chunks", { count: email.chunks })} · {t("knowledge.indexedAt")}: {new Date(email.indexedAt).toLocaleString(locale)}</div>
                       </div>
                     </div>
                   ))}
@@ -1114,12 +1120,12 @@ export default function KnowledgePanel() {
             {outlookContacts.length > 0 && (
               <div className="bg-white rounded-lg shadow-sm border">
                 <div className="px-4 py-3 border-b font-medium flex items-center justify-between">
-                  <span>已索引联系人 ({outlookContacts.length})</span>
+                  <span>{t("knowledge.outlook.indexedContacts", { count: outlookContacts.length })}</span>
                   <button
                     onClick={loadOutlookLists}
                     className="text-xs px-3 py-1 rounded border bg-white text-blue-600 border-blue-300 hover:bg-blue-50"
                   >
-                    刷新
+                    {t("knowledge.outlook.refresh")}
                   </button>
                 </div>
                 <div className="divide-y max-h-96 overflow-y-auto">
@@ -1127,11 +1133,11 @@ export default function KnowledgePanel() {
                     <div key={contact.id} className="px-4 py-3">
                       <div className="font-medium text-sm">{contact.name}</div>
                       <div className="text-xs text-gray-500 mt-1 space-y-0.5">
-                        {contact.emailAddresses && <div>邮箱: {contact.emailAddresses}</div>}
-                        {contact.jobTitle && <div>职位: {contact.jobTitle}</div>}
-                        {contact.department && <div>部门: {contact.department}</div>}
-                        {contact.companyName && <div>公司: {contact.companyName}</div>}
-                        <div>分块: {contact.chunks} · 索引时间: {new Date(contact.indexedAt).toLocaleString("zh-CN")}</div>
+                        {contact.emailAddresses && <div>{t("knowledge.from")}: {contact.emailAddresses}</div>}
+                        {contact.jobTitle && <div>{t("knowledge.title")}: {contact.jobTitle}</div>}
+                        {contact.department && <div>{t("knowledge.department")}: {contact.department}</div>}
+                        {contact.companyName && <div>{t("knowledge.company")}: {contact.companyName}</div>}
+                        <div>{t("knowledge.chunks", { count: contact.chunks })} · {t("knowledge.indexedAt")}: {new Date(contact.indexedAt).toLocaleString(locale)}</div>
                       </div>
                     </div>
                   ))}
@@ -1143,12 +1149,12 @@ export default function KnowledgePanel() {
             <div className="bg-white rounded-lg shadow-sm border p-4">
               <div className="flex items-center gap-2 mb-3">
                 <span className="text-lg">🔄</span>
-                <span className="font-medium">同步到 wukun20261@outlook.com</span>
+                <span className="font-medium">{t("knowledge.syncTo", { email: "wukun20261@outlook.com" })}</span>
               </div>
               <div className="flex flex-wrap gap-2">
                 <button
                   onClick={async () => {
-                    if (!confirm("将知识库中所有 .eml 文件逐封发送到 wukun20261@outlook.com（CC 同地址）？")) return;
+                    if (!confirm(t("confirm.sendAllEml", { email: "wukun20261@outlook.com" }))) return;
                     try {
                       const res = await fetch("/api/connectors/outlook/send-emails", {
                         method: "POST",
@@ -1159,31 +1165,31 @@ export default function KnowledgePanel() {
                         }),
                       });
                       const data = await res.json();
-                      setMessage(data.ok ? "邮件发送已开始" : `失败: ${data.error}`);
+                      setMessage(data.ok ? t("messages.emailSendStarted") : `${t("messages.operationFailed")}: ${data.error}`);
                     } catch (err) {
-                      setMessage(`失败: ${err instanceof Error ? err.message : String(err)}`);
+                      setErrorMessage(`${t("messages.operationFailed")}: ${err instanceof Error ? err.message : String(err)}`);
                     }
                   }}
                   className="px-3 py-1.5 bg-orange-600 text-white rounded text-sm hover:bg-orange-700"
                 >
-                  发送所有 .eml 邮件
+                  {t("knowledge.outlook.sendAllEml")}
                 </button>
                 <button
                   onClick={async () => {
-                    if (!confirm("将 People Graph 中所有联系人创建到 wukun20261@outlook.com？")) return;
+                    if (!confirm(t("confirm.createContacts", { email: "wukun20261@outlook.com" }))) return;
                     try {
                       const res = await fetch("/api/connectors/outlook/create-contacts", {
                         method: "POST",
                       });
                       const data = await res.json();
-                      setMessage(data.ok ? "联系人创建已开始" : `失败: ${data.error}`);
+                      setMessage(data.ok ? t("messages.contactCreateStarted") : `${t("messages.operationFailed")}: ${data.error}`);
                     } catch (err) {
-                      setMessage(`失败: ${err instanceof Error ? err.message : String(err)}`);
+                      setErrorMessage(`${t("messages.operationFailed")}: ${err instanceof Error ? err.message : String(err)}`);
                     }
                   }}
                   className="px-3 py-1.5 bg-purple-600 text-white rounded text-sm hover:bg-purple-700"
                 >
-                  创建 People Graph 联系人
+                  {t("knowledge.outlook.createContacts")}
                 </button>
               </div>
             </div>
@@ -1199,7 +1205,7 @@ export default function KnowledgePanel() {
       <div className="bg-white rounded-lg shadow-sm border p-4">
         <div className="flex items-center gap-2 mb-3">
           <span className="text-lg">📁</span>
-          <span className="font-medium">上传本地文档</span>
+          <span className="font-medium">{t("knowledge.upload.title")}</span>
         </div>
         <div
           className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-blue-400 transition-colors cursor-pointer"
@@ -1212,8 +1218,8 @@ export default function KnowledgePanel() {
             handleUpload(e.dataTransfer.files);
           }}
         >
-          <p className="text-gray-600 mb-1">拖拽文件到这里，或点击选择</p>
-          <p className="text-xs text-gray-400">支持 PDF、DOCX、TXT、HTML、Markdown、EML、JSON、XLSX、PPTX</p>
+          <p className="text-gray-600 mb-1">{t("knowledge.upload.dragHint")}</p>
+          <p className="text-xs text-gray-400">{t("knowledge.upload.supportedFormats")}</p>
           <input
             ref={fileInputRef}
             type="file"
@@ -1224,10 +1230,10 @@ export default function KnowledgePanel() {
           />
         </div>
         {uploading && (
-          <div className="mt-2 text-blue-600 text-sm">上传中...</div>
+          <div className="mt-2 text-blue-600 text-sm">{t("knowledge.upload.uploading")}</div>
         )}
         {message && (
-          <div className={`mt-2 text-sm ${message.includes("失败") ? "text-red-600" : "text-green-600"}`}>
+          <div className={`mt-2 text-sm ${messageIsError ? "text-red-600" : "text-green-600"}`}>
             {message}
           </div>
         )}
@@ -1237,7 +1243,7 @@ export default function KnowledgePanel() {
       {sources.length > 0 && (
         <div className="bg-white rounded-lg shadow-sm border">
           <div className="px-4 py-3 border-b flex items-center justify-between">
-            <span className="font-medium">已索引文档 ({sources.length})</span>
+            <span className="font-medium">{t("knowledge.sources.indexed", { count: sources.length })}</span>
           </div>
           <div className="divide-y max-h-[400px] overflow-y-auto" id="demo-kb-sources-list">
             {sources.map((s) => (
@@ -1248,12 +1254,12 @@ export default function KnowledgePanel() {
                     onClick={() => handleDelete(s.id, s.name)}
                     className="px-3 py-1 bg-red-100 text-red-700 rounded text-xs hover:bg-red-200"
                   >
-                    删除
+                    {t("knowledge.sources.delete")}
                   </button>
                 </div>
                 <div className="text-xs text-gray-500 flex gap-4 mt-1">
                   <span>📄 {s.type.toUpperCase()}</span>
-                  <span>🧩 {s.chunkCount} 块</span>
+                  <span>🧩 {s.chunkCount} {t("knowledge.blocks")}</span>
                   <span>🕐 {new Date(s.createdAt).toLocaleDateString()}</span>
                 </div>
               </div>
@@ -1265,7 +1271,7 @@ export default function KnowledgePanel() {
       {/* 空状态 */}
       {sources.length === 0 && !uploading && (
         <div className="text-center text-gray-400 py-12">
-          暂无本地文档，上传文件后即可使用
+          {t("knowledge.sources.emptyHint")}
         </div>
       )}
       </div>

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useLanguage } from "../i18n";
 
 interface TrustMetrics {
   faithfulness: number;
@@ -13,15 +14,16 @@ interface TrustReportProps {
   onOptimize?: (lowScoreSections: string[]) => void;
 }
 
-const METRIC_LABELS: Record<keyof TrustMetrics, { label: string; description: string }> = {
-  faithfulness: { label: "内容忠实度", description: "内容与来源一致的比例（允许改写和综合）" },
-  groundedness: { label: "内容可信度", description: "整体可信度评估（含连贯性、流畅性等维度）" },
-  coherence: { label: "连贯性", description: "结构是否清晰，逻辑是否连贯" },
-  fluency: { label: "流畅性", description: "语言是否流畅准确" },
-  completeness: { label: "完整性", description: "是否覆盖了必要信息" },
+const METRIC_LABELS: Record<keyof TrustMetrics, { labelKey: string; descKey: string }> = {
+  faithfulness: { labelKey: "trust.faithfulness", descKey: "trust.faithfulnessDesc" },
+  groundedness: { labelKey: "trust.groundedness", descKey: "trust.groundednessDesc" },
+  coherence: { labelKey: "trust.coherence", descKey: "trust.coherenceDesc" },
+  fluency: { labelKey: "trust.fluency", descKey: "trust.fluencyDesc" },
+  completeness: { labelKey: "trust.completeness", descKey: "trust.completenessDesc" },
 };
 
 export default function TrustReport({ runId, onOptimize }: TrustReportProps) {
+  const { t } = useLanguage();
   const [metrics, setMetrics] = useState<TrustMetrics | null>(null);
   const [trustScore, setTrustScore] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
@@ -83,7 +85,7 @@ export default function TrustReport({ runId, onOptimize }: TrustReportProps) {
   }
 
   if (loading) {
-    return <div className="text-center py-4 text-gray-500">加载中...</div>;
+    return <div className="text-center py-4 text-gray-500">{t("common.loading")}</div>;
   }
 
   return (
@@ -97,14 +99,14 @@ export default function TrustReport({ runId, onOptimize }: TrustReportProps) {
             <span className="text-gray-400">--</span>
           )}
         </div>
-        <div className="text-sm text-gray-500">综合质量分</div>
+        <div className="text-sm text-gray-500">{t("trust.qualityScore")}</div>
         {!metrics && (
           <button
             onClick={handleEvaluate}
             disabled={evaluating}
             className="mt-3 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
           >
-            {evaluating ? "评估中..." : "开始评估"}
+            {evaluating ? t("trust.evaluating") : t("trust.startEvaluate")}
           </button>
         )}
       </div>
@@ -112,12 +114,12 @@ export default function TrustReport({ runId, onOptimize }: TrustReportProps) {
       {/* 分项指标 */}
       {metrics && (
         <div className="space-y-2">
-          {Object.entries(METRIC_LABELS).map(([key, { label, description }]) => {
+          {Object.entries(METRIC_LABELS).map(([key, { labelKey, descKey }]) => {
             const score = metrics[key as keyof TrustMetrics];
             return (
               <div key={key} className="bg-white rounded-lg border p-3">
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-sm font-medium">{label}</span>
+                  <span className="text-sm font-medium">{t(labelKey)}</span>
                   <span className={`text-sm font-bold ${getScoreColor(score)}`}>
                     {(score * 100).toFixed(0)}%
                   </span>
@@ -128,7 +130,7 @@ export default function TrustReport({ runId, onOptimize }: TrustReportProps) {
                     style={{ width: `${score * 100}%` }}
                   />
                 </div>
-                <p className="text-xs text-gray-400 mt-1">{description}</p>
+                <p className="text-xs text-gray-400 mt-1">{t(descKey)}</p>
               </div>
             );
           })}
@@ -141,7 +143,7 @@ export default function TrustReport({ runId, onOptimize }: TrustReportProps) {
           onClick={() => onOptimize([])}
           className="w-full px-4 py-2 bg-yellow-100 text-yellow-700 rounded-lg hover:bg-yellow-200"
         >
-          💡 查看优化建议
+          💡 {t("trust.viewOptimize")}
         </button>
       )}
     </div>

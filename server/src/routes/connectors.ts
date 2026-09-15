@@ -15,13 +15,15 @@ import {
   getConnectionStatus, clearMsGraphTokens,
 } from "../lib/connectors/msGraphOAuth.js";
 import { logger } from "../lib/logger.js";
+import { pickLang, isEnLanguage, readLanguage } from "../lib/serverI18n.js";
+import { localizeFileName } from "../lib/kbGlossary.js";
 
 export const connectorsRouter = Router();
 
 // ── MS Graph OAuth ───────────────────────────────────
 
 /** 临时 state 存储（防 CSRF） */
-const pendingStates = new Map<string, { redirectUri: string; createdAt: number }>();
+const pendingStates = new Map<string, { redirectUri: string; createdAt: number; language?: string }>();
 // 清理超过 10 分钟的 state
 setInterval(() => {
   const now = Date.now();
@@ -40,7 +42,7 @@ connectorsRouter.get("/msgraph/status", (_req, res) => {
 connectorsRouter.get("/msgraph/auth", (req, res) => {
   const config = getMsGraphAppConfig();
   if (!config) {
-    res.status(400).json({ ok: false, error: "请先在设置中配置 Azure 应用信息（Client ID、Client Secret、Tenant ID）" });
+    res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "请先在设置中配置 Azure 应用信息（Client ID、Client Secret、Tenant ID）", "Configure the Azure app credentials (Client ID, Client Secret, Tenant ID) in Settings first.") });
     return;
   }
 
@@ -49,7 +51,7 @@ connectorsRouter.get("/msgraph/auth", (req, res) => {
   const redirectUri = `${protocol}://${host}/api/connectors/msgraph/callback`;
   const state = crypto.randomUUID();
 
-  pendingStates.set(state, { redirectUri, createdAt: Date.now() });
+  pendingStates.set(state, { redirectUri, createdAt: Date.now(), language: readLanguage(req) });
 
   const url = getAuthUrl(config, redirectUri, state);
   res.json({ ok: true, url });
@@ -64,20 +66,20 @@ connectorsRouter.get("/msgraph/callback", async (req, res) => {
   if (error) {
     const desc = req.query.error_description as string | undefined;
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.status(400).send(callbackHtml(false, `授权失败: ${error} - ${desc ?? ""}`));
+    res.status(400).send(callbackHtml(false, pickLang(readLanguage(req), `授权失败: ${error} - ${desc ?? ""}`, `Authorization failed: ${error} - ${desc ?? ""}`), readLanguage(req)));
     return;
   }
 
   if (!code || !state) {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.status(400).send(callbackHtml(false, "缺少 code 或 state 参数"));
+    res.status(400).send(callbackHtml(false, pickLang(readLanguage(req), "缺少 code 或 state 参数", "Missing code or state parameter"), readLanguage(req)));
     return;
   }
 
   const pending = pendingStates.get(state);
   if (!pending) {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.status(400).send(callbackHtml(false, "无效或过期的 state，请重新授权"));
+    res.status(400).send(callbackHtml(false, pickLang(readLanguage(req), "无效或过期的 state，请重新授权", "Invalid or expired state — please authorize again"), readLanguage(req)));
     return;
   }
   pendingStates.delete(state);
@@ -85,7 +87,7 @@ connectorsRouter.get("/msgraph/callback", async (req, res) => {
   const config = getMsGraphAppConfig();
   if (!config) {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.status(500).send(callbackHtml(false, "Azure 应用配置丢失"));
+    res.status(500).send(callbackHtml(false, pickLang(readLanguage(req), "Azure 应用配置丢失", "Azure app configuration is missing"), readLanguage(req)));
     return;
   }
 
@@ -94,12 +96,12 @@ connectorsRouter.get("/msgraph/callback", async (req, res) => {
     saveMsGraphTokens(tokens);
     logger.info(`[Connectors] MS Graph OAuth 成功: ${tokens.userDisplayName} (${tokens.userEmail})`);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(callbackHtml(true, `连接成功：${tokens.userDisplayName ?? tokens.userEmail ?? "Microsoft 账户"}`));
+    res.send(callbackHtml(true, pickLang(pending.language, `连接成功：${tokens.userDisplayName ?? tokens.userEmail ?? "Microsoft 账户"}`, `Connected: ${tokens.userDisplayName ?? tokens.userEmail ?? "Microsoft account"}`), pending.language));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[Connectors] MS Graph OAuth 失败: ${msg}`);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.status(500).send(callbackHtml(false, `Token 交换失败: ${msg}`));
+    res.status(500).send(callbackHtml(false, pickLang(pending.language, `Token 交换失败: ${msg}`, `Token exchange failed: ${msg}`), pending.language));
   }
 });
 
@@ -113,14 +115,14 @@ connectorsRouter.post("/msgraph/disconnect", (_req, res) => {
 connectorsRouter.post("/msgraph/config", (req, res) => {
   const { clientId, clientSecret, tenantId } = req.body;
   if (!clientId || !tenantId) {
-    res.status(400).json({ ok: false, error: "clientId 和 tenantId 是必填项" });
+    res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "clientId 和 tenantId 是必填项", "clientId and tenantId are required") });
     return;
   }
   // 如果 clientSecret 为空，说明用户没有修改，保留原有值
   const existing = getMsGraphAppConfig();
   const secretToSave = clientSecret || existing?.clientSecret;
   if (!secretToSave) {
-    res.status(400).json({ ok: false, error: "首次配置时 clientSecret 是必填项" });
+    res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "首次配置时 clientSecret 是必填项", "clientSecret is required on first-time setup") });
     return;
   }
   saveMsGraphAppConfig({ clientId, clientSecret: secretToSave, tenantId });
@@ -144,11 +146,11 @@ connectorsRouter.get("/msgraph/config", (_req, res) => {
 });
 
 /** OAuth 回调 HTML 页面 */
-function callbackHtml(success: boolean, message: string): string {
+function callbackHtml(success: boolean, message: string, language?: string): string {
   // Note: res.send(html) should set Content-Type: text/html automatically
   // but we'll be explicit in the caller
   return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>OneDrive 授权</title>
+<html><head><meta charset="utf-8"><title>${isEnLanguage(language) ? "OneDrive Authorization" : "OneDrive 授权"}</title>
 <style>
   body { font-family: -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f5f5f5; }
   .box { text-align: center; padding: 40px; background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
@@ -159,7 +161,7 @@ function callbackHtml(success: boolean, message: string): string {
 <div class="box">
   <div class="icon">${success ? "✅" : "❌"}</div>
   <div class="msg">${message}</div>
-  <p style="color:#888;margin-top:16px;font-size:13px;">此窗口可关闭</p>
+  <p style="color:#888;margin-top:16px;font-size:13px;">${isEnLanguage(language) ? "You can close this window" : "此窗口可关闭"}</p>
 </div>
 <script>
   if (window.opener) {
@@ -175,13 +177,15 @@ function callbackHtml(success: boolean, message: string): string {
 /** POST /api/connectors/msgraph/onedrive — 列出 OneDrive 文件 */
 connectorsRouter.post("/msgraph/onedrive", async (req, res) => {
   try {
+    const language = readLanguage(req);
     const token = req.body.accessToken || await getValidAccessToken();
     if (!token) {
-      res.status(400).json({ ok: false, error: "未连接 OneDrive，请先完成 OAuth 授权" });
+      res.status(400).json({ ok: false, error: pickLang(language, "未连接 OneDrive，请先完成 OAuth 授权", "OneDrive is not connected — complete the OAuth authorization first") });
       return;
     }
     const files = await listOneDriveFiles({ accessToken: token });
-    res.json({ ok: true, files });
+    // 只翻展示名；id 与 webUrl 保持原值，所以「打开」仍然指向真实文件
+    res.json({ ok: true, files: files.map((f) => ({ ...f, name: localizeFileName(f.name, language) })) });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[Connectors] OneDrive error: ${msg}`);
@@ -195,7 +199,7 @@ connectorsRouter.post("/msgraph/onedrive/download", async (req, res) => {
     const { fileId } = req.body;
     const token = req.body.accessToken || await getValidAccessToken();
     if (!token || !fileId) {
-      res.status(400).json({ ok: false, error: "未连接 OneDrive 或缺少 fileId" });
+      res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "未连接 OneDrive 或缺少 fileId", "OneDrive is not connected or fileId is missing") });
       return;
     }
     const content = await downloadOneDriveFile({ accessToken: token }, fileId);
@@ -213,7 +217,7 @@ connectorsRouter.post("/msgraph/outlook", async (req, res) => {
     const { top, filter } = req.body;
     const token = req.body.accessToken || await getValidAccessToken();
     if (!token) {
-      res.status(400).json({ ok: false, error: "未连接 Microsoft 账户" });
+      res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "未连接 Microsoft 账户", "Microsoft account is not connected") });
       return;
     }
     const emails = await listOutlookEmails({ accessToken: token }, { top, filter });
@@ -231,7 +235,7 @@ connectorsRouter.post("/msgraph/teams", async (req, res) => {
     const { top } = req.body;
     const token = req.body.accessToken || await getValidAccessToken();
     if (!token) {
-      res.status(400).json({ ok: false, error: "未连接 Microsoft 账户" });
+      res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "未连接 Microsoft 账户", "Microsoft account is not connected") });
       return;
     }
     const chats = await listTeamsChats({ accessToken: token }, { top });
@@ -249,7 +253,7 @@ connectorsRouter.post("/msgraph/calendar", async (req, res) => {
     const { top, startDateTime, endDateTime } = req.body;
     const token = req.body.accessToken || await getValidAccessToken();
     if (!token) {
-      res.status(400).json({ ok: false, error: "未连接 Microsoft 账户" });
+      res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "未连接 Microsoft 账户", "Microsoft account is not connected") });
       return;
     }
     const events = await listCalendarEvents({ accessToken: token }, { top, startDateTime, endDateTime });
@@ -267,7 +271,7 @@ connectorsRouter.post("/msgraph/import", async (req, res) => {
     const { sources } = req.body;
     const token = req.body.accessToken || await getValidAccessToken();
     if (!token || !sources) {
-      res.status(400).json({ ok: false, error: "未连接 Microsoft 账户或缺少 sources" });
+      res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "未连接 Microsoft 账户或缺少 sources", "Microsoft account is not connected or sources are missing") });
       return;
     }
     const results = await importFromMsGraph({ accessToken: token }, sources);
@@ -407,16 +411,16 @@ connectorsRouter.post("/outlook/send-emails", async (req, res) => {
   try {
     const token = await getValidAccessToken();
     if (!token) {
-      res.status(400).json({ ok: false, error: "未连接 Microsoft 账户" });
+      res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "未连接 Microsoft 账户", "Microsoft account is not connected") });
       return;
     }
     const { toAddress, ccAddress } = req.body;
     if (!toAddress) {
-      res.status(400).json({ ok: false, error: "toAddress 为必填项" });
+      res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "toAddress 为必填项", "toAddress is required") });
       return;
     }
 
-    res.json({ ok: true, message: "邮件发送已开始，请查看日志" });
+    res.json({ ok: true, message: pickLang(readLanguage(req), "邮件发送已开始，请查看日志", "Email sending started — check the logs") });
 
     try {
       const result = await sendEmlFilesAsEmails({ accessToken: token }, toAddress, ccAddress);
@@ -436,11 +440,11 @@ connectorsRouter.post("/outlook/create-contacts", async (req, res) => {
   try {
     const token = await getValidAccessToken();
     if (!token) {
-      res.status(400).json({ ok: false, error: "未连接 Microsoft 账户" });
+      res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "未连接 Microsoft 账户", "Microsoft account is not connected") });
       return;
     }
 
-    res.json({ ok: true, message: "联系人创建已开始，请查看日志" });
+    res.json({ ok: true, message: pickLang(readLanguage(req), "联系人创建已开始，请查看日志", "Contact creation started — check the logs") });
 
     try {
       const result = await createContactsFromPeopleGraph({ accessToken: token });

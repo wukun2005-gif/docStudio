@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { useLanguage } from "../i18n";
 
 interface DocumentViewerProps {
   content: string;
@@ -8,6 +9,7 @@ interface DocumentViewerProps {
 }
 
 export default function DocumentViewer({ content, runId, trustScore, onSave }: DocumentViewerProps) {
+  const { t } = useLanguage();
   const [editing, setEditing] = useState(false);
   const [editedContent, setEditedContent] = useState(content);
   const [saving, setSaving] = useState(false);
@@ -52,13 +54,13 @@ export default function DocumentViewer({ content, runId, trustScore, onSave }: D
                 disabled={saving}
                 className="px-3 py-1 text-sm bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
               >
-                {saving ? "保存中..." : "💾 保存"}
+                {saving ? t("docPreview.saving") : `💾 ${t("docPreview.saved")}`}
               </button>
               <button
                 onClick={() => { setEditing(false); setEditedContent(content); }}
                 className="px-3 py-1 text-sm border rounded hover:bg-gray-100"
               >
-                取消
+                {t("docPreview.cancel")}
               </button>
             </>
           ) : (
@@ -66,7 +68,7 @@ export default function DocumentViewer({ content, runId, trustScore, onSave }: D
               onClick={() => setEditing(true)}
               className="px-3 py-1 text-sm border rounded hover:bg-gray-100"
             >
-              ✏️ 编辑
+              ✏️ {t("docPreview.editing")}
             </button>
           )}
         </div>
@@ -78,7 +80,7 @@ export default function DocumentViewer({ content, runId, trustScore, onSave }: D
               trustScore >= 0.5 ? "bg-yellow-100 text-yellow-700" :
               "bg-red-100 text-red-700"
             }`}>
-              置信度: {(trustScore * 100).toFixed(0)}%
+              {t("evaluation.grounded")}: {(trustScore * 100).toFixed(0)}%
             </span>
           )}
 
@@ -87,21 +89,21 @@ export default function DocumentViewer({ content, runId, trustScore, onSave }: D
               <button
                 onClick={() => handleExport("docx")}
                 className="px-2 py-1 text-sm border rounded hover:bg-gray-100"
-                title="导出 Word"
+                title={t("docPreview.exportWord")}
               >
                 📄 Word
               </button>
               <button
                 onClick={() => handleExport("pptx")}
                 className="px-2 py-1 text-sm border rounded hover:bg-gray-100"
-                title="导出 PPT"
+                title={t("docPreview.exportPpt")}
               >
                 📊 PPT
               </button>
               <button
                 onClick={() => handleExport("xlsx")}
                 className="px-2 py-1 text-sm border rounded hover:bg-gray-100"
-                title="导出 Excel"
+                title={t("docPreview.exportExcel")}
               >
                 📈 Excel
               </button>

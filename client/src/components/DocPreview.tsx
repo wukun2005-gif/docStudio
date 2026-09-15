@@ -11,6 +11,7 @@
 import { useState, useRef, useMemo, useCallback, useEffect } from "react";
 import DOMPurify from "dompurify";
 import UnifiedEvaluationCard from "./UnifiedEvaluationCard";
+import { useLanguage } from "../i18n";
 import type { OutlineSection } from "../../../shared/src/types/generation.js";
 
 export interface SectionData {
@@ -77,6 +78,7 @@ export default function DocPreview({
   dirtySections, regeneratingSections, documentStyle,
   evaluationMetrics, evaluating, evaluationProgress, generationProgress, onSectionClick, onSectionUpdate, onSourceMove, onRegenerateSection, onSave, onEvaluate,
 }: DocPreviewProps) {
+  const { t } = useLanguage();
   const [activeSection, setActiveSection] = useState<number | null>(null);
   const [dragOverSection, setDragOverSection] = useState<number | null>(null);
   const [pendingDrop, setPendingDrop] = useState<PendingDrop | null>(null);
@@ -327,13 +329,13 @@ export default function DocPreview({
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || `保存失败 (${res.status})`);
+        throw new Error(errData.error || `${t("docPreview.saveFailed")} (${res.status})`);
       }
       onSave?.(htmlContent);
       setEditing(false);
     } catch (err) {
       console.error("Save failed:", err);
-      alert(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
+      alert(`${t("docPreview.saveFailed")}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSaving(false);
     }
@@ -351,22 +353,22 @@ export default function DocPreview({
       <div className="shrink-0 border-b bg-white">
         <div className="px-5 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <span className="font-medium text-gray-700">📄 文档预览</span>
+            <span className="font-medium text-gray-700">📄 {t("docPreview.title")}</span>
             {sections.length > 0 && (
-              <span className="text-xs text-gray-400">{sections.length} 个章节</span>
+              <span className="text-xs text-gray-400">{t("docPreview.sections", { count: sections.length })}</span>
             )}
             {generationProgress && (
               <span className="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 flex items-center gap-1">
                 <span className="animate-pulse w-2 h-2 bg-blue-500 rounded-full" />
                 {"currentSection" in generationProgress
                   ? `${generationProgress.message}`
-                  : `正在生成 ${generationProgress.current}/${generationProgress.total}: ${generationProgress.title}`}
+                  : t("docPreview.generating", { current: generationProgress.current, total: generationProgress.total, title: generationProgress.title })}
               </span>
             )}
             {evaluating && (
               <span className="text-xs px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200 flex items-center gap-1">
                 <span className="animate-spin w-3 h-3 border-2 border-purple-500 border-t-transparent rounded-full" />
-                🧪 最终评估中...
+                🧪 {t("docPreview.evaluating")}
                 {evaluationProgress && (
                   <span className="text-purple-500">
                     ({Object.values(evaluationProgress.tasks).filter((t) => t.status === "done").length}/{evaluationProgress.totalTasks})
@@ -382,7 +384,7 @@ export default function DocPreview({
                 onClick={() => { setEditing(true); setEditedContent(htmlToPlainText(content)); }}
                 className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100 transition-colors"
               >
-                ✏️ 编辑
+                ✏️ {t("docPreview.editing")}
               </button>
             )}
             {editing && (
@@ -392,13 +394,13 @@ export default function DocPreview({
                   disabled={saving}
                   className="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 transition-colors"
                 >
-                  {saving ? "保存中..." : "💾 保存"}
+                  {saving ? t("docPreview.saving") : `💾 ${t("docPreview.saved")}`}
                 </button>
                 <button
                   onClick={() => { setEditing(false); setEditedContent(""); }}
                   className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100 transition-colors"
                 >
-                  取消
+                  {t("docPreview.cancel")}
                 </button>
               </>
             )}
@@ -408,7 +410,7 @@ export default function DocPreview({
                 <button
                   onClick={() => handleExport("docx")}
                   className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100 transition-colors"
-                  title="导出 Word"
+                  title={t("docPreview.exportWord")}
                 >
                   📄 Word
                 </button>
@@ -416,21 +418,21 @@ export default function DocPreview({
                   id="demo-export-pptx"
                   onClick={() => handleExport("pptx")}
                   className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100 transition-colors"
-                  title="导出 PPT"
+                  title={t("docPreview.exportPpt")}
                 >
                   📊 PPT
                 </button>
                 <button
                   onClick={() => handleExport("xlsx")}
                   className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100 transition-colors"
-                  title="导出 Excel"
+                  title={t("docPreview.exportExcel")}
                 >
                   📈 Excel
                 </button>
                 <button
                   onClick={() => handleExport("eml")}
                   className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100 transition-colors"
-                  title="导出 Outlook 邮件 (.eml)"
+                  title={t("docPreview.exportEml")}
                 >
                   📧 Outlook
                 </button>
@@ -444,7 +446,7 @@ export default function DocPreview({
                 showHeatmap ? "bg-purple-100 text-purple-700 border border-purple-300"
                 : "bg-white text-gray-500 border border-gray-300 hover:bg-gray-50"
               }`}
-            >🔥 热力图</button>
+            >🔥 {t("docPreview.heatmap")}</button>
             )}
           </div>
         </div>
@@ -469,8 +471,8 @@ export default function DocPreview({
             <div className="flex items-center justify-center h-full">
               <div className="text-center">
               <div className="animate-spin w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full mx-auto mb-4"></div>
-              <p className="text-gray-500 text-sm">正在生成文档...</p>
-              <p className="text-gray-400 text-xs mt-1">检索知识库 + Web 搜索 + 生成 + 验证</p>
+              <p className="text-gray-500 text-sm">{t("docPreview.generatingDoc")}</p>
+              <p className="text-gray-400 text-xs mt-1">{t("docPreview.generatingHint")}</p>
               </div>
             </div>
           )
@@ -478,10 +480,10 @@ export default function DocPreview({
           <div className="p-6" ref={containerRef}>
             {showHeatmap && (
             <div className="fixed bottom-4 right-4 bg-white border rounded-lg shadow-lg p-3 z-20 text-xs">
-              <div className="font-medium mb-1.5 text-gray-700">置信度热力图</div>
-              <div className="flex items-center gap-2 mb-1"><span className="w-3 h-3 rounded" style={{background:"rgba(34,197,94,0.3)"}}/><span>多源交叉验证（≥2 源）</span></div>
-              <div className="flex items-center gap-2 mb-1"><span className="w-3 h-3 rounded" style={{background:"rgba(234,179,8,0.3)"}}/><span>单源支撑（1 源）</span></div>
-              <div className="flex items-center gap-2"><span className="w-3 h-3 rounded" style={{background:"rgba(239,68,68,0.3)"}}/><span>AI 推断</span></div>
+              <div className="font-medium mb-1.5 text-gray-700">{t("docPreview.heatmapTitle")}</div>
+              <div className="flex items-center gap-2 mb-1"><span className="w-3 h-3 rounded" style={{background:"rgba(34,197,94,0.3)"}}/><span>{t("docPreview.heatmapMulti")}</span></div>
+              <div className="flex items-center gap-2 mb-1"><span className="w-3 h-3 rounded" style={{background:"rgba(234,179,8,0.3)"}}/><span>{t("docPreview.heatmapSingle")}</span></div>
+              <div className="flex items-center gap-2"><span className="w-3 h-3 rounded" style={{background:"rgba(239,68,68,0.3)"}}/><span>{t("docPreview.heatmapAi")}</span></div>
             </div>
             )}
             {/* 编辑模式：textarea */}
@@ -502,8 +504,8 @@ export default function DocPreview({
             {/* 🌳 章节来源详情（可展开、支持拖拽和删除） */}
             {sections.length > 0 && (
               <div className="mt-8 pt-6 border-t">
-                <h3 className="text-sm font-semibold text-gray-600 mb-3">🌳 章节来源详情</h3>
-                <p className="text-xs text-gray-400 mb-3">拖拽知识节点可将其移动到其他章节；修改后点击"重新生成"更新章节内容</p>
+                <h3 className="text-sm font-semibold text-gray-600 mb-3">🌳 {t("docPreview.sourceDetail")}</h3>
+                <p className="text-xs text-gray-400 mb-3">{t("docPreview.sourceHint")}</p>
                 <div className="space-y-2">
                   {sections.map((s, idx) => {
                     const isDirty = dirtySections?.has(idx) ?? false;
@@ -525,7 +527,7 @@ export default function DocPreview({
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-medium text-gray-700">{s.title}</span>
                             {isDirty && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-100 text-orange-700">已修改</span>
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-100 text-orange-700">{t("docPreview.modified")}</span>
                             )}
                           </div>
                           <span className="text-gray-400 text-xs">
@@ -536,7 +538,7 @@ export default function DocPreview({
                           <div className="px-4 pb-3 border-t bg-gray-50">
                             {s.sources.length > 0 && (
                               <div className="mt-2">
-                                <p className="text-xs text-gray-500 mb-1">知识库来源（可拖拽）：</p>
+                                <p className="text-xs text-gray-500 mb-1">{t("docPreview.knowledgeSources")}</p>
                                 {s.sources.map((src, i) => (
                                   <div
                                     key={`${src.chunkId}-${i}`}
@@ -557,20 +559,20 @@ export default function DocPreview({
                                         ) : (
                                           <span className="font-mono text-blue-600">{src.sourceName || `[${src.chunkId}]`}</span>
                                         )}{" "}
-                                        <span className="text-gray-400" title={`相关度 ${(src.score * 100).toFixed(0)}%（满分 100%）`}>
-                                          {src.score >= 0.7 ? "🟢 高相关" :
-                                           src.score >= 0.4 ? "🟡 中相关" :
-                                           src.score >= 0.15 ? "🟠 低相关" :
-                                           "⚪ 弱相关"}{" "}
+                                        <span className="text-gray-400" title={`${t("docPreview.relevance")} ${(src.score * 100).toFixed(0)}%`}>
+                                          {src.score >= 0.7 ? t("docPreview.relevanceHigh") :
+                                           src.score >= 0.4 ? t("docPreview.relevanceMid") :
+                                           src.score >= 0.15 ? t("docPreview.relevanceLow") :
+                                           t("docPreview.relevanceWeak")}{" "}
                                           {(src.score * 100).toFixed(0)}%
                                         </span>
                                       </div>
                                       <button
                                         onClick={(e) => { e.stopPropagation(); handleDeleteSource(idx, i); }}
                                         className="shrink-0 px-2 py-0.5 border border-red-200 text-red-500 hover:bg-red-50 rounded text-[11px] transition-colors"
-                                        title="移除此来源"
+                                        title={t("docPreview.removeTitle")}
                                       >
-                                        移除
+                                        {t("docPreview.remove")}
                                       </button>
                                     </div>
                                     <p className="text-gray-500 mt-0.5 line-clamp-2 pr-1 pb-0.5" style={{ userSelect: "text" }}>{src.content}</p>
@@ -580,7 +582,7 @@ export default function DocPreview({
                             )}
                             {s.webCitations.length > 0 && (
                               <div className="mt-2">
-                                <p className="text-xs text-gray-500 mb-1">Web 来源（可拖拽）：</p>
+                                <p className="text-xs text-gray-500 mb-1">{t("docPreview.webSources")}</p>
                                 {s.webCitations.map((c, i) => (
                                   <div
                                     key={i}
@@ -594,11 +596,11 @@ export default function DocPreview({
                                           {c.title}
                                         </a>
                                         {c.score !== undefined && (
-                                          <span className="text-gray-400 ml-1" title={`相关度 ${(c.score * 100).toFixed(0)}%（满分 100%）`}>
-                                            {c.score >= 0.7 ? "🟢 高相关" :
-                                             c.score >= 0.4 ? "🟡 中相关" :
-                                             c.score >= 0.15 ? "🟠 低相关" :
-                                             "⚪ 弱相关"}{" "}
+                                          <span className="text-gray-400 ml-1" title={`${t("docPreview.relevance")} ${(c.score * 100).toFixed(0)}%`}>
+                                            {c.score >= 0.7 ? t("docPreview.relevanceHigh") :
+                                             c.score >= 0.4 ? t("docPreview.relevanceMid") :
+                                             c.score >= 0.15 ? t("docPreview.relevanceLow") :
+                                             t("docPreview.relevanceWeak")}{" "}
                                             {(c.score * 100).toFixed(0)}%
                                           </span>
                                         )}
@@ -606,9 +608,9 @@ export default function DocPreview({
                                       <button
                                         onClick={(e) => { e.stopPropagation(); handleDeleteWebCitation(idx, i); }}
                                         className="shrink-0 px-2 py-0.5 border border-red-200 text-red-500 hover:bg-red-50 rounded text-[11px] transition-colors"
-                                        title="移除此来源"
+                                        title={t("docPreview.removeTitle")}
                                       >
-                                        移除
+                                        {t("docPreview.remove")}
                                       </button>
                                     </div>
                                     <p className="text-gray-500 mt-0.5 line-clamp-2 pr-1 pb-0.5" style={{ userSelect: "text" }}>{c.snippet}</p>
@@ -617,7 +619,7 @@ export default function DocPreview({
                               </div>
                             )}
                             {s.sources.length === 0 && s.webCitations.length === 0 && (
-                              <p className="text-xs text-gray-400 mt-2">无来源信息</p>
+                              <p className="text-xs text-gray-400 mt-2">{t("docPreview.noSources")}</p>
                             )}
                             {/* 重新生成按钮 */}
                             {isDirty && (
@@ -632,7 +634,7 @@ export default function DocPreview({
                                       : "bg-blue-600 text-white hover:bg-blue-700"
                                   }`}
                                 >
-                                  {isRegenerating ? "⏳ 重新生成中..." : "🔄 重新生成此章节"}
+                                  {isRegenerating ? t("docPreview.regenerating") : t("docPreview.regenerateSection")}
                                 </button>
                               </div>
                             )}
@@ -649,7 +651,7 @@ export default function DocPreview({
           <div className="flex items-center justify-center h-full text-gray-400">
             <div className="text-center">
               <p className="text-4xl mb-3">📝</p>
-              <p className="text-sm">通过右侧对话描述需求，调整大纲后一键生成</p>
+              <p className="text-sm">{t("docPreview.emptyHint")}</p>
             </div>
           </div>
         )}
@@ -663,18 +665,18 @@ export default function DocPreview({
             className="fixed z-50 bg-white rounded-lg shadow-lg border px-3 py-2 flex items-center gap-2"
             style={{ left: pendingDrop.mouseX + 8, top: pendingDrop.mouseY - 20 }}
           >
-            <span className="text-xs text-gray-500">拖拽到「{sections[pendingDrop.toSectionIdx]?.title}」</span>
+            <span className="text-xs text-gray-500">{t("docPreview.dragTo", { title: sections[pendingDrop.toSectionIdx]?.title })}</span>
             <button
               onClick={() => handlePendingAction("move")}
               className="px-2.5 py-1 text-xs rounded bg-orange-500 text-white hover:bg-orange-600"
             >
-              ✂️ 移动
+              {t("docPreview.move")}
             </button>
             <button
               onClick={() => handlePendingAction("copy")}
               className="px-2.5 py-1 text-xs rounded bg-blue-500 text-white hover:bg-blue-600"
             >
-              📋 复制
+              {t("docPreview.copy")}
             </button>
           </div>
         </>

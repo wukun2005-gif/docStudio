@@ -5,6 +5,7 @@ import { PRESET_SEARCH_PROVIDERS, PRESET_KNOWLEDGE_PROVIDERS } from "../../../sh
 import type { SearchProviderConnection, KnowledgeProviderConnection, SearchProviderId } from "../../../shared/src/types/provider.js";
 import { useModelCatalog } from "../lib/modelCatalog";
 import type { ModelInfo } from "../lib/modelCatalog";
+import { useLanguage } from "../i18n";
 
 /** 从目录中获取单个模型的元数据 */
 function getModelMeta(providerId: string, modelId: string, catalog?: Record<string, ModelInfo[]>): ModelInfo | undefined {
@@ -20,19 +21,19 @@ interface MsGraphConfig {
 }
 
 const PRESET_PROVIDERS = [
-  { id: "gemini", name: "Gemini (Google)", defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta", keyPlaceholder: "AIza...", desc: "Google Gemini 系列" },
-  { id: "openrouter", name: "OpenRouter", defaultBaseUrl: "https://openrouter.ai/api/v1", keyPlaceholder: "sk-or-...", desc: "多模型聚合平台" },
+  { id: "gemini", name: "Gemini (Google)", defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta", keyPlaceholder: "AIza...", desc: "Google Gemini 系列", descEn: "Google Gemini series" },
+  { id: "openrouter", name: "OpenRouter", defaultBaseUrl: "https://openrouter.ai/api/v1", keyPlaceholder: "sk-or-...", desc: "多模型聚合平台", descEn: "Multi-model aggregation platform" },
   { id: "deepseek", name: "DeepSeek", defaultBaseUrl: "https://api.deepseek.com/v1", keyPlaceholder: "sk-...", desc: "DeepSeek AI" },
-  { id: "qwen", name: "Qwen (通义千问)", defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", keyPlaceholder: "sk-...", desc: "阿里通义千问" },
-  { id: "kimi", name: "Kimi (月之暗面)", defaultBaseUrl: "https://api.moonshot.cn/v1", keyPlaceholder: "sk-...", desc: "月之暗面 Kimi" },
-  { id: "glm", name: "GLM (智谱)", defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4", keyPlaceholder: "...", desc: "智谱 GLM" },
+  { id: "qwen", name: "Qwen (通义千问)", nameEn: "Qwen (Tongyi)", defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", keyPlaceholder: "sk-...", desc: "阿里通义千问", descEn: "Alibaba Tongyi Qianwen" },
+  { id: "kimi", name: "Kimi (月之暗面)", nameEn: "Kimi (Moonshot)", defaultBaseUrl: "https://api.moonshot.cn/v1", keyPlaceholder: "sk-...", desc: "月之暗面 Kimi", descEn: "Moonshot AI Kimi" },
+  { id: "glm", name: "GLM (智谱)", nameEn: "GLM (Zhipu)", defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4", keyPlaceholder: "...", desc: "智谱 GLM", descEn: "Zhipu GLM" },
   { id: "minimax", name: "MiniMax", defaultBaseUrl: "https://api.minimax.chat/v1", keyPlaceholder: "eyJhb...", desc: "MiniMax AI" },
   { id: "opencode", name: "OpenCode", defaultBaseUrl: "https://opencode.ai/v1", keyPlaceholder: "sk-...", desc: "OpenCode AI" },
-  { id: "mimo", name: "MiMo (Xiaomi)", defaultBaseUrl: "https://api.xiaomi.com/v1", keyPlaceholder: "tp-...", desc: "小米 MiMo" },
-  { id: "volcengine", name: "Volcengine (火山引擎)", defaultBaseUrl: "https://ark.cn-beijing.volces.com/api/v3", keyPlaceholder: "ark-...", desc: "火山引擎豆包" },
-  { id: "bailian", name: "Bailian (百炼/阿里)", defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", keyPlaceholder: "sk-...", desc: "阿里百炼" },
+  { id: "mimo", name: "MiMo (Xiaomi)", defaultBaseUrl: "https://api.xiaomi.com/v1", keyPlaceholder: "tp-...", desc: "小米 MiMo", descEn: "Xiaomi MiMo" },
+  { id: "volcengine", name: "Volcengine (火山引擎)", nameEn: "Volcengine", defaultBaseUrl: "https://ark.cn-beijing.volces.com/api/v3", keyPlaceholder: "ark-...", desc: "火山引擎豆包", descEn: "Volcengine Doubao" },
+  { id: "bailian", name: "Bailian (百炼/阿里)", nameEn: "Bailian (Alibaba)", defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", keyPlaceholder: "sk-...", desc: "阿里百炼", descEn: "Alibaba Bailian" },
   { id: "bedrock", name: "AWS Bedrock", defaultBaseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", keyPlaceholder: "AWS access key ID", desc: "Amazon Bedrock", needsRegion: true, regionPlaceholder: "us-east-1" },
-  { id: "custom", name: "Custom (OpenAI Compatible)", defaultBaseUrl: "", keyPlaceholder: "sk-...", desc: "自定义 OpenAI 兼容端点" },
+  { id: "custom", name: "Custom (OpenAI Compatible)", defaultBaseUrl: "", keyPlaceholder: "sk-...", desc: "自定义 OpenAI 兼容端点", descEn: "Custom OpenAI-compatible endpoint" },
 ];
 
 type TabId = "profile" | "llm" | "search" | "knowledge";
@@ -84,6 +85,7 @@ function saveProviderOrder(order: string[]) {
 }
 
 export default function Settings() {
+  const { t, locale } = useLanguage();
   const { providers, enableProviderFallback, searchProviders: savedSearch, knowledgeProviders: savedKnowledge, knowledgeEnabled: savedKnowledgeEnabled, loadSettings, saveProviders, saveSearchProviders, saveKnowledgeConfig } = useAppStore();
   const { catalog: modelCatalog } = useModelCatalog();
   const [activeTab, setActiveTab] = useState<TabId>("profile");
@@ -339,7 +341,7 @@ export default function Settings() {
   // 保存个人资料
   const handleSaveProfile = async () => {
     if (!profileForm.name.trim()) {
-      showToast("error", "姓名不能为空");
+      showToast("error", t("messages.nameRequired"));
       return;
     }
     setProfileSaving(true);
@@ -363,9 +365,9 @@ export default function Settings() {
           attributes: { isCurrentUser: true },
         }),
       });
-      showToast("success", "个人资料已保存");
+      showToast("success", t("settings.profile.saved"));
     } catch {
-      showToast("error", "保存失败");
+      showToast("error", t("settings.profile.saveFailed"));
     } finally {
       setProfileSaving(false);
     }
@@ -389,7 +391,7 @@ export default function Settings() {
         body: JSON.stringify({ apiKey: provider.apiKey, baseUrl: provider.baseUrl }),
       });
       const data = await res.json();
-      if (!data.ok) throw new Error(data.error || "查询失败");
+      if (!data.ok) throw new Error(data.error || t("messages.queryFailed"));
       const models: string[] = data.models || [];
 
       // 保留用户已选 defaultModelId 和 fallback 顺序
@@ -442,9 +444,9 @@ export default function Settings() {
       await Promise.all(workers);
       setVerifiedModels(prev => ({ ...prev, [providerId]: verified }));
 
-      showToast("success", `已查询到 ${models.length} 个模型`);
+      showToast("success", t("messages.querySuccess", { count: models.length }));
     } catch (e: any) {
-      showToast("error", `查询失败: ${e.message}`);
+      showToast("error", `${t("messages.queryFailed")}: ${e.message}`);
     } finally {
       setLoadingModels(null);
     }
@@ -463,9 +465,9 @@ export default function Settings() {
         body: JSON.stringify(body),
       });
       const data = await res.json();
-      showToast(data.ok ? "success" : "error", data.ok ? "验证成功" : `验证失败: ${data.error || "未知错误"}`);
+      showToast(data.ok ? "success" : "error", data.ok ? t("settings.search.verifySuccess") : `${t("settings.search.verifyFailed")}: ${data.error || "Unknown error"}`);
     } catch (e: any) {
-      showToast("error", `验证失败: ${e.message}`);
+      showToast("error", `${t("settings.search.verifyFailed")}: ${e.message}`);
     }
   }, [searchFormState]);
 
@@ -478,9 +480,9 @@ export default function Settings() {
         body: JSON.stringify({ providerType: config.providerType, providerId: config.providerId, baseUrl: config.baseUrl, apiKey: config.apiKeyRef, modelId: config.modelId }),
       });
       const data = await res.json();
-      showToast(data.ok ? "success" : "error", data.ok ? "连接成功" : `连接失败: ${data.error || "未知错误"}`);
+      showToast(data.ok ? "success" : "error", data.ok ? t("messages.connectionSuccess") : `${t("messages.connectionFailed")}: ${data.error || t("messages.unknownError")}`);
     } catch (e: any) {
-      showToast("error", `连接失败: ${e.message}`);
+      showToast("error", `${t("messages.connectionFailed")}: ${e.message}`);
     }
   }, [knowledgeFormState]);
 
@@ -497,18 +499,18 @@ export default function Settings() {
       };
     }).filter((p): p is NonNullable<typeof p> => p !== null);
     await saveProviders(list, enableProviderFallback);
-    showToast("success", "已保存");
+    showToast("success", t("settings.llm.saved"));
     await loadSettings();
   };
 
   const handleSaveSearch = async () => {
     await saveSearchProviders(Object.values(searchFormState));
-    showToast("success", "已保存");
+    showToast("success", t("settings.search.saved"));
   };
 
   const handleSaveKnowledge = async () => {
     await saveKnowledgeConfig(Object.values(knowledgeFormState), knowledgeEnabled);
-    showToast("success", "已保存");
+    showToast("success", t("settings.knowledge.saved"));
   };
 
   const handleSaveMsGraphConfig = async () => {
@@ -525,12 +527,12 @@ export default function Settings() {
       const data = await res.json();
       if (data.ok) {
         setMsGraphConfigured(true);
-        showToast("success", "Azure 应用配置已保存");
+        showToast("success", t("settings.knowledge.azureConfigured"));
       } else {
-        showToast("error", data.error || "保存失败");
+        showToast("error", data.error || t("messages.saveFailed"));
       }
     } catch (e: any) {
-      showToast("error", `保存失败: ${e.message}`);
+      showToast("error", `${t("messages.saveFailed")}: ${e.message}`);
     } finally {
       setMsGraphSaving(false);
     }
@@ -549,9 +551,9 @@ export default function Settings() {
       });
       setGithubSaved(true);
       setGithubError(null);
-      showToast("success", "GitHub Token 已保存");
+      showToast("success", t("settings.knowledge.githubTokenSaved"));
     } catch (e: any) {
-      showToast("error", `保存失败: ${e.message}`);
+      showToast("error", `${t("messages.saveFailed")}: ${e.message}`);
     }
   };
 
@@ -566,14 +568,14 @@ export default function Settings() {
       });
       const data = await res.json();
       if (data.ok) {
-        showToast("success", `验证成功，找到 ${data.repos.length} 个 Repo`);
+        showToast("success", t("settings.github.verified", { count: data.repos.length }));
       } else {
-        setGithubError(data.error || "连接失败");
-        showToast("error", data.error || "连接失败");
+        setGithubError(data.error || t("settings.knowledge.connectFailed"));
+        showToast("error", data.error || t("messages.connectionFailed"));
       }
     } catch (e: any) {
-      setGithubError(`验证失败: ${e.message}`);
-      showToast("error", `验证失败: ${e.message}`);
+      setGithubError(`${t("settings.github.verifyFailed")}: ${e.message}`);
+      showToast("error", `${t("settings.github.verifyFailed")}: ${e.message}`);
     } finally {
       setGithubLoading(false);
     }
@@ -584,10 +586,10 @@ export default function Settings() {
   };
 
   const tabs: { id: TabId; label: string }[] = [
-    { id: "profile", label: "👤 个人资料" },
-    { id: "llm", label: "模型 Providers" },
-    { id: "search", label: "搜索 Providers" },
-    { id: "knowledge", label: "知识库" },
+    { id: "profile", label: t("settings.tabs.profile") },
+    { id: "llm", label: t("settings.tabs.llm") },
+    { id: "search", label: t("settings.tabs.search") },
+    { id: "knowledge", label: t("settings.tabs.knowledge") },
   ];
 
   return (
@@ -598,7 +600,7 @@ export default function Settings() {
         </div>
       )}
 
-      <h2 className="text-2xl font-bold mb-4">设置</h2>
+      <h2 className="text-2xl font-bold mb-4">{t("settings.title")}</h2>
 
       {/* Tab 导航 */}
       <div className="flex border-b mb-6">
@@ -614,53 +616,53 @@ export default function Settings() {
       {activeTab === "profile" && (
         <div>
           <div className="flex items-center gap-4 mb-4">
-            <h3 className="text-lg font-semibold">个人资料</h3>
+            <h3 className="text-lg font-semibold">{t("settings.profile.title")}</h3>
             <button onClick={handleSaveProfile} disabled={profileSaving}
               className="ml-auto px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm disabled:opacity-50">
-              {profileSaving ? "保存中..." : "保存"}
+              {profileSaving ? t("settings.profile.saving") : t("settings.profile.save")}
             </button>
           </div>
           <p className="text-sm text-gray-500 mb-4">
-            配置您的个人信息，用于文档生成时的署名和邮件落款。保存后会自动同步到「人员图谱」。
+            {t("settings.profile.desc")}
           </p>
           <div className="bg-white border rounded-lg p-6 space-y-4 max-w-lg">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">姓名 <span className="text-red-500">*</span></label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">{t("settings.profile.name")} <span className="text-red-500">{t("settings.profile.nameRequired")}</span></label>
               <input
                 type="text"
                 value={profileForm.name}
                 onChange={e => setProfileForm(prev => ({ ...prev, name: e.target.value }))}
-                placeholder="黄薇"
+                placeholder={t("settings.profile.namePlaceholder")}
                 className="w-full border rounded px-3 py-2 text-sm"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">职位</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">{t("settings.profile.title")}</label>
               <input
                 type="text"
                 value={profileForm.title}
                 onChange={e => setProfileForm(prev => ({ ...prev, title: e.target.value }))}
-                placeholder="高级产品经理"
+                placeholder={t("settings.profile.titlePlaceholder")}
                 className="w-full border rounded px-3 py-2 text-sm"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">部门</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">{t("settings.profile.department")}</label>
               <input
                 type="text"
                 value={profileForm.department}
                 onChange={e => setProfileForm(prev => ({ ...prev, department: e.target.value }))}
-                placeholder="产品部"
+                placeholder={t("settings.profile.departmentPlaceholder")}
                 className="w-full border rounded px-3 py-2 text-sm"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">邮箱</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">{t("settings.profile.email")}</label>
               <input
                 type="email"
                 value={profileForm.email}
                 onChange={e => setProfileForm(prev => ({ ...prev, email: e.target.value }))}
-                placeholder="huangwei@company.com"
+                placeholder={t("settings.profile.emailPlaceholder")}
                 className="w-full border rounded px-3 py-2 text-sm"
               />
             </div>
@@ -672,11 +674,11 @@ export default function Settings() {
       {activeTab === "llm" && (
         <div>
           <div className="flex items-center gap-4 mb-4">
-            <h3 className="text-lg font-semibold">LLM Provider 配置</h3>
-            <button onClick={handleSave} className="ml-auto px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">保存</button>
+            <h3 className="text-lg font-semibold">{t("settings.llm.title")}</h3>
+            <button onClick={handleSave} className="ml-auto px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">{t("settings.llm.save")}</button>
           </div>
           <p className="text-sm text-gray-500 mb-4">
-            配置 AI 服务商的 API Key 以启用模型连接。拖拽卡片可调整 Provider 优先级。
+            {t("settings.llm.desc")}
           </p>
 
           {/* Provider 回退总开关 */}
@@ -691,8 +693,8 @@ export default function Settings() {
                 }}
                 className="rounded"
               />
-              <span className="font-medium">启用 Provider 回退</span>
-              <span className="text-gray-500">（失败时自动切换至下一个可用服务商）</span>
+              <span className="font-medium">{t("settings.llm.enableFallback")}</span>
+              <span className="text-gray-500">{t("settings.llm.fallbackDesc")}</span>
             </label>
           </div>
 
@@ -722,7 +724,7 @@ export default function Settings() {
                         draggable
                         onDragStart={() => handleProviderDragStart(index)}
                         onDragEnd={handleProviderDragEnd}
-                        title="拖拽排序"
+                        title={t("settings.llm.dragSort")}
                       >
                         ⋮⋮
                       </span>
@@ -733,8 +735,8 @@ export default function Settings() {
                       >
                         <span className="text-xs">{isExpanded ? "▼" : "▶"}</span>
                         <div className={`w-2.5 h-2.5 rounded-full ${c.enabled ? "bg-green-500" : "bg-gray-300"}`} />
-                        <span className="font-medium">{c.name}</span>
-                        <span className="text-xs text-gray-400">{preset.desc}</span>
+                        <span className="font-medium">{locale === "en" && preset.nameEn ? preset.nameEn : c.name}</span>
+                        <span className="text-xs text-gray-400">{locale === "en" && preset.descEn ? preset.descEn : preset.desc}</span>
                       </button>
                     </div>
                     <div className="flex items-center gap-3">
@@ -745,7 +747,7 @@ export default function Settings() {
                           onChange={e => updateField(c.providerId, "enableModelFallback", e.target.checked)}
                           className="rounded"
                         />
-                        Model 回退
+                        {t("settings.llm.modelFallback")}
                       </label>
                       <label className="flex items-center gap-1.5 text-xs" onClick={e => e.stopPropagation()}>
                         <input
@@ -754,11 +756,11 @@ export default function Settings() {
                           onChange={e => updateField(c.providerId, "enabled", e.target.checked)}
                           className="rounded"
                         />
-                        启用
+                        {t("settings.llm.enabled")}
                       </label>
-                      {c.apiKey && <span className="text-xs text-green-600 bg-green-50 px-2 py-0.5 rounded">已配置</span>}
-                      {!c.apiKey && <span className="text-xs text-amber-600 bg-amber-50 px-2 py-0.5 rounded">需配置Key</span>}
-                      {c.modelIds.length > 0 && <span className="text-xs text-gray-500">{c.modelIds.length} 模型</span>}
+                      {c.apiKey && <span className="text-xs text-green-600 bg-green-50 px-2 py-0.5 rounded">{t("settings.llm.configured")}</span>}
+                      {!c.apiKey && <span className="text-xs text-amber-600 bg-amber-50 px-2 py-0.5 rounded">{t("settings.llm.needKey")}</span>}
+                      {c.modelIds.length > 0 && <span className="text-xs text-gray-500">{t("settings.llm.models", { count: c.modelIds.length })}</span>}
                     </div>
                   </div>
 
@@ -794,7 +796,7 @@ export default function Settings() {
                             disabled={isLoading}
                             className={`text-sm px-3 py-1.5 rounded ${isLoading ? "bg-gray-100 text-gray-400 cursor-not-allowed" : "bg-blue-100 text-blue-700 hover:bg-blue-200"}`}
                           >
-                            {isLoading ? "查询中…" : "查询可用模型"}
+                            {isLoading ? t("settings.llm.querying") : t("settings.llm.queryModels")}
                           </button>
                         </div>
                       )}
@@ -802,16 +804,16 @@ export default function Settings() {
                       {/* Fallback 模型表格 */}
                       {fallbackList.length > 0 && (
                         <div>
-                          <label className="block text-sm text-gray-600 mb-2">默认模型（拖拽调整 fallback 顺序）</label>
+                          <label className="block text-sm text-gray-600 mb-2">{t("settings.llm.defaultModel")}</label>
                           <div className="border rounded-lg overflow-hidden bg-white">
                             <table className="w-full text-sm">
                               <thead className="bg-gray-50">
                                 <tr>
                                   <th className="w-8 px-2 py-2 text-center text-gray-500">#</th>
                                   <th className="px-3 py-2 text-left text-gray-500">Model ID</th>
-                                  <th className="px-3 py-2 text-left text-gray-500">推荐场景</th>
-                                  <th className="px-3 py-2 text-left text-gray-500">配额</th>
-                                  <th className="w-20 px-2 py-2 text-center text-gray-500">操作</th>
+                                  <th className="px-3 py-2 text-left text-gray-500">{t("settings.llm.recommended")}</th>
+                                  <th className="px-3 py-2 text-left text-gray-500">{t("settings.llm.quota")}</th>
+                                  <th className="w-20 px-2 py-2 text-center text-gray-500">{t("settings.llm.action")}</th>
                                 </tr>
                               </thead>
                               <tbody>
@@ -836,7 +838,7 @@ export default function Settings() {
                                           draggable
                                           onDragStart={() => handleDragStart(preset.id, i)}
                                           onDragEnd={handleDragEnd}
-                                          aria-label="拖拽排序"
+                                          aria-label={t("settings.llm.dragSort")}
                                         >
                                           ⠿
                                         </span>
@@ -844,10 +846,10 @@ export default function Settings() {
                                       <td className="px-3 py-2">
                                         <span className="font-mono text-xs">
                                           {model}
-                                          {isDefault && <span className="ml-2 px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">当前默认</span>}
-                                          {isVerified === true && <span className="ml-1 text-green-600" title="已验证可用">✓</span>}
-                                          {isVerified === false && <span className="ml-1 text-amber-500" title="验证失败">⚠</span>}
-                                          {isVerified === null && isLoading && <span className="ml-1 text-gray-400" title="验证中…">⏳</span>}
+                                          {isDefault && <span className="ml-2 px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">{t("settings.llm.currentDefault")}</span>}
+                                          {isVerified === true && <span className="ml-1 text-green-600" title={t("settings.llm.verifiedOk")}>✓</span>}
+                                          {isVerified === false && <span className="ml-1 text-amber-500" title={t("settings.llm.verifyFailedTitle")}>⚠</span>}
+                                          {isVerified === null && isLoading && <span className="ml-1 text-gray-400" title={t("settings.llm.verifyingTitle")}>⏳</span>}
                                         </span>
                                       </td>
                                       <td className="px-3 py-2 text-gray-500 text-xs">
@@ -863,7 +865,7 @@ export default function Settings() {
                                             className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
                                             onClick={() => handleSelectDefault(c.providerId, model)}
                                           >
-                                            设为默认
+                                            {t("settings.llm.setDefault")}
                                           </button>
                                         )}
                                       </td>
@@ -877,7 +879,7 @@ export default function Settings() {
                       )}
 
                       <div className="flex justify-end">
-                        <button onClick={handleSave} className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">保存</button>
+                        <button onClick={handleSave} className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">{t("settings.llm.save")}</button>
                       </div>
                     </div>
                   )}
@@ -892,8 +894,8 @@ export default function Settings() {
       {activeTab === "search" && (
         <div>
           <div className="flex items-center gap-4 mb-4">
-            <h3 className="text-lg font-semibold">搜索 Providers</h3>
-            <button onClick={handleSaveSearch} className="ml-auto px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">保存</button>
+            <h3 className="text-lg font-semibold">{t("settings.search.title")}</h3>
+            <button onClick={handleSaveSearch} className="ml-auto px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">{t("settings.search.save")}</button>
           </div>
           <div className="space-y-3">
             {Object.values(searchFormState).map(c => {
@@ -905,10 +907,10 @@ export default function Settings() {
                     <span className="font-medium flex-1">{c.name}</span>
                     <label className="flex items-center gap-2 text-sm text-gray-600">
                       <input type="checkbox" checked={c.enabled} onChange={e => setSearchFormState(prev => ({ ...prev, [c.providerId]: { ...prev[c.providerId], enabled: e.target.checked } }))} className="rounded" />
-                      启用
+                      {t("settings.search.enabled")}
                     </label>
                   </div>
-                  {preset && <p className="text-xs text-gray-500 mb-3 ml-6">{preset.desc}</p>}
+                  {preset && <p className="text-xs text-gray-500 mb-3 ml-6">{locale === "en" && preset.descEn ? preset.descEn : preset.desc}</p>}
                   {c.providerId === "epo" ? (
                     <div className="ml-6 space-y-3">
                       <div>
@@ -919,7 +921,7 @@ export default function Settings() {
                         <label className="block text-sm text-gray-600 mb-1">Consumer Secret</label>
                         <input type="password" value={(c as any).apiKey2Ref || ""} onChange={e => setSearchFormState(prev => ({ ...prev, [c.providerId]: { ...prev[c.providerId], apiKey2Ref: e.target.value } } as any))} placeholder="your-consumer-secret" className="w-full border rounded px-3 py-2 text-sm" />
                       </div>
-                      <p className="text-xs text-gray-400">格式: Consumer Key + Consumer Secret</p>
+                      <p className="text-xs text-gray-400">{t("settings.search.formatHint")}</p>
                     </div>
                   ) : (
                     <div className="ml-6 space-y-3">
@@ -936,8 +938,8 @@ export default function Settings() {
                     </div>
                   )}
                   <div className="ml-6 mt-3 flex gap-2">
-                    <button onClick={handleSaveSearch} className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">保存</button>
-                    <button onClick={() => handleVerifySearchKey(c.providerId)} disabled={!c.apiKeyRef} className="px-3 py-1 border border-gray-300 rounded text-sm hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">验证 Key</button>
+                    <button onClick={handleSaveSearch} className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">{t("settings.search.save")}</button>
+                    <button onClick={() => handleVerifySearchKey(c.providerId)} disabled={!c.apiKeyRef} className="px-3 py-1 border border-gray-300 rounded text-sm hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">{t("settings.search.verifyKey")}</button>
                   </div>
                 </div>
               );
@@ -950,12 +952,12 @@ export default function Settings() {
       {activeTab === "knowledge" && (
         <div>
           <div className="flex items-center gap-4 mb-4">
-            <h3 className="text-lg font-semibold">知识库</h3>
+            <h3 className="text-lg font-semibold">{t("settings.knowledge.title")}</h3>
             <label className="flex items-center gap-2 ml-auto text-sm text-gray-600">
               <input type="checkbox" checked={knowledgeEnabled} onChange={e => setKnowledgeEnabled(e.target.checked)} className="rounded" />
-              启用知识库
+              {t("settings.knowledge.enabled")}
             </label>
-            <button onClick={handleSaveKnowledge} className="px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">保存</button>
+            <button onClick={handleSaveKnowledge} className="px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">{t("settings.knowledge.save")}</button>
           </div>
           <div className="space-y-3">
             {Object.entries(knowledgeFormState).map(([key, c]) => {
@@ -967,10 +969,10 @@ export default function Settings() {
                     <span className="font-medium flex-1">{c.displayName}</span>
                     <label className="flex items-center gap-2 text-sm text-gray-600">
                       <input type="checkbox" checked={c.enabled} onChange={e => setKnowledgeFormState(prev => ({ ...prev, [key]: { ...prev[key], enabled: e.target.checked } }))} className="rounded" />
-                      启用
+                      {t("settings.search.enabled")}
                     </label>
                   </div>
-                  {preset && <p className="text-xs text-gray-500 mb-3 ml-6">{preset.desc}</p>}
+                  {preset && <p className="text-xs text-gray-500 mb-3 ml-6">{locale === "en" && preset.descEn ? preset.descEn : preset.desc}</p>}
                   <div className="ml-6 space-y-3">
                     <div>
                       <label className="block text-sm text-gray-600 mb-1">API Key</label>
@@ -981,7 +983,7 @@ export default function Settings() {
                       <input type="text" value={c.baseUrl || ""} onChange={e => setKnowledgeFormState(prev => ({ ...prev, [key]: { ...prev[key], baseUrl: e.target.value } }))} placeholder={preset?.baseUrl} className="w-full border rounded px-3 py-2 text-sm" />
                     </div>
                     <div>
-                      <label className="block text-sm text-gray-600 mb-1">模型</label>
+                      <label className="block text-sm text-gray-600 mb-1">{t("settings.llm.modelLabel")}</label>
                       <select value={c.modelId || ""} onChange={e => setKnowledgeFormState(prev => ({ ...prev, [key]: { ...prev[key], modelId: e.target.value } }))} className="w-full border rounded px-3 py-2 text-sm">
                         {(c.availableModels || []).map(m => <option key={m} value={m}>{m}</option>)}
                         {!(c.availableModels || []).includes(c.modelId) && c.modelId && <option value={c.modelId}>{c.modelId}</option>}
@@ -989,8 +991,8 @@ export default function Settings() {
                     </div>
                   </div>
                   <div className="ml-6 mt-3 flex gap-2">
-                    <button onClick={handleSaveKnowledge} className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">保存</button>
-                    <button onClick={() => handleTestKnowledge(key)} disabled={!c.apiKeyRef} className="px-3 py-1 border border-gray-300 rounded text-sm hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">测试连接</button>
+                    <button onClick={handleSaveKnowledge} className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">{t("settings.knowledge.save")}</button>
+                    <button onClick={() => handleTestKnowledge(key)} disabled={!c.apiKeyRef} className="px-3 py-1 border border-gray-300 rounded text-sm hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">{t("settings.knowledge.testConnection")}</button>
                   </div>
                 </div>
               );
@@ -999,23 +1001,23 @@ export default function Settings() {
 
           {/* 远程知识源配置 */}
           <div className="mt-6 border-t pt-6">
-            <h3 className="text-lg font-semibold mb-4">远程知识源</h3>
+            <h3 className="text-lg font-semibold mb-4">{t("settings.knowledge.remoteSources")}</h3>
             <div className="space-y-4">
               {/* Microsoft Entra ID (Azure AD) 配置 */}
               <div className="border rounded-lg bg-white p-4">
                 <div className="flex items-center mb-3">
                   <span className="text-lg mr-2">🏢</span>
-                  <span className="font-medium flex-1">Microsoft Entra ID (Azure AD)</span>
+                  <span className="font-medium flex-1">{t("settings.knowledge.azureTitle")}</span>
                   {msGraphConfigured && (
-                    <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">已配置</span>
+                    <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">{t("settings.knowledge.azureConfigured")}</span>
                   )}
                 </div>
                 <p className="text-xs text-gray-500 mb-3">
-                  Azure AD 应用凭据，用于 <strong>People Graph</strong>（同步组织架构）和 <strong>OneDrive / SharePoint</strong>（远程文档搜索）。
+                  {t("settings.knowledge.azureDesc")}
                 </p>
                 <div className="space-y-3 ml-1">
                   <div>
-                    <label className="block text-sm text-gray-600 mb-1">Tenant ID</label>
+                    <label className="block text-sm text-gray-600 mb-1">{t("settings.knowledge.tenantId")}</label>
                     <input
                       type="text"
                       value={msGraphConfig.tenantId}
@@ -1025,7 +1027,7 @@ export default function Settings() {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm text-gray-600 mb-1">Client ID</label>
+                    <label className="block text-sm text-gray-600 mb-1">{t("settings.knowledge.clientId")}</label>
                     <input
                       type="text"
                       value={msGraphConfig.clientId}
@@ -1035,12 +1037,12 @@ export default function Settings() {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm text-gray-600 mb-1">Client Secret</label>
+                    <label className="block text-sm text-gray-600 mb-1">{t("settings.knowledge.clientSecret")}</label>
                     <input
                       type="password"
                       value={msGraphConfig.clientSecret}
                       onChange={e => setMsGraphConfig(prev => ({ ...prev, clientSecret: e.target.value }))}
-                      placeholder={msGraphConfigured ? "••••••••（已配置，留空则不更新）" : "Client Secret Value"}
+                      placeholder={msGraphConfigured ? t("settings.knowledge.clientSecretConfigured") : t("settings.knowledge.clientSecretPlaceholder")}
                       className="w-full border rounded px-3 py-2 text-sm"
                     />
                   </div>
@@ -1050,13 +1052,17 @@ export default function Settings() {
                       disabled={msGraphSaving || !msGraphConfig.clientId || !msGraphConfig.tenantId}
                       className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50"
                     >
-                      {msGraphSaving ? "保存中..." : "保存配置"}
+                      {msGraphSaving ? t("settings.knowledge.savingConfig") : t("settings.knowledge.saveConfig")}
                     </button>
                   </div>
                   <p className="text-xs text-gray-400">
-                    在 <a href="https://portal.azure.com/" target="_blank" rel="noopener" className="text-blue-500 hover:underline">Azure Portal</a> 注册应用获取。
-                    需配置重定向 URI：<code className="bg-gray-100 px-1 rounded">http://localhost:3000/api/connectors/msgraph/callback</code>。
-                    配置后可在「知识库 → People Graph」同步组织架构，在「知识库 → 远程文档」连接 OneDrive。
+                    {t("settings.knowledge.azureHintPrefix")}
+                    <a href="https://portal.azure.com/" target="_blank" rel="noopener" className="text-blue-500 hover:underline">Azure Portal</a>
+                    {t("settings.knowledge.azureHintSuffix")}
+                    {t("settings.knowledge.azureRedirectHint")}
+                    <code className="bg-gray-100 px-1 rounded">http://localhost:3000/api/connectors/msgraph/callback</code>
+                    {t("settings.knowledge.azureRedirectSuffix")}
+                    {t("settings.knowledge.azureUsageHint")}
                   </p>
                 </div>
               </div>
@@ -1065,13 +1071,13 @@ export default function Settings() {
               <div className="border rounded-lg bg-white p-4">
                 <div className="flex items-center mb-3">
                   <span className="text-lg mr-2">🐙</span>
-                  <span className="font-medium flex-1">GitHub</span>
+                  <span className="font-medium flex-1">{t("settings.knowledge.githubTitle")}</span>
                   {githubSaved && githubToken && (
-                    <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">已保存</span>
+                    <span className="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">{t("settings.knowledge.githubSaved")}</span>
                   )}
                 </div>
                 <p className="text-xs text-gray-500 mb-3">
-                  Clone 团队 repo 到本地，自动索引代码和文档。支持增量同步。
+                  {t("settings.knowledge.githubDesc")}
                 </p>
                 <div className="space-y-3 ml-1">
                   <div>
@@ -1090,22 +1096,23 @@ export default function Settings() {
                       disabled={!githubToken.trim()}
                       className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50"
                     >
-                      保存
+                      {t("settings.knowledge.save")}
                     </button>
                     <button
                       onClick={handleVerifyGithub}
                       disabled={!githubToken.trim() || githubLoading}
                       className="px-3 py-1.5 border border-gray-300 rounded text-sm hover:bg-gray-50 disabled:opacity-50"
                     >
-                      {githubLoading ? "验证中..." : "验证 Token"}
+                      {githubLoading ? t("settings.knowledge.githubVerifying") : t("settings.knowledge.githubVerify")}
                     </button>
                   </div>
                   {githubError && (
                     <p className="text-xs text-red-500">{githubError}</p>
                   )}
                   <p className="text-xs text-gray-400">
-                    在 <a href="https://github.com/settings/tokens" target="_blank" rel="noopener" className="text-blue-500 hover:underline">GitHub Settings → Tokens</a> 创建，
-                    需要 repo 权限。配置后在「知识库 → 代码」tab 选择 Repo 并索引。
+                    {t("settings.knowledge.githubHintPrefix")}
+                    <a href="https://github.com/settings/tokens" target="_blank" rel="noopener" className="text-blue-500 hover:underline">GitHub Settings → Tokens</a>
+                    {t("settings.knowledge.githubHintSuffix")}
                   </p>
                 </div>
               </div>

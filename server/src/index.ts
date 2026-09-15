@@ -39,7 +39,10 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN ?? (isProduction ? "http://localhost
 app.use((_req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", CORS_ORIGIN);
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  // x-docstudio-language：客户端据此让服务端返回本地化文案（见 lib/serverI18n.ts）。
+  // 必须在此白名单里，否则跨域（如 client:5173 → server:3000 的绝对地址请求）
+  // 会在 preflight 阶段被浏览器拦截，表现为 "Failed to fetch"。
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-docstudio-language");
   res.setHeader("Access-Control-Max-Age", "86400");
   if (_req.method === "OPTIONS") {
     res.status(204).end();

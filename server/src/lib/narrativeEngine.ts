@@ -180,14 +180,49 @@ export interface GenerateOutlineRequest {
   modelId?: string;
   apiKey?: string;
   providerBaseUrls?: Record<string, string>;
+  /** 文档语言：zh-CN（默认中文）或 en（英文） */
+  language?: "zh-CN" | "en";
 }
 
 /** 基于用户需求生成大纲 */
 export async function generateOutline(req: GenerateOutlineRequest): Promise<OutlineSection[]> {
   // 如果指定了模板，使用模板作为基础
   const template = req.templateId ? getTemplateById(req.templateId) : undefined;
+  const isEnglish = req.language === "en";
 
-  const systemPrompt = `你是一个文档大纲生成助手。根据用户的需求，生成结构化的文档大纲。
+  const systemPrompt = isEnglish
+    ? `You are a document outline generator. Based on the user's request, generate a structured document outline.
+
+**Core Principle: The outline represents the actual content structure, not a format template.**
+
+After identifying the document type, generate a content-oriented outline:
+- Email: Don't use format elements like "Greeting/Body/Closing". Use actual content points as sections, such as "Greetings & Updates", "Product Progress This Week", "Competitor Analysis", "Next Steps"
+- Report/Weekly: Don't use "Overview/Body/Conclusion". Use specific topics as sections
+- Proposal: Use actual modules as sections, such as "User Authentication Design", "Payment Flow Design"
+- Meeting Notes: Use actual agenda items as sections
+
+Output JSON format:
+{
+  "outline": [
+    {
+      "id": "s1",
+      "title": "Section Title",
+      "level": 1,
+      "description": "Specific content to write in this section",
+      "children": [
+        { "id": "s1-1", "title": "Subsection", "level": 2, "children": [], "description": "Description" }
+      ]
+    }
+  ]
+}
+
+Requirements:
+- **Section titles must be content topics, not format elements**
+- Clear outline hierarchy, typically 2-3 levels
+- Each section has a brief description of what to write
+- IDs use s1, s1-1, s1-2 format
+- Output JSON directly, no markdown code blocks`
+    : `你是一个文档大纲生成助手。根据用户的需求，生成结构化的文档大纲。
 
 **核心原则：大纲是文档实际内容的结构，不是文档格式的模板。**
 
@@ -219,8 +254,21 @@ export async function generateOutline(req: GenerateOutlineRequest): Promise<Outl
 - id 使用 s1, s1-1, s1-2 格式
 - 直接输出 JSON，不要 markdown 代码块`;
 
-  const userPrompt = template
-    ? `基于以下模板，为用户需求生成大纲。
+  const userPrompt = isEnglish
+    ? (template
+      ? `Based on the following template, generate an outline for the user's request.
+
+Template: ${template.name}
+Template structure: ${JSON.stringify(template.outline, null, 2)}
+
+User request: ${req.userRequest}
+
+Please adjust the template based on the user's request and generate the final outline.`
+      : `User request: ${req.userRequest}
+
+Please generate a document outline based on the request.`)
+    : (template
+      ? `基于以下模板，为用户需求生成大纲。
 
 模板：${template.name}
 模板结构：${JSON.stringify(template.outline, null, 2)}
@@ -228,9 +276,9 @@ export async function generateOutline(req: GenerateOutlineRequest): Promise<Outl
 用户需求：${req.userRequest}
 
 请根据用户需求调整模板，生成最终大纲。`
-    : `用户需求：${req.userRequest}
+      : `用户需求：${req.userRequest}
 
-请根据需求生成文档大纲。`;
+请根据需求生成文档大纲。`);
 
   try {
     const dbSettings = readSettingsFromDb();

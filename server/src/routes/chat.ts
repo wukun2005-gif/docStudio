@@ -6,6 +6,8 @@ import { Router } from "express";
 import { handleChat } from "../lib/chatRouter.js";
 import { generateOutline, getTemplates, getTemplateById } from "../lib/narrativeEngine.js";
 import { logger } from "../lib/logger.js";
+import { pickLang, readLanguage } from "../lib/serverI18n.js";
+import { getDemoCase } from "../providers/fixtures/case-1783257530743-en.js";
 import { CASE_1782966166476 } from "../providers/fixtures/case-1782966166476.js";
 import { CASE_1783257530743 } from "../providers/fixtures/case-1783257530743.js";
 import { readOutlineFromDb, readWordOutlineFromDb, readOutlookOutlineFromDb } from "../lib/stubDataReader.js";
@@ -16,6 +18,8 @@ export const chatRouter = Router();
 chatRouter.post("/", async (req, res) => {
   try {
     const { message, conversationHistory, providerPreference, modelId, apiKey, providerBaseUrls, documentContext } = req.body;
+    // 语言统一从 readLanguage 取（body → query → x-docstudio-language → Accept-Language），避免调用方漏传
+    const language = readLanguage(req);
 
     if (!message) {
       res.status(400).json({ ok: false, error: "message is required" });
@@ -32,12 +36,12 @@ chatRouter.post("/", async (req, res) => {
 
       if (isPpt) {
         // PPT stub 模式：使用 case-1783257530743 fixture 大纲
-        const pptOutline = CASE_1783257530743.outline;
+        const pptOutline = getDemoCase(CASE_1783257530743, language).outline;
         logger.info(`[Chat] Chat stub mode (PPT fixture): returning outline with ${pptOutline.length} sections`);
         res.json({
           ok: true,
           type: "outline_request",
-          reply: "已为您生成大纲，请确认后生成 PPT 演示文稿。",
+          reply: pickLang(language, "已为您生成大纲，请确认后生成 PPT 演示文稿。", "Outline generated — confirm it to create the PowerPoint deck."),
           suggestedOutline: pptOutline,
           stub: true,
         });
@@ -50,11 +54,11 @@ chatRouter.post("/", async (req, res) => {
         res.json({
           ok: true,
           type: "outline_request",
-          reply: "已为您生成邮件大纲，请确认后生成邮件。",
+          reply: pickLang(language, "已为您生成邮件大纲，请确认后生成邮件。", "Email outline generated — confirm it to create the email."),
           suggestedOutline: emailOutline ?? [
-            { title: "邮件开头（问候+简要目的）" },
-            { title: "本周核心工作进展" },
-            { title: "下周计划与需要协调事项" },
+            { title: pickLang(language, "邮件开头（问候+简要目的）", "Email opening (greeting + brief purpose)") },
+            { title: pickLang(language, "本周核心工作进展", "Key progress this week") },
+            { title: pickLang(language, "下周计划与需要协调事项", "Next week's plan and items needing coordination") },
           ],
           stub: true,
         });
@@ -67,7 +71,9 @@ chatRouter.post("/", async (req, res) => {
         res.json({
           ok: true,
           type: "outline_request",
-          reply: isWord ? "已为您生成大纲，请确认后生成 Word 文档。" : "已为您生成大纲，请确认后生成 Excel 文档。",
+          reply: isWord
+            ? pickLang(language, "已为您生成大纲，请确认后生成 Word 文档。", "Outline generated — confirm it to create the Word document.")
+            : pickLang(language, "已为您生成大纲，请确认后生成 Excel 文档。", "Outline generated — confirm it to create the Excel workbook."),
           suggestedOutline: dbOutline,
           stub: true,
         });
@@ -76,7 +82,9 @@ chatRouter.post("/", async (req, res) => {
         res.json({
           ok: true,
           type: "outline_request",
-          reply: isWord ? "已为您生成大纲，请确认后生成 Word 文档。" : "已为您生成大纲，请确认后生成 Excel 文档。",
+          reply: isWord
+            ? pickLang(language, "已为您生成大纲，请确认后生成 Word 文档。", "Outline generated — confirm it to create the Word document.")
+            : pickLang(language, "已为您生成大纲，请确认后生成 Excel 文档。", "Outline generated — confirm it to create the Excel workbook."),
           suggestedOutline: isWord ? [] : CASE_1782966166476.outline,
           stub: true,
         });
@@ -92,6 +100,7 @@ chatRouter.post("/", async (req, res) => {
       apiKey,
       providerBaseUrls,
       documentContext,
+      language,
     });
 
     res.json({ ok: true, ...response });
@@ -106,6 +115,8 @@ chatRouter.post("/", async (req, res) => {
 chatRouter.post("/outline", async (req, res) => {
   try {
     const { userRequest, templateId, providerPreference, modelId, apiKey, providerBaseUrls } = req.body;
+    // 语言统一从 readLanguage 取（body → query → x-docstudio-language → Accept-Language）
+    const language = readLanguage(req);
 
     if (!userRequest) {
       res.status(400).json({ ok: false, error: "userRequest is required" });
@@ -121,7 +132,7 @@ chatRouter.post("/outline", async (req, res) => {
 
       if (isPpt) {
         // PPT stub 模式：使用 case-1783257530743 fixture 大纲
-        const pptOutline = CASE_1783257530743.outline;
+        const pptOutline = getDemoCase(CASE_1783257530743, language).outline;
         logger.info(`[Chat] Outline stub mode (PPT fixture): returning outline with ${pptOutline.length} sections`);
         res.json({ ok: true, outline: pptOutline, stub: true });
         return;

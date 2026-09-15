@@ -8,6 +8,7 @@ import { useCaseStore } from "../store/caseStore.js";
 import { updateCase as repoUpdateCase } from "../lib/caseRepo.js";
 import { localIso } from "../../../shared/src/datetime.js";
 import type { OutlineSection } from "../../../shared/src/types/generation.js";
+import { useLanguage } from "../i18n";
 
 // ── Composable Prompt Layers: 模板选项类型 ──
 interface StyleOption { id: string; name: string; description: string; isBuiltin?: boolean }
@@ -20,6 +21,7 @@ function escapeHtml(str: string): string {
 }
 
 export default function GenerationPage() {
+  const { t, locale } = useLanguage();
   const currentCase = useCaseStore((s) => s.currentCase);
   const updateOutline = useCaseStore((s) => s.updateOutline);
   const updateGeneratedContent = useCaseStore((s) => s.updateGeneratedContent);
@@ -247,13 +249,14 @@ export default function GenerationPage() {
     updateWorkflowState("generating");
 
     // 用 userRequest 作为标题（如"写邮件给苏楠"），而非大纲第一章节名
-    const docTitle = currentCase?.userRequest?.trim() || localOutline[0]?.title || "文档";
+    const docTitle = currentCase?.userRequest?.trim() || localOutline[0]?.title || t("generation.untitledDoc");
 
     const requestBody: any = {
       title: docTitle,
       outline: localOutline,
       format: "html",
       userRequest: currentCase?.userRequest ?? localOutline[0]?.title ?? "",
+      language: locale,
       ...(selectedStyle ? { styleId: selectedStyle } : {}),
       ...(selectedFormat ? { outputFormatId: selectedFormat } : {}),
       ...(selectedAudience ? { audienceId: selectedAudience } : {}),
@@ -301,8 +304,8 @@ export default function GenerationPage() {
           evaluateWithSSE(runId);
         }
       } else {
-        setDocument(`<p style="color:red">生成失败: 未收到内容</p>`);
-        updateWorkflowState("error", "未收到内容");
+        setDocument(`<p style="color:red">${t("generation.generationFailed")}: ${t("generation.noContent")}</p>`);
+        updateWorkflowState("error", t("generation.noContent"));
         setGenerating(false);
       }
     };
@@ -321,7 +324,7 @@ export default function GenerationPage() {
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
         const safeError = escapeHtml(errorData.error ?? `HTTP ${res.status}`);
-        setDocument(`<p style="color:red">生成失败: ${safeError}</p>`);
+        setDocument(`<p style="color:red">${t("generation.generationFailed")}: ${safeError}</p>`);
         updateWorkflowState("error", errorData.error);
         setGenerating(false);
         return;
@@ -329,8 +332,8 @@ export default function GenerationPage() {
 
       const reader = res.body?.getReader();
       if (!reader) {
-        setDocument(`<p style="color:red">生成失败: 无法读取响应流</p>`);
-        updateWorkflowState("error", "无法读取响应流");
+        setDocument(`<p style="color:red">${t("generation.generationFailed")}: ${t("generation.cannotReadStream")}</p>`);
+        updateWorkflowState("error", t("generation.cannotReadStream"));
         setGenerating(false);
         return;
       }
@@ -405,8 +408,8 @@ export default function GenerationPage() {
             } else if (eventName === "error" && eventData) {
               const errData = JSON.parse(eventData);
               console.log("[SSE] error event:", errData);
-              const safeError = escapeHtml(errData.error ?? "未知错误");
-              setDocument(`<p style="color:red">生成失败: ${safeError}</p>`);
+              const safeError = escapeHtml(errData.error ?? t("generation.unknownError"));
+              setDocument(`<p style="color:red">${t("generation.generationFailed")}: ${safeError}</p>`);
               updateWorkflowState("error", errData.error);
               setGenerating(false);
               setGenerationProgress(null);
@@ -440,8 +443,10 @@ export default function GenerationPage() {
         }
         if (finalData.title) {
           const autoTitle = currentCase?.userRequest?.slice(0, 50);
+          // 兼容历史数据：旧版本默认标题为中文"新文档"，新版本按当前语言生成
+          const defaultTitles = ["新文档", "New Document", "未命名文档", "Untitled"];
           const isAutoTitle = !currentCase?.title
-            || currentCase.title === "新文档"
+            || defaultTitles.includes(currentCase.title)
             || currentCase.title === autoTitle;
           if (isAutoTitle) {
             updateTitle(finalData.title);
@@ -470,7 +475,7 @@ export default function GenerationPage() {
         } else {
           // DB 拉取失败 → 降级到 done event 的 content（可能为空或不完整）
           console.warn("[GenerationPage] DB fetch failed, falling back to done event content");
-          setDocument(finalData.content || "<p>文档生成完成，但内容加载失败</p>");
+          setDocument(finalData.content || `<p>${t("generation.documentGenerated")}</p>`);
           updateGeneratedContent(finalData.content || "", finalData.trustScore);
         }
         setTrustScore(finalData.trustScore);
@@ -489,8 +494,8 @@ export default function GenerationPage() {
           evaluateWithSSE(targetRunId);
         }
       } else if (finalData) {
-        const safeError = escapeHtml(finalData.error ?? "未知错误");
-        setDocument(`<p style="color:red">生成失败: ${safeError}</p>`);
+        const safeError = escapeHtml(finalData.error ?? t("generation.unknownError"));
+        setDocument(`<p style="color:red">${t("generation.generationFailed")}: ${safeError}</p>`);
         updateWorkflowState("error", finalData.error);
       } else {
         // 流结束但没有 done 事件 → 尝试从 DB 拉取完整内容
@@ -521,14 +526,14 @@ export default function GenerationPage() {
         } else if (receivedSections.length > 0) {
           fallbackToReceivedSections();
         } else {
-          setDocument(`<p style="color:red">生成失败: 未收到内容</p>`);
-          updateWorkflowState("error", "未收到内容");
+          setDocument(`<p style="color:red">${t("generation.generationFailed")}: ${t("generation.noContent")}</p>`);
+          updateWorkflowState("error", t("generation.noContent"));
           setGenerating(false);
         }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      setDocument(`<p style="color:red">生成失败: ${escapeHtml(msg)}</p>`);
+          setDocument(`<p style="color:red">${t("generation.generationFailed")}: ${escapeHtml(msg)}</p>`);
       updateWorkflowState("error", msg);
     } finally {
       // generating state already set above
@@ -571,7 +576,7 @@ export default function GenerationPage() {
 
       const reader = res.body?.getReader();
       if (!reader) {
-        updateWorkflowState("completed", "无法读取评估流");
+        updateWorkflowState("completed", t("generation.cannotReadEvalStream"));
         setEvaluating(false);
         clearTimeout(timeoutId);
         return;
@@ -631,7 +636,7 @@ export default function GenerationPage() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg === "AbortError" || msg.includes("aborted")) {
-        updateWorkflowState("completed", "评估超时");
+        updateWorkflowState("completed", t("generation.evalTimeout"));
       } else {
         console.warn("[GenerationPage] SSE evaluation stream error:", err);
         updateWorkflowState("completed", msg);
@@ -754,7 +759,11 @@ export default function GenerationPage() {
 
     if (indices.length === 0) return;
 
-    const scopeLabel = target.scope === "full" ? "全文" : indices.length > 1 ? `${indices.length} 个章节` : `第 ${indices[0] + 1} 章`;
+    const scopeLabel = target.scope === "full"
+      ? t("generation.scopeFull")
+      : indices.length > 1
+        ? t("generation.scopeSections", { count: indices.length })
+        : t("generation.scopeSection", { index: indices[0] + 1 });
     window.dispatchEvent(new CustomEvent("edit-started", { detail: { scope: scopeLabel, instruction: target.instruction } }));
 
     let successCount = 0;
@@ -765,7 +774,7 @@ export default function GenerationPage() {
       stage: "editing",
       currentSection: 0,
       totalSections: indices.length,
-      message: `正在修改 ${scopeLabel}...`,
+      message: t("generation.modifying", { scope: scopeLabel }),
     });
 
     // 串行逐章修改
@@ -791,7 +800,11 @@ export default function GenerationPage() {
         stage: "editing",
         currentSection: seq + 1,
         totalSections: indices.length,
-        message: `正在修改 ${localOutline[sectionIdx]?.title ?? `章节 ${sectionIdx + 1}`} (${seq + 1}/${indices.length})...`,
+        message: t("generation.modifyingSection", {
+          title: localOutline[sectionIdx]?.title ?? t("generation.sectionFallback", { index: sectionIdx + 1 }),
+          current: seq + 1,
+          total: indices.length,
+        }),
       });
 
       try {
@@ -858,16 +871,16 @@ export default function GenerationPage() {
         {/* Composable Prompt Layers: 维度选择器 */}
         {(styleOptions.length > 0 || formatOptions.length > 0 || audienceOptions.length > 0) && (
           <div className="px-4 py-2 flex items-center gap-3 border-b bg-gray-50 text-xs">
-            <span className="text-gray-500 font-medium">📐 文档维度</span>
+            <span className="text-gray-500 font-medium">{t("generation.documentDimensions")}</span>
             {styleOptions.length > 0 && (
               <label className="flex items-center gap-1">
-                <span className="text-gray-500">风格:</span>
+                <span className="text-gray-500">{t("generation.style")}</span>
                 <select
                   className="border rounded px-1.5 py-0.5 text-xs bg-white"
                   value={selectedStyle}
                   onChange={(e) => setSelectedStyle(e.target.value)}
                 >
-                  <option value="">自动推断</option>
+                  <option value="">{t("generation.autoDetect")}</option>
                   {styleOptions.map((s) => (
                     <option key={s.id} value={s.id}>{s.name}</option>
                   ))}
@@ -876,13 +889,13 @@ export default function GenerationPage() {
             )}
             {formatOptions.length > 0 && (
               <label className="flex items-center gap-1">
-                <span className="text-gray-500">格式:</span>
+                <span className="text-gray-500">{t("generation.format")}</span>
                 <select
                   className="border rounded px-1.5 py-0.5 text-xs bg-white"
                   value={selectedFormat}
                   onChange={(e) => setSelectedFormat(e.target.value)}
                 >
-                  <option value="">自动推断</option>
+                  <option value="">{t("generation.autoDetect")}</option>
                   {formatOptions.map((f) => (
                     <option key={f.id} value={f.id}>{f.name}</option>
                   ))}
@@ -891,13 +904,13 @@ export default function GenerationPage() {
             )}
             {audienceOptions.length > 0 && (
               <label className="flex items-center gap-1">
-                <span className="text-gray-500">读者:</span>
+                <span className="text-gray-500">{t("generation.audience")}</span>
                 <select
                   className="border rounded px-1.5 py-0.5 text-xs bg-white"
                   value={selectedAudience}
                   onChange={(e) => setSelectedAudience(e.target.value)}
                 >
-                  <option value="">自动推断</option>
+                  <option value="">{t("generation.autoDetect")}</option>
                   {audienceOptions.map((a) => (
                     <option key={a.id} value={a.id}>{a.name}</option>
                   ))}
@@ -912,12 +925,12 @@ export default function GenerationPage() {
           onClick={() => setOutlineCollapsed(!outlineCollapsed)}
         >
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-gray-700">📋 文档大纲</span>
+            <span className="text-sm font-medium text-gray-700">{t("generation.documentOutline")}</span>
             {localOutline.length > 0 && (
-              <span className="text-xs text-gray-400">{localOutline.length} 个章节</span>
+              <span className="text-xs text-gray-400">{t("generation.sections", { count: localOutline.length })}</span>
             )}
           </div>
-          <span className="text-gray-400 text-xs">{outlineCollapsed ? "▼ 展开" : "▲ 收起"}</span>
+          <span className="text-gray-400 text-xs">{outlineCollapsed ? t("generation.expand") : t("generation.collapse")}</span>
         </div>
         {!outlineCollapsed && (
           <OutlineEditor

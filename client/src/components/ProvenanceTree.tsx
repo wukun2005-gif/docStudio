@@ -4,6 +4,7 @@
  * Feature #18: 生成树 CRUD
  */
 import { useEffect, useState } from "react";
+import { useLanguage } from "../i18n";
 
 interface ProvenanceNode {
   id: string;
@@ -25,6 +26,7 @@ interface ProvenanceTreeProps {
 }
 
 export default function ProvenanceTree({ runId, sectionTitles }: ProvenanceTreeProps) {
+  const { t } = useLanguage();
   const [nodes, setNodes] = useState<ProvenanceNode[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -64,17 +66,17 @@ export default function ProvenanceTree({ runId, sectionTitles }: ProvenanceTreeP
   }
 
   if (loading) {
-    return <div className="text-center py-4 text-gray-500">加载中...</div>;
+    return <div className="text-center py-4 text-gray-500">{t("provenance.loading")}</div>;
   }
 
   if (nodes.length === 0) {
-    return <div className="text-center py-4 text-gray-400">暂无生成树数据</div>;
+    return <div className="text-center py-4 text-gray-400">{t("provenance.noData")}</div>;
   }
 
   return (
     <div className="space-y-3">
       {Array.from(byParagraph.entries()).sort(([a], [b]) => a - b).map(([idx, paragraphNodes]) => {
-        const title = sectionTitles?.[idx] ?? `段落 ${idx + 1}`;
+        const title = sectionTitles?.[idx] ?? t("provenance.paragraph", { index: idx + 1 });
         const avgScore = paragraphNodes.reduce((sum, n) => sum + n.score, 0) / paragraphNodes.length;
         return (
           <div key={idx} className="bg-white rounded-lg border p-3">
@@ -91,7 +93,7 @@ export default function ProvenanceTree({ runId, sectionTitles }: ProvenanceTreeP
                   {(avgScore * 100).toFixed(0)}%
                 </span>
               </div>
-              <span className="text-xs text-gray-400">{paragraphNodes.length} 个来源</span>
+              <span className="text-xs text-gray-400">{t("provenance.sources", { count: paragraphNodes.length })}</span>
             </div>
             <div className="space-y-1">
               {paragraphNodes.sort((a, b) => b.score - a.score).map((node) => (
@@ -107,7 +109,7 @@ export default function ProvenanceTree({ runId, sectionTitles }: ProvenanceTreeP
                         🌐 {node.webTitle || node.webUrl}
                       </a>
                     ) : (
-                      <span>{node.chunkId?.slice(0, 8) ?? "手动"}...</span>
+                      <span>{node.chunkId?.slice(0, 8) ?? t("provenance.manual")}...</span>
                     )}
                   </span>
                   <span className="text-gray-400 text-xs">{(node.score * 100).toFixed(0)}%</span>
@@ -115,12 +117,12 @@ export default function ProvenanceTree({ runId, sectionTitles }: ProvenanceTreeP
                     <span className="px-1 py-0.5 bg-purple-100 text-purple-600 text-xs rounded">Web</span>
                   )}
                   {node.isManual && (
-                    <span className="px-1 py-0.5 bg-blue-100 text-blue-600 text-xs rounded">手动</span>
+                    <span className="px-1 py-0.5 bg-blue-100 text-blue-600 text-xs rounded">{t("provenance.manual")}</span>
                   )}
                   <button
                     onClick={() => handleDelete(node.id)}
                     className="text-gray-400 hover:text-red-500 text-xs"
-                    title="删除此来源"
+                    title={t("provenance.deleteSource")}
                   >
                     ×
                   </button>

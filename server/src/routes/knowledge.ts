@@ -34,6 +34,15 @@ import { hybridSearch } from "../lib/hybridSearch.js";
 import { rerank, type RerankInput } from "../lib/reranker.js";
 import { readSettingsFromDb } from "../lib/settingsReader.js";
 import { logger } from "../lib/logger.js";
+import { pickLang, readLanguage } from "../lib/serverI18n.js";
+import {
+  localizeKnowledgeSource,
+  localizeFileName,
+  localizePersonName,
+  localizePersonText,
+  localizeJobTitle,
+  localizeDepartment,
+} from "../lib/kbGlossary.js";
 import { dbGet, dbAll } from "../lib/dbQuery.js";
 import {
   cloneRepo,
@@ -112,7 +121,7 @@ knowledgeRouter.post("/upload", upload.any(), async (req, res) => {
   try {
     const files = req.files as Express.Multer.File[];
     if (!files || files.length === 0) {
-      res.status(400).json({ ok: false, error: "没有上传文件" });
+      res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "没有上传文件", "No file uploaded") });
       return;
     }
 
@@ -153,14 +162,14 @@ knowledgeRouter.post("/embed", async (req, res) => {
     if (!embConfig) {
       res.status(400).json({
         ok: false,
-        error: "缺少 embedding 配置，请在请求体中提供 embedding.baseUrl, embedding.apiKey, embedding.modelId，或在 .env 中配置 siliconflow_Key",
+        error: pickLang(readLanguage(req), "缺少 embedding 配置，请在请求体中提供 embedding.baseUrl, embedding.apiKey, embedding.modelId，或在 .env 中配置 siliconflow_Key", "Missing embedding configuration. Provide embedding.baseUrl, embedding.apiKey and embedding.modelId in the request body, or set siliconflow_Key in .env"),
       });
       return;
     }
 
     const unembedded = getUnembeddedChunks();
     if (unembedded.length === 0) {
-      res.json({ ok: true, message: "所有 chunks 已有 embedding", embedded: 0 });
+      res.json({ ok: true, message: pickLang(readLanguage(req), "所有 chunks 已有 embedding", "All chunks already have embeddings"), embedded: 0 });
       return;
     }
 
@@ -176,9 +185,12 @@ knowledgeRouter.post("/embed", async (req, res) => {
 });
 
 /** GET /api/knowledge/sources — 获取所有知识源 */
-knowledgeRouter.get("/sources", (_req, res) => {
+knowledgeRouter.get("/sources", (req, res) => {
   try {
-    const sources = getAllSources();
+    const language = readLanguage(req);
+    // 只翻展示用文件名；id / url / file_path / content_hash 保持原值，
+    // 因此下载（按 id）、去重（按 hash）、引用关系都不受影响
+    const sources = getAllSources().map((s) => localizeKnowledgeSource(s, language));
     res.json({ ok: true, sources });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -191,7 +203,7 @@ knowledgeRouter.get("/sources/:id", (req, res) => {
   try {
     const source = dbGet<any>("SELECT * FROM kb_sources WHERE id = ?", [req.params.id]);
     if (!source) {
-      return res.status(404).json({ ok: false, error: "知识源不存在" });
+      return res.status(404).json({ ok: false, error: pickLang(readLanguage(req), "知识源不存在", "Knowledge source not found") });
     }
     const chunks = dbAll<any>("SELECT id, content, chunk_index FROM kb_chunks WHERE source_id = ? ORDER BY chunk_index", [req.params.id]);
     res.json({ ok: true, source, chunks });
@@ -206,13 +218,13 @@ knowledgeRouter.get("/sources/:id/file", (req, res) => {
   try {
     const source = dbGet<{ name: string; file_path: string; type: string }>("SELECT name, file_path, type FROM kb_sources WHERE id = ?", [req.params.id]);
     if (!source) {
-      return res.status(404).json({ ok: false, error: "知识源不存在" });
+      return res.status(404).json({ ok: false, error: pickLang(readLanguage(req), "知识源不存在", "Knowledge source not found") });
     }
     if (!source.file_path) {
       // 无原始文件路径时，从数据库 chunks 重建内容返回
       const chunks = dbAll<{ content: string }>("SELECT content FROM kb_chunks WHERE source_id = ? ORDER BY chunk_index", [req.params.id]);
       if (chunks.length === 0) {
-        return res.status(404).json({ ok: false, error: "该知识源无原始文件" });
+        return res.status(404).json({ ok: false, error: pickLang(readLanguage(req), "该知识源无原始文件", "This knowledge source has no original file") });
       }
       const html = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -261,7 +273,7 @@ knowledgeRouter.get("/sources/:id/file", (req, res) => {
       // 没有物理文件时，从数据库 chunks 重建内容返回
       const chunks = dbAll<{ content: string }>("SELECT content FROM kb_chunks WHERE source_id = ? ORDER BY chunk_index", [req.params.id]);
       if (chunks.length === 0) {
-        return res.status(404).json({ ok: false, error: "文件不存在" });
+        return res.status(404).json({ ok: false, error: pickLang(readLanguage(req), "文件不存在", "File not found") });
       }
       const html = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -339,7 +351,7 @@ knowledgeRouter.post("/search", async (req, res) => {
     };
 
     if (!query) {
-      res.status(400).json({ ok: false, error: "缺少 query 参数" });
+      res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "缺少 query 参数", "Missing query parameter") });
       return;
     }
 
@@ -480,7 +492,7 @@ knowledgeRouter.post("/github/sync", async (req, res) => {
     addSyncJob({ id: jobId, sourceType: "github_repo", config: { owner, repo, branch }, status: "running" });
 
     // 异步执行（不阻塞响应）
-    res.json({ ok: true, jobId, message: "同步已开始" });
+    res.json({ ok: true, jobId, message: pickLang(readLanguage(req), "同步已开始", "Sync started") });
 
     try {
       logger.info(`[GitHubSync] 开始同步: ${remoteId} (branch: ${branch})`);
@@ -589,13 +601,13 @@ knowledgeRouter.post("/github/sync/incremental", async (req, res) => {
     const embConfig = getEmbeddingConfig(req.body as Record<string, unknown>);
 
     if (!isRepoCloned(owner, repo)) {
-      res.status(400).json({ ok: false, error: "Repo 未 clone，请先调用 /api/knowledge/github/sync" });
+      res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "Repo 未 clone，请先调用 /api/knowledge/github/sync", "Repository is not cloned — call /api/knowledge/github/sync first") });
       return;
     }
 
     const jobId = crypto.randomUUID();
     addSyncJob({ id: jobId, sourceType: "github_repo", config: { owner, repo, branch, incremental: true }, status: "running" });
-    res.json({ ok: true, jobId, message: "增量同步已开始" });
+    res.json({ ok: true, jobId, message: pickLang(readLanguage(req), "增量同步已开始", "Incremental sync started") });
 
     try {
       const syncResult = await syncRepo(owner, repo, branch);
@@ -736,7 +748,7 @@ knowledgeRouter.get("/sync/job/:jobId", (req, res) => {
     const job = dbGet<Record<string, unknown>>("SELECT * FROM kb_sync_jobs WHERE id = ?", [jobId]);
 
     if (!job) {
-      res.status(404).json({ ok: false, error: "任务不存在" });
+      res.status(404).json({ ok: false, error: pickLang(readLanguage(req), "任务不存在", "Job not found") });
       return;
     }
 
@@ -849,7 +861,7 @@ knowledgeRouter.post("/outlook/email/sync", async (req, res) => {
   try {
     const token = req.body.accessToken || await getValidAccessToken();
     if (!token) {
-      res.status(400).json({ ok: false, error: "未连接 Microsoft 账户，请先在「远程文档」中完成 OAuth 授权" });
+      res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "未连接 Microsoft 账户，请先在「远程文档」中完成 OAuth 授权", "Microsoft account is not connected — complete the OAuth authorization under Remote Docs first") });
       return;
     }
 
@@ -859,7 +871,7 @@ knowledgeRouter.post("/outlook/email/sync", async (req, res) => {
     const jobId = crypto.randomUUID();
     addSyncJob({ id: jobId, sourceType: "outlook_email", config: { maxEmails }, status: "running" });
 
-    res.json({ ok: true, jobId, message: "邮件同步已开始" });
+    res.json({ ok: true, jobId, message: pickLang(readLanguage(req), "邮件同步已开始", "Email sync started") });
 
     try {
       logger.info(`[OutlookSync] 开始邮件同步, maxEmails=${maxEmails}`);
@@ -894,7 +906,7 @@ knowledgeRouter.post("/outlook/contact/sync", async (req, res) => {
   try {
     const token = req.body.accessToken || await getValidAccessToken();
     if (!token) {
-      res.status(400).json({ ok: false, error: "未连接 Microsoft 账户，请先在「远程文档」中完成 OAuth 授权" });
+      res.status(400).json({ ok: false, error: pickLang(readLanguage(req), "未连接 Microsoft 账户，请先在「远程文档」中完成 OAuth 授权", "Microsoft account is not connected — complete the OAuth authorization under Remote Docs first") });
       return;
     }
 
@@ -904,7 +916,7 @@ knowledgeRouter.post("/outlook/contact/sync", async (req, res) => {
     const jobId = crypto.randomUUID();
     addSyncJob({ id: jobId, sourceType: "outlook_contact", config: { maxContacts }, status: "running" });
 
-    res.json({ ok: true, jobId, message: "联系人同步已开始" });
+    res.json({ ok: true, jobId, message: pickLang(readLanguage(req), "联系人同步已开始", "Contact sync started") });
 
     try {
       logger.info(`[OutlookSync] 开始联系人同步, maxContacts=${maxContacts}`);
@@ -991,16 +1003,21 @@ knowledgeRouter.delete("/outlook/contact", (req, res) => {
 /**
  * GET /api/knowledge/outlook/email/list — 列出已索引的邮件
  */
-knowledgeRouter.get("/outlook/email/list", (_req, res) => {
+knowledgeRouter.get("/outlook/email/list", (req, res) => {
   try {
+    const language = readLanguage(req);
     const indexes = getRemoteIndexesByType("outlook_email");
     const emails = indexes.map(idx => ({
       id: idx.remoteId,
-      name: idx.name,
+      // 邮件 name 是主题（与 .eml 文件名同形），走文件名映射保持一致
+      name: localizeFileName(idx.name, language),
       url: idx.url,
       chunks: idx.chunkCount,
       indexedAt: idx.indexedAt,
       ...idx.metadata,
+      // 收发件人是显示名，可能混杂在地址串里
+      from: localizePersonText(idx.metadata?.from as string, language),
+      to: localizePersonText(idx.metadata?.to as string, language),
     }));
     res.json({ ok: true, emails });
   } catch (err) {
@@ -1012,16 +1029,23 @@ knowledgeRouter.get("/outlook/email/list", (_req, res) => {
 /**
  * GET /api/knowledge/outlook/contact/list — 列出已索引的联系人
  */
-knowledgeRouter.get("/outlook/contact/list", (_req, res) => {
+knowledgeRouter.get("/outlook/contact/list", (req, res) => {
   try {
+    const language = readLanguage(req);
     const indexes = getRemoteIndexesByType("outlook_contact");
-    const contacts = indexes.map(idx => ({
-      id: idx.remoteId,
-      name: idx.name,
-      chunks: idx.chunkCount,
-      indexedAt: idx.indexedAt,
-      ...idx.metadata,
-    }));
+    const contacts = indexes.map(idx => {
+      const md = (idx.metadata ?? {}) as Record<string, unknown>;
+      return {
+        id: idx.remoteId,
+        // 联系人的 name 是人名，用罗马化而非文件名映射
+        name: localizePersonName(idx.name, language),
+        chunks: idx.chunkCount,
+        indexedAt: idx.indexedAt,
+        ...md,
+        jobTitle: localizeJobTitle(md.jobTitle as string, language),
+        department: localizeDepartment(md.department as string, language),
+      };
+    });
     res.json({ ok: true, contacts });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

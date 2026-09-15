@@ -12,6 +12,7 @@
  */
 import { useState, useEffect, useRef, useCallback } from "react";
 import ReactDOM from "react-dom";
+import { translate as tr } from "../i18n";
 
 interface DemoOverlayProps {
   isPlaying: boolean;
@@ -237,61 +238,61 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
 
         // ── 0-15s: 知识库全景 ─────────────────────
         await wait(1000);
-        await moveToCenter("i-Write — AI 驱动的可信文档生成工作台", 2500);
+        await moveToCenter(tr("demo.intro"), 2500);
 
         dispatchNav("knowledge");
         await wait(800);
 
         // Tab 1: 本地文档
-        await moveAndClick("demo-kb-tab-sources", "知识库 — 本地文档：会议纪要、邮件、技术文档…", 1000);
+        await moveAndClick("demo-kb-tab-sources", tr("demo.kbLocal"), 1000);
         scrollList("demo-kb-sources-list", 200);
         await wait(1500);
         scrollList("demo-kb-sources-list", 200);
         await wait(1200);
 
         // Tab 2: 远程 GitHub Repo
-        await moveAndClick("demo-kb-tab-code", "知识库 — 远程 GitHub 代码仓库", 1500);
+        await moveAndClick("demo-kb-tab-code", tr("demo.kbCode"), 1500);
 
         // Tab 3: 远程文档
-        await moveAndClick("demo-kb-tab-remote", "知识库 — 远程文档：OneDrive / SharePoint 集成", 1500);
+        await moveAndClick("demo-kb-tab-remote", tr("demo.kbRemote"), 1500);
 
         // Tab 4: People Graph
-        await moveAndClick("demo-kb-tab-people", "知识库 — People Graph：组织架构图也是知识库的一部分", 2000);
+        await moveAndClick("demo-kb-tab-people", tr("demo.kbPeople"), 2000);
         scrollList("demo-people-org-tree", 200);
         await wait(1500);
         scrollList("demo-people-org-tree", 200);
         await wait(1200);
-        await moveToCenter("People Graph 记录团队成员关系与领域专长，为文档生成提供人力知识上下文", 2500);
+        await moveToCenter(tr("demo.peopleExplain"), 2500);
 
-        await moveToCenter("4 大知识来源覆盖：本地文档 · 代码仓库 · 远程文档 · 人员关系", 2000);
+        await moveToCenter(tr("demo.fourSources"), 2000);
 
         // ── 15-17s: 切换到生成页面 ─────────────────
         dispatchNav("generate");
         await wait(500);
-        await moveToCenter("现在用这些知识来生成一份文档", 2000);
+        await moveToCenter(tr("demo.useKnowledge"), 2000);
 
         // ── 17-22s: 输入需求 ────────────────────────
         const chatInput = document.getElementById("demo-chat-input");
         if (chatInput) {
           const rect = chatInput.getBoundingClientRect();
           await moveTo(rect.left + rect.width / 2, rect.top + rect.height / 2,
-            "一句话描述你的文档需求",
+            tr("demo.describeNeed"),
           );
           await wait(1000);
         }
-        await typeInInput("demo-chat-input", "请生成一份「Q3技术团队工作总结与业务汇报」PPT演示文稿", 500);
-        await moveAndClick("demo-chat-send", "发送 → AI 分析意图", 800);
+        await typeInInput("demo-chat-input", tr("demo.demoRequest"), 500);
+        await moveAndClick("demo-chat-send", tr("demo.sendAnalyze"), 800);
 
         // ── 22-28s: 等待大纲生成 ───────────────────
         hideCursor();
-        setTooltipText("AI 正在分析需求，生成大纲中…");
+        setTooltipText(tr("demo.analyzing"));
         setPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
         await wait(1000);
         hideCursor();
 
         const hasOutline = await waitForElement("demo-generate-btn", 15000);
         if (!hasOutline) {
-          setTooltipText("大纲生成超时，请检查 DemoProvider 是否启用");
+          setTooltipText(tr("demo.outlineTimeout"));
           setPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
           await wait(3000);
         }
@@ -301,10 +302,10 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
         if (generateBtn) {
           const rect = generateBtn.getBoundingClientRect();
           await moveTo(rect.left + rect.width / 2, rect.top + rect.height / 2,
-            "大纲已生成（5 页 PPT）。点击一键生成，AI 会为每页检索知识库并撰写内容（含图表）",
+            tr("demo.outlineReady"),
           );
           await wait(2000);
-          await moveAndClick("demo-generate-btn", "RAG 引擎启动…", 500);
+          await moveAndClick("demo-generate-btn", tr("demo.ragStart"), 500);
         }
 
         // ── 32-45s: 流式生成（隐藏光标，让文档渲染）──
@@ -313,7 +314,7 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
         const firstPara = await waitForSelector("[id^='para-']", 25000);
         if (firstPara) {
           const rect = firstPara.getBoundingClientRect();
-          setTooltipText("流式生成中：AI 逐个章节撰写，内容即时呈现");
+          setTooltipText(tr("demo.streaming"));
           setPosition({ x: rect.left + 20, y: rect.top + 20 });
           await wait(2000);
         }
@@ -324,7 +325,7 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
         await wait(1000);
 
         // ── 评估指标卡（详细展示） ──────────────────
-        await moveToCenter("文档生成完成！i-Write 提供 4 维度可量化信任指标", 2500);
+        await moveToCenter(tr("demo.docDone"), 2500);
 
         // 等待评估 SSE 完成（demo replay 约 2s，留足缓冲）
         await wait(2000);
@@ -337,75 +338,75 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
         if (evalCard0) {
           const rect = evalCard0.getBoundingClientRect();
           await moveTo(rect.left + rect.width / 2, rect.top + 60,
-            "有据可查度 0.65 — 文档内容是否有知识库来源支撑",
+            tr("demo.metricGrounded"),
           );
           await wait(3000);
           scrollList("demo-eval-card", 100);
           await wait(1000);
           await moveTo(rect.left + rect.width / 2, rect.top + 120,
-            "内容相关度 1.00 — 所有段落都与用户需求紧密相关",
+            tr("demo.metricRelevant"),
           );
           await wait(3000);
           scrollList("demo-eval-card", 100);
           await wait(1000);
           await moveTo(rect.left + rect.width / 2, rect.top + 120,
-            "内容完整度 0.93 — 14 项需求要点已覆盖 14 项",
+            tr("demo.metricComplete"),
           );
           await wait(3000);
           scrollList("demo-eval-card", 100);
           await wait(1000);
           await moveTo(rect.left + rect.width / 2, rect.top + 120,
-            "冲突率 0.25 — AI 检测到 5 处来源间矛盾，已自动处理",
+            tr("demo.metricConflict"),
           );
           await wait(3000);
         }
-        await moveToCenter("4 维度评估：有据可查度 · 内容相关度 · 内容完整度 · 冲突率", 2500);
+        await moveToCenter(tr("demo.fourDimensions"), 2500);
 
         // 切换到"问题发现" tab，详细解释每种问题
-        await moveAndClick("demo-eval-tab-issues", "切换到「问题发现」→ 查看具体问题", 2000, true);
+        await moveAndClick("demo-eval-tab-issues", tr("demo.switchIssues"), 2000, true);
         await wait(1000);
 
         const evalCard2 = document.getElementById("demo-eval-card");
         if (evalCard2) {
           const rect = evalCard2.getBoundingClientRect();
           await moveTo(rect.left + rect.width / 2, rect.top + 80,
-            "🔴 未支撑断言：综合有据可查度 65%，部分段落缺少来源支撑",
+            tr("demo.issueUnsupported"),
           );
           await wait(3500);
           scrollList("demo-eval-card", 150);
           await wait(1000);
           await moveTo(rect.left + rect.width / 2, rect.top + 80,
-            "🟢 已拦截冲突：5 处来源矛盾被 AI 识别并拦截，未进入文档\n如「Q3团队规模」两份文档数据不一致",
+            tr("demo.issueBlocked"),
           );
           await wait(4000);
           scrollList("demo-eval-card", 200);
           await wait(1000);
           await moveTo(rect.left + rect.width / 2, rect.top + 80,
-            "每条冲突都标注了冲突主题和来源文档\n用户可据此追溯原始文档",
+            tr("demo.issueBlockedDetail"),
           );
           await wait(3500);
           scrollList("demo-eval-card", 200);
           await wait(1000);
         }
-        await moveToCenter("问题发现 = 让用户知道文档哪里不完美、为什么", 2500);
+        await moveToCenter(tr("demo.issuesMeaning"), 2500);
 
         // ── 置信度热力图（详细展示） ────────────────
         // 先折叠评估卡和大纲，让文档内容占满屏幕
         const evalCollapseHeat = document.getElementById("demo-eval-collapse");
         if (evalCollapseHeat) { evalCollapseHeat.click(); await wait(400); }
         const outlineCollapseHeat = document.getElementById("demo-outline-toggle");
-        if (outlineCollapseHeat && outlineCollapseHeat.textContent?.includes("收起")) {
+        if (outlineCollapseHeat && outlineCollapseHeat.textContent?.includes(tr("demo.collapseWord"))) {
           outlineCollapseHeat.click();
           await wait(400);
         }
 
-        await moveAndClick("demo-heatmap-toggle", "开启热力图 → 每个段落按来源多寡着色", 2000);
-        await moveToCenter("绿色 = 多源交叉验证（高可信）\n黄色 = 单源支撑（中可信）\n红色 = AI 推断（低可信）", 3000);
+        await moveAndClick("demo-heatmap-toggle", tr("demo.heatmapOn"), 2000);
+        await moveToCenter(tr("demo.heatmapLegend"), 3000);
 
         // 滚动文档内容区，展示不同颜色的段落
         const docContainer = document.querySelector(".doc-content");
         if (docContainer) {
-          setTooltipText("滚动查看每个段落的着色情况…");
+          setTooltipText(tr("demo.heatmapScroll"));
           setPosition({ x: 200, y: window.innerHeight / 2 });
           docContainer.scrollIntoView({ behavior: "smooth", block: "start" });
           await wait(1000);
@@ -421,11 +422,11 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
           hideCursor();
           await wait(500);
         }
-        await moveToCenter("热力图让信任度一目了然：一眼看出哪些段落需要补充来源", 2500);
+        await moveToCenter(tr("demo.heatmapTakeaway"), 2500);
 
         // ── 参考来源章节（文档底部引用列表） ────────
         // 直接从当前位置滚动到文档底部，不要移动光标到顶部
-        await moveToCenter("文档底部：所有参考来源汇总", 2000);
+        await moveToCenter(tr("demo.footerSources"), 2000);
         if (docContainer) {
           const scrollEl = docContainer.closest(".overflow-y-auto");
           if (scrollEl) {
@@ -439,14 +440,14 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
           const rect = citeFooter.getBoundingClientRect();
           // 光标放在 citation footer 附近，不移动到别处
           await moveTo(rect.left + rect.width / 2, rect.top + 60,
-            "9 个知识源支撑本文档：PRD · 产品路线图 · 技术报告 · 周报 · 月报…\n点击可跳转原始文档",
+            tr("demo.sourcesSummary"),
           );
           await wait(3500);
           // 光标保持在原位，只换文字
-          setTooltipText("每个引用都有据可查，用户可追溯任意结论的来源");
+          setTooltipText(tr("demo.refTrust"));
           await wait(2500);
         } else {
-          await moveToCenter("每个引用都有据可查，用户可追溯任意结论的来源", 2500);
+          await moveToCenter(tr("demo.refTrust"), 2500);
         }
 
         // ── 来源生成树（来源溯源树 + 拖拽） ───
@@ -456,19 +457,19 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
           sourceTreeArea.scrollIntoView({ behavior: "smooth", block: "start" });
           await wait(1000);
         }
-        await moveToCenter("来源溯源树：逐章节展示引用了哪些知识源文档", 2500);
+        await moveToCenter(tr("demo.provenanceTree"), 2500);
 
-        await moveAndClick("demo-source-toggle-0", "点击章节 → 展开来源树", 1500, true);
+        await moveAndClick("demo-source-toggle-0", tr("demo.clickSection"), 1500, true);
         await wait(2000);
-        await moveToCenter("来源树展示每个章节引用了哪些知识源文档\n评分越高，来源越可信", 3000);
+        await moveToCenter(tr("demo.treeExplain"), 3000);
 
         // 展开第二个章节用于拖拽演示
-        await moveAndClick("demo-source-toggle-0", "收起第一个章节", 500, true);
-        await moveAndClick("demo-source-toggle-1", "展开第二个章节的来源", 1500, true);
+        await moveAndClick("demo-source-toggle-0", tr("demo.collapseFirst"), 500, true);
+        await moveAndClick("demo-source-toggle-1", tr("demo.expandSecond"), 1500, true);
         await wait(1500);
 
         // 拖拽来源移动
-        await moveToCenter("拖拽知识源可以在章节之间移动\n修改引用关系后重新生成章节内容", 2500);
+        await moveToCenter(tr("demo.dragSources"), 2500);
 
         const s1Toggle = document.getElementById("demo-source-toggle-1");
         const s0Toggle = document.getElementById("demo-source-toggle-0");
@@ -483,7 +484,7 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
             await wait(800);
             const dsRect = draggableSrc.getBoundingClientRect();
             await moveTo(dsRect.left + dsRect.width / 2, dsRect.top + dsRect.height / 2,
-              "拖拽「Q3技术规划.docx」到概述章节…",
+              tr("demo.dragFile"),
             );
             await wait(1000);
 
@@ -500,7 +501,7 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
             const dropX = s0Rect.left + s0Rect.width / 2;
             const dropY = s0Rect.top + s0Rect.height / 2;
             await moveTo(dropX, dropY,
-              "…释放到概述章节，选择移动或复制",
+              tr("demo.dropRelease"),
             );
             await wait(800);
 
@@ -512,12 +513,12 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
             // 5. 点击"移动"按钮（pendingDrop 弹窗，现在应在 drop 位置附近）
             const moveBtns = document.querySelectorAll("button");
             for (const btn of moveBtns) {
-              if (btn.textContent?.includes("移动")) {
+              if (btn.textContent?.includes(tr("demo.moveWord"))) {
                 btn.scrollIntoView({ behavior: "smooth", block: "center" });
                 await wait(300);
                 const bRect = btn.getBoundingClientRect();
                 await moveTo(bRect.left + bRect.width / 2, bRect.top + bRect.height / 2,
-                  "确认移动 → 来源重新分配到目标章节",
+                  tr("demo.confirmMove"),
                 );
                 await wait(400);
                 setIsClicking(true);
@@ -545,16 +546,16 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
               await wait(500);
               const rRect = regenBtn.getBoundingClientRect();
               await moveTo(rRect.left + rRect.width / 2, rRect.top + rRect.height / 2,
-                "章节引用已变更 → 点击「重新生成此章节」更新内容",
+                tr("demo.sectionChanged"),
               );
               await wait(2000);
             }
           }
         }
-        await moveToCenter("拖拽来源 = 灵活控制每个段落的证据支撑\n修改后点「重新生成」更新内容", 2500);
+        await moveToCenter(tr("demo.dragTakeaway"), 2500);
 
         // ── 导出 PPTX ────────────────────────────────
-        await moveToCenter("文档生成完毕，支持导出为 Word / PowerPoint / Excel", 2000);
+        await moveToCenter(tr("demo.genDoneExport"), 2000);
         // 确保导出按钮可见（大纲折叠状态）
         const exportBtn = document.getElementById("demo-export-pptx");
         if (exportBtn) {
@@ -562,7 +563,7 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
           await wait(600);
           const bRect = exportBtn.getBoundingClientRect();
           await moveTo(bRect.left + bRect.width / 2, bRect.top + bRect.height / 2,
-            "点击导出 PowerPoint → 直接下载 PPTX 文件",
+            tr("demo.clickExportPpt"),
           );
           await wait(1500);
           setIsClicking(true);
@@ -571,7 +572,7 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
           setIsClicking(false);
           await wait(2000);
         }
-        await moveToCenter("一键导出，格式精美，可直接使用", 2000);
+        await moveToCenter(tr("demo.exportTakeaway"), 2000);
 
         // ── 回顾 + 结尾 ────────────────────────────
         dispatchNav("generate");
@@ -587,7 +588,7 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
           // 找到第一个 tab 按钮（评分概览）
           const tabs = document.querySelectorAll("#demo-eval-card > .flex button");
           for (const tab of tabs) {
-            if (tab.textContent?.includes("评分概览")) {
+            if (tab.textContent?.includes(tr("demo.scoreOverviewWord"))) {
               (tab as HTMLElement).click();
               await wait(300);
               break;
@@ -597,13 +598,13 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
 
         // 展开文档大纲卡
         const outlineExpandRecap = document.getElementById("demo-outline-toggle");
-        if (outlineExpandRecap && outlineExpandRecap.textContent?.includes("展开")) {
+        if (outlineExpandRecap && outlineExpandRecap.textContent?.includes(tr("demo.expandWord"))) {
           outlineExpandRecap.click();
           await wait(400);
         }
 
-        await moveToCenter("从 9 个知识源 → RAG 检索 → 生成文档\n→ 4 维度评估 → 5 处冲突拦截", 3500);
-        await moveToCenter("事实知识源 + 内容生成 + 评估指标\n= 可信任的文档生成, i-Write", 3500);
+        await moveToCenter(tr("demo.recapFlow"), 3500);
+        await moveToCenter(tr("demo.recapTagline"), 3500);
         setProgress(100);
         await wait(2000);
 
@@ -612,7 +613,7 @@ export default function DemoOverlay({ isPlaying, onStop }: DemoOverlayProps) {
         if (!cancelled) stopDemo();
       } catch (err: unknown) {
         if (err instanceof Error && err.message === "__CANCELLED__") return;
-        setTooltipText(`Demo 中断: ${err instanceof Error ? err.message : "unknown"}`);
+        setTooltipText(`${tr("demo.interruptedPrefix")}${err instanceof Error ? err.message : "unknown"}`);
         setPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
         await wait(3000);
         if (!cancelled) stopDemo();

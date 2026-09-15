@@ -15,9 +15,11 @@ import { toEmailPayload } from "../lib/emailPayloadBuilder.js";
 import { buildProvenanceTree, getProvenanceByRunId } from "../lib/provenanceTree.js";
 import { dbRun, dbGet, dbAll, dbTransaction } from "../lib/dbQuery.js";
 import { logger } from "../lib/logger.js";
+import { pickLang, readLanguage } from "../lib/serverI18n.js";
 import type { OutlineSection } from "../lib/narrativeEngine.js";
 import type { QueryAnalysis } from "../lib/queryAnalyzer.js";
 import { CASE_1783257530743 } from "../providers/fixtures/case-1783257530743.js";
+import { getDemoCase } from "../providers/fixtures/case-1783257530743-en.js";
 import { CASE_1782966166476 } from "../providers/fixtures/case-1782966166476.js";
 import { readCaseFromDb, readWordCaseFromDb, readOutlookCaseFromDb, type CitationItem, type ProvenanceNodeRow } from "../lib/stubDataReader.js";
 import type { CitationLink } from "../lib/contentCleaner.js";
@@ -58,7 +60,7 @@ generationRouter.post("/generate", async (req, res) => {
           { table: "generation_runs", recordId: existing.id, source: "generation" });
       } else {
         logger.warn(`[Generation] 拒绝并发请求: "${title}" 已有生成任务 ${existing.id}`);
-        res.status(409).json({ ok: false, error: "同名文档正在生成中，请等待完成", existingRunId: existing.id });
+        res.status(409).json({ ok: false, error: pickLang(readLanguage(req), "同名文档正在生成中，请等待完成", "A document with the same name is already being generated. Please wait for it to finish."), existingRunId: existing.id });
         return;
       }
     }
@@ -75,7 +77,7 @@ generationRouter.post("/generate", async (req, res) => {
 
     // ── Demo replay mode: 完全 replay case-1783257530743 的数据，不调用任何外部 API ──
     if (providerPreference?.length === 1 && providerPreference[0] === "demo") {
-      const fixture = CASE_1783257530743;
+      const fixture = getDemoCase(CASE_1783257530743, readLanguage(req));
       logger.info(`[Generation] Demo replay (non-stream): replaying from case ${fixture.caseId}`);
 
       dbRun(`UPDATE generation_runs SET title = ?, content = ?, status = 'done', trust_score = ?, document_style = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
@@ -164,6 +166,8 @@ generationRouter.post("/generate/stream", async (req, res) => {
   let runId = "";
   try {
     const { title, outline, format, providerPreference, modelId, apiKey, providerBaseUrls, userRequest } = req.body;
+    // 语言统一从 readLanguage 取（body → query → x-docstudio-language → Accept-Language）
+    const language = readLanguage(req);
 
     if (!title || !outline) {
       res.status(400).json({ ok: false, error: "title and outline are required" });
@@ -189,7 +193,7 @@ generationRouter.post("/generate/stream", async (req, res) => {
           { table: "generation_runs", recordId: existing.id, source: "generation" });
       } else {
         logger.warn(`[Generation] 拒绝并发请求: "${title}" 已有生成任务 ${existing.id}`);
-        res.status(409).json({ ok: false, error: "同名文档正在生成中，请等待完成", existingRunId: existing.id });
+        res.status(409).json({ ok: false, error: pickLang(readLanguage(req), "同名文档正在生成中，请等待完成", "A document with the same name is already being generated. Please wait for it to finish."), existingRunId: existing.id });
         return;
       }
     }
@@ -230,7 +234,7 @@ generationRouter.post("/generate/stream", async (req, res) => {
     // 先推送 runId，让客户端知道请求已被接受
     writeSSE("start", { ok: true, runId });
     // 通知客户端即将开始知识库检索和冲突检测
-    writeSSE("progress", { phase: "retrieving", message: "正在检索知识库并检测冲突..." });
+    writeSSE("progress", { phase: "retrieving", message: pickLang(readLanguage(req), "正在检索知识库并检测冲突...", "Retrieving from the knowledge base and checking for conflicts...") });
     logger.info(`[Generation] 流式生成开始: ${title}, runId=${runId}, 章节数=${outline.length}`);
 
     const protocol = req.protocol || "http";
@@ -240,7 +244,7 @@ generationRouter.post("/generate/stream", async (req, res) => {
     // ── Demo replay mode: 完全 replay case-1783257530743 的数据，不调用任何外部 API ──
     const isDemoReplay = providerPreference?.length === 1 && providerPreference[0] === "demo";
     if (isDemoReplay) {
-      const fixture = CASE_1783257530743;
+      const fixture = getDemoCase(CASE_1783257530743, readLanguage(req));
       logger.info(`[Generation] Demo replay: replaying ${fixture.sections.length} sections from case ${fixture.caseId}`);
 
       // Simulate streaming: send section-start + section events with realistic delays
@@ -320,6 +324,7 @@ generationRouter.post("/generate/stream", async (req, res) => {
       apiKey,
       providerBaseUrls,
       userRequest,
+      language,
     }, (section, phase) => {
       if (phase === "start") {
         // 章节开始生成 — 立即推送进度提示
@@ -441,7 +446,7 @@ generationRouter.post("/generate/excel-stream", async (req, res) => {
           { table: "generation_runs", recordId: existing.id, source: "generation" });
       } else {
         logger.warn(`[Generation] 拒绝并发请求: "${title}" 已有生成任务 ${existing.id}`);
-        res.status(409).json({ ok: false, error: "同名文档正在生成中，请等待完成", existingRunId: existing.id });
+        res.status(409).json({ ok: false, error: pickLang(readLanguage(req), "同名文档正在生成中，请等待完成", "A document with the same name is already being generated. Please wait for it to finish."), existingRunId: existing.id });
         return;
       }
     }
@@ -482,7 +487,7 @@ generationRouter.post("/generate/excel-stream", async (req, res) => {
     };
 
     writeSSE("start", { ok: true, runId });
-    writeSSE("progress", { phase: "retrieving", message: "正在检索知识库并检测冲突..." });
+    writeSSE("progress", { phase: "retrieving", message: pickLang(readLanguage(req), "正在检索知识库并检测冲突...", "Retrieving from the knowledge base and checking for conflicts...") });
     logger.info(`[Generation] Excel 流式生成开始: ${title}, runId=${runId}, 章节数=${outline.length}`);
 
     const protocol = req.protocol || "http";
@@ -495,7 +500,7 @@ generationRouter.post("/generate/excel-stream", async (req, res) => {
       const dbCase = readCaseFromDb();
       if (!dbCase) {
         // Fallback: 无 DB 数据时返回错误
-        writeSSE("error", { type: "error", message: "Stub mode: DB 中未找到真实 case 数据" });
+        writeSSE("error", { type: "error", message: pickLang(readLanguage(req), "Stub mode: DB 中未找到真实 case 数据", "Stub mode: no real case data found in the DB") });
         setTimeout(() => res.end(), 200);
         return;
       }
@@ -731,7 +736,7 @@ generationRouter.post("/excel", async (req, res) => {
         res.json({ ok: true, runId: existing.id });
         return;
       } else {
-        res.status(409).json({ ok: false, error: "同名文档正在生成中，请等待完成", existingRunId: existing.id });
+        res.status(409).json({ ok: false, error: pickLang(readLanguage(req), "同名文档正在生成中，请等待完成", "A document with the same name is already being generated. Please wait for it to finish."), existingRunId: existing.id });
         return;
       }
     }
@@ -903,7 +908,7 @@ generationRouter.post("/word", async (req, res) => {
         res.json({ ok: true, runId: existing.id });
         return;
       } else {
-        res.status(409).json({ ok: false, error: "同名文档正在生成中，请等待完成", existingRunId: existing.id });
+        res.status(409).json({ ok: false, error: pickLang(readLanguage(req), "同名文档正在生成中，请等待完成", "A document with the same name is already being generated. Please wait for it to finish."), existingRunId: existing.id });
         return;
       }
     }
@@ -1053,7 +1058,7 @@ generationRouter.post("/ppt", async (req, res) => {
         res.json({ ok: true, runId: existing.id });
         return;
       } else {
-        res.status(409).json({ ok: false, error: "同名文档正在生成中，请等待完成", existingRunId: existing.id });
+        res.status(409).json({ ok: false, error: pickLang(readLanguage(req), "同名文档正在生成中，请等待完成", "A document with the same name is already being generated. Please wait for it to finish."), existingRunId: existing.id });
         return;
       }
     }
@@ -1077,7 +1082,7 @@ generationRouter.post("/ppt", async (req, res) => {
 
         if (isStubMode) {
           // PPT stub 模式：直接使用 case-1783257530743 fixture 数据
-          const fixture = CASE_1783257530743;
+          const fixture = getDemoCase(CASE_1783257530743, readLanguage(req));
           logger.info(`[Generation] PPT POST stub mode (case ${fixture.caseId}): ${fixture.sections.length} sections, title=${fixture.title}`);
           await new Promise(r => setTimeout(r, 500));
 
@@ -1174,7 +1179,7 @@ generationRouter.post("/ppt", async (req, res) => {
         // 复制/插入 provenance_nodes
         if (stubExtra.sourceRunId) {
           const isFixtureData = stubExtra.sourceRunId.startsWith("case-");
-          const fixtureData = isStubMode ? CASE_1783257530743 : null;
+          const fixtureData = isStubMode ? getDemoCase(CASE_1783257530743, readLanguage(req)) : null;
 
           try {
             if (isFixtureData && stubExtra.provenanceNodes && stubExtra.provenanceNodes.length > 0) {
@@ -1295,7 +1300,7 @@ generationRouter.post("/email", async (req, res) => {
         res.json({ ok: true, runId: existing.id });
         return;
       } else {
-        res.status(409).json({ ok: false, error: "同名邮件正在生成中，请等待完成", existingRunId: existing.id });
+        res.status(409).json({ ok: false, error: pickLang(readLanguage(req), "同名邮件正在生成中，请等待完成", "An email with the same name is already being generated. Please wait for it to finish."), existingRunId: existing.id });
         return;
       }
     }
@@ -2718,7 +2723,7 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
     // ── Demo replay mode: return saved evaluation metrics, no external API calls ──
     // 必须在 apiKey 检查之前，demo 模式不需要 apiKey
     if (providerId === "demo" || (req.body.providerPreference?.includes("demo"))) {
-      const fixture = CASE_1783257530743;
+      const fixture = getDemoCase(CASE_1783257530743, readLanguage(req));
       const tm = fixture.trustMetrics;
       logger.info(`[Generation] Demo evaluate (non-stream): replaying from case ${fixture.caseId}`);
 
@@ -2745,11 +2750,11 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
       res.json({
         ok: true, runId: req.params.id,
         metrics: {
-          faithfulness: { score: tm?.faithfulness ?? 0.5, label: "事实忠实度", description: "文档内容是否忠实于参考来源" },
-          groundedness: { score: tm?.groundedness ?? 0.5, label: "有据可查度", description: "内容是否有来源支撑" },
-          relevance: { score: tm?.relevance ?? 1, label: "内容相关度", description: "内容是否与需求相关", irrelevantSentences: tm?.irrelevantSentences ?? [] },
-          completeness: { score: tm?.completeness ?? 1, label: "内容完整度", description: "是否覆盖需求的所有要点", coveredPoints: tm?.coveredPoints ?? [], missingPoints: tm?.missingPoints ?? [], lackSourcePoints: tm?.lackSourcePoints ?? [] },
-          conflicts: { hasConflicts: tm?.hasConflicts ?? false, conflictRate: tm?.conflictRate ?? 0, items: tm?.conflictItems ?? [], label: "内容冲突", description: "不同来源之间的矛盾信息" },
+          faithfulness: { score: tm?.faithfulness ?? 0.5, label: pickLang(readLanguage(req), "事实忠实度", "Faithfulness"), description: pickLang(readLanguage(req), "文档内容是否忠实于参考来源", "Whether the content stays faithful to the reference sources") },
+          groundedness: { score: tm?.groundedness ?? 0.5, label: pickLang(readLanguage(req), "有据可查度", "Groundedness"), description: pickLang(readLanguage(req), "内容是否有来源支撑", "Whether the content is backed by sources") },
+          relevance: { score: tm?.relevance ?? 1, label: pickLang(readLanguage(req), "内容相关度", "Relevance"), description: pickLang(readLanguage(req), "内容是否与需求相关", "Whether the content matches the request"), irrelevantSentences: tm?.irrelevantSentences ?? [] },
+          completeness: { score: tm?.completeness ?? 1, label: pickLang(readLanguage(req), "内容完整度", "Completeness"), description: pickLang(readLanguage(req), "是否覆盖需求的所有要点", "Whether all required points are covered"), coveredPoints: tm?.coveredPoints ?? [], missingPoints: tm?.missingPoints ?? [], lackSourcePoints: tm?.lackSourcePoints ?? [] },
+          conflicts: { hasConflicts: tm?.hasConflicts ?? false, conflictRate: tm?.conflictRate ?? 0, items: tm?.conflictItems ?? [], label: pickLang(readLanguage(req), "内容冲突", "Conflicts"), description: pickLang(readLanguage(req), "不同来源之间的矛盾信息", "Contradictory information across sources") },
         },
       });
       return;
@@ -3064,19 +3069,19 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
       metrics: {
         groundedness: {
           score: groundednessScore,
-          label: "有据可查度",
-          description: "内容是否有来源支撑",
+          label: pickLang(readLanguage(req), "有据可查度", "Groundedness"),
+          description: pickLang(readLanguage(req), "内容是否有来源支撑", "Whether the content is backed by sources"),
         },
         relevance: {
           score: relevanceResult.score,
-          label: "内容相关度",
-          description: "内容是否与需求相关",
+          label: pickLang(readLanguage(req), "内容相关度", "Relevance"),
+          description: pickLang(readLanguage(req), "内容是否与需求相关", "Whether the content matches the request"),
           irrelevantSentences: relevanceResult.irrelevantSentences,
         },
         completeness: {
           score: completenessResult.score,
-          label: "内容完整度",
-          description: "是否覆盖需求的所有要点",
+          label: pickLang(readLanguage(req), "内容完整度", "Completeness"),
+          description: pickLang(readLanguage(req), "是否覆盖需求的所有要点", "Whether all required points are covered"),
           coveredPoints: completenessResult.coveredPoints,
           missingPoints: completenessResult.missingPoints,
           lackSourcePoints: completenessResult.lackSourcePoints,
@@ -3085,8 +3090,8 @@ generationRouter.post("/:id/evaluate", async (req, res) => {
           hasConflicts: finalConflicts.hasConflicts,
           conflictRate: finalConflicts.conflictRate,
           items: finalConflicts.conflicts,
-          label: "内容冲突",
-          description: "不同来源之间的矛盾信息",
+          label: pickLang(readLanguage(req), "内容冲突", "Conflicts"),
+          description: pickLang(readLanguage(req), "不同来源之间的矛盾信息", "Contradictory information across sources"),
         },
       },
     });
@@ -3117,7 +3122,7 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
     // ── Demo replay mode: replay saved evaluation metrics, no external API calls ──
     // 必须在 apiKey 检查之前，demo 模式不需要 apiKey
     if (providerId === "demo" || (req.body.providerPreference?.includes("demo"))) {
-      const fixture = CASE_1783257530743;
+      const fixture = getDemoCase(CASE_1783257530743, readLanguage(req));
       const tm = fixture.trustMetrics;
       logger.info(`[Generation] Demo evaluate (stream): replaying saved metrics from case ${fixture.caseId}`);
       logger.info(`[Generation] Demo evaluate (stream): trustMetrics=${tm ? JSON.stringify(tm).substring(0, 300) : "NULL"}`);
@@ -3133,17 +3138,17 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
       writeSSE("evaluate-start", { ok: true, runId: req.params.id, sectionCount: sections.length });
 
       // Simulate progress for each evaluation task
-      writeSSE("evaluate-progress", { task: "relevance", taskIndex: 0, taskLabel: "内容相关度", status: "running" });
+      writeSSE("evaluate-progress", { task: "relevance", taskIndex: 0, taskLabel: pickLang(readLanguage(req), "内容相关度", "Relevance"), status: "running" });
       await new Promise(r => setTimeout(r, 500));
-      writeSSE("evaluate-progress", { task: "relevance", taskIndex: 0, taskLabel: "内容相关度", status: "done", result: { score: tm?.relevance ?? 1, irrelevantSentences: tm?.irrelevantSentences ?? [] } });
+      writeSSE("evaluate-progress", { task: "relevance", taskIndex: 0, taskLabel: pickLang(readLanguage(req), "内容相关度", "Relevance"), status: "done", result: { score: tm?.relevance ?? 1, irrelevantSentences: tm?.irrelevantSentences ?? [] } });
 
-      writeSSE("evaluate-progress", { task: "completeness", taskIndex: 1, taskLabel: "内容完整度", status: "running" });
+      writeSSE("evaluate-progress", { task: "completeness", taskIndex: 1, taskLabel: pickLang(readLanguage(req), "内容完整度", "Completeness"), status: "running" });
       await new Promise(r => setTimeout(r, 500));
-      writeSSE("evaluate-progress", { task: "completeness", taskIndex: 1, taskLabel: "内容完整度", status: "done", result: { score: tm?.completeness ?? 1, coveredPoints: tm?.coveredPoints ?? [], missingPoints: tm?.missingPoints ?? [], lackSourcePoints: tm?.lackSourcePoints ?? [] } });
+      writeSSE("evaluate-progress", { task: "completeness", taskIndex: 1, taskLabel: pickLang(readLanguage(req), "内容完整度", "Completeness"), status: "done", result: { score: tm?.completeness ?? 1, coveredPoints: tm?.coveredPoints ?? [], missingPoints: tm?.missingPoints ?? [], lackSourcePoints: tm?.lackSourcePoints ?? [] } });
 
-      writeSSE("evaluate-progress", { task: "conflicts", taskIndex: 2, taskLabel: "内容冲突检测", status: "running" });
+      writeSSE("evaluate-progress", { task: "conflicts", taskIndex: 2, taskLabel: pickLang(readLanguage(req), "内容冲突检测", "Conflict detection"), status: "running" });
       await new Promise(r => setTimeout(r, 500));
-      writeSSE("evaluate-progress", { task: "conflicts", taskIndex: 2, taskLabel: "内容冲突检测", status: "done", result: { hasConflicts: tm?.hasConflicts ?? false, conflictRate: tm?.conflictRate ?? 0, conflicts: tm?.conflictItems ?? [] } });
+      writeSSE("evaluate-progress", { task: "conflicts", taskIndex: 2, taskLabel: pickLang(readLanguage(req), "内容冲突检测", "Conflict detection"), status: "done", result: { hasConflicts: tm?.hasConflicts ?? false, conflictRate: tm?.conflictRate ?? 0, conflicts: tm?.conflictItems ?? [] } });
 
       // Save evaluation to DB
       try {
@@ -3169,11 +3174,11 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
         ok: true,
         runId: req.params.id,
         metrics: {
-          faithfulness: { score: tm?.faithfulness ?? 0.5, label: "事实忠实度", description: "文档内容是否忠实于参考来源" },
-          groundedness: { score: tm?.groundedness ?? 0.5, label: "有据可查度", description: "内容是否有来源支撑" },
-          relevance: { score: tm?.relevance ?? 1, label: "内容相关度", description: "内容是否与需求相关", irrelevantSentences: tm?.irrelevantSentences ?? [] },
-          completeness: { score: tm?.completeness ?? 1, label: "内容完整度", description: "是否覆盖需求的所有要点", coveredPoints: tm?.coveredPoints ?? [], missingPoints: tm?.missingPoints ?? [], lackSourcePoints: tm?.lackSourcePoints ?? [] },
-          conflicts: { hasConflicts: tm?.hasConflicts ?? false, conflictRate: tm?.conflictRate ?? 0, items: tm?.conflictItems ?? [], label: "内容冲突", description: "不同来源之间的矛盾信息" },
+          faithfulness: { score: tm?.faithfulness ?? 0.5, label: pickLang(readLanguage(req), "事实忠实度", "Faithfulness"), description: pickLang(readLanguage(req), "文档内容是否忠实于参考来源", "Whether the content stays faithful to the reference sources") },
+          groundedness: { score: tm?.groundedness ?? 0.5, label: pickLang(readLanguage(req), "有据可查度", "Groundedness"), description: pickLang(readLanguage(req), "内容是否有来源支撑", "Whether the content is backed by sources") },
+          relevance: { score: tm?.relevance ?? 1, label: pickLang(readLanguage(req), "内容相关度", "Relevance"), description: pickLang(readLanguage(req), "内容是否与需求相关", "Whether the content matches the request"), irrelevantSentences: tm?.irrelevantSentences ?? [] },
+          completeness: { score: tm?.completeness ?? 1, label: pickLang(readLanguage(req), "内容完整度", "Completeness"), description: pickLang(readLanguage(req), "是否覆盖需求的所有要点", "Whether all required points are covered"), coveredPoints: tm?.coveredPoints ?? [], missingPoints: tm?.missingPoints ?? [], lackSourcePoints: tm?.lackSourcePoints ?? [] },
+          conflicts: { hasConflicts: tm?.hasConflicts ?? false, conflictRate: tm?.conflictRate ?? 0, items: tm?.conflictItems ?? [], label: pickLang(readLanguage(req), "内容冲突", "Conflicts"), description: pickLang(readLanguage(req), "不同来源之间的矛盾信息", "Contradictory information across sources") },
         },
       });
       res.end();
@@ -3216,7 +3221,7 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
 
     const apiKey = reqApiKey ?? getApiKey(effectiveProvider);
     if (!apiKey) {
-      writeSSE("error", { ok: false, error: "apiKey is required（请在设置页配置或在请求中提供）" });
+      writeSSE("error", { ok: false, error: pickLang(readLanguage(req), "apiKey is required（请在设置页配置或在请求中提供）", "apiKey is required (configure it in Settings or pass it in the request)") });
       res.end();
       return;
     }
@@ -3297,14 +3302,14 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
       runId: req.params.id,
       totalTasks: 3,
       tasks: [
-        { id: "relevance", label: "内容相关度" },
-        { id: "completeness", label: "内容完整度" },
-        { id: "conflicts", label: "内容冲突检测" },
+        { id: "relevance", label: pickLang(readLanguage(req), "内容相关度", "Relevance") },
+        { id: "completeness", label: pickLang(readLanguage(req), "内容完整度", "Completeness") },
+        { id: "conflicts", label: pickLang(readLanguage(req), "内容冲突检测", "Conflict detection") },
       ],
     });
 
     // ── Task 1: Relevance ──
-    writeSSE("evaluate-progress", { task: "relevance", taskIndex: 0, taskLabel: "内容相关度", status: "running" });
+    writeSSE("evaluate-progress", { task: "relevance", taskIndex: 0, taskLabel: pickLang(readLanguage(req), "内容相关度", "Relevance"), status: "running" });
     // 相关度检查只需要叙事文本；完整度检查需要表格和图表内容
     const evalSectionsForRelevance = sections.map(s => ({ title: s.title, content: s.content }));
     const evalSectionsForCompleteness = sectionsWithExtras(sections);
@@ -3321,19 +3326,19 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
       "内容相关度评估"
     );
     writeSSE("evaluate-progress", {
-      task: "relevance", taskIndex: 0, taskLabel: "内容相关度", status: "done",
+      task: "relevance", taskIndex: 0, taskLabel: pickLang(readLanguage(req), "内容相关度", "Relevance"), status: "done",
       score: relevanceResult.score,
       irrelevantSentences: relevanceResult.irrelevantSentences,
     });
 
     // ── Task 2: Completeness ──
-    writeSSE("evaluate-progress", { task: "completeness", taskIndex: 1, taskLabel: "内容完整度", status: "running" });
+    writeSSE("evaluate-progress", { task: "completeness", taskIndex: 1, taskLabel: pickLang(readLanguage(req), "内容完整度", "Completeness"), status: "running" });
     const completenessResult = await tryWithFallback(
       (model) => checkDocumentCompleteness(evalSectionsForCompleteness, contentRequirement, apiKey, effectiveProvider, model),
       "内容完整度评估"
     );
     writeSSE("evaluate-progress", {
-      task: "completeness", taskIndex: 1, taskLabel: "内容完整度", status: "done",
+      task: "completeness", taskIndex: 1, taskLabel: pickLang(readLanguage(req), "内容完整度", "Completeness"), status: "done",
       score: completenessResult.score,
       coveredPoints: completenessResult.coveredPoints,
       missingPoints: completenessResult.missingPoints,
@@ -3341,7 +3346,7 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
     });
 
     // ── Task 3: Conflicts ──
-    writeSSE("evaluate-progress", { task: "conflicts", taskIndex: 2, taskLabel: "内容冲突检测", status: "running" });
+    writeSSE("evaluate-progress", { task: "conflicts", taskIndex: 2, taskLabel: pickLang(readLanguage(req), "内容冲突检测", "Conflict detection"), status: "running" });
     const conflictResult = await tryWithFallback(
       (model) => detectConflicts(sectionsWithSources, apiKey, effectiveProvider, model),
       "冲突检测"
@@ -3413,7 +3418,7 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
     };
 
     writeSSE("evaluate-progress", {
-      task: "conflicts", taskIndex: 2, taskLabel: "内容冲突检测", status: "done",
+      task: "conflicts", taskIndex: 2, taskLabel: pickLang(readLanguage(req), "内容冲突检测", "Conflict detection"), status: "done",
       hasConflicts: finalConflicts.hasConflicts,
       conflictRate: finalConflicts.conflictRate,
       conflictItems: finalConflicts.conflicts,
@@ -3467,11 +3472,11 @@ generationRouter.post("/:id/evaluate/stream", async (req, res) => {
       ok: true,
       runId: req.params.id,
       metrics: {
-        faithfulness: { score: faithfulnessScore, label: "事实忠实度", description: "文档内容是否忠实于参考来源" },
-        groundedness: { score: groundednessScore, label: "有据可查度", description: "内容是否有来源支撑" },
-        relevance: { score: relevanceResult.score, label: "内容相关度", description: "内容是否与需求相关", irrelevantSentences: relevanceResult.irrelevantSentences },
-        completeness: { score: completenessResult.score, label: "内容完整度", description: "是否覆盖需求的所有要点", coveredPoints: completenessResult.coveredPoints, missingPoints: completenessResult.missingPoints, lackSourcePoints: completenessResult.lackSourcePoints },
-        conflicts: { hasConflicts: finalConflicts.hasConflicts, conflictRate: finalConflicts.conflictRate, items: finalConflicts.conflicts, label: "内容冲突", description: "不同来源之间的矛盾信息" },
+        faithfulness: { score: faithfulnessScore, label: pickLang(readLanguage(req), "事实忠实度", "Faithfulness"), description: pickLang(readLanguage(req), "文档内容是否忠实于参考来源", "Whether the content stays faithful to the reference sources") },
+        groundedness: { score: groundednessScore, label: pickLang(readLanguage(req), "有据可查度", "Groundedness"), description: pickLang(readLanguage(req), "内容是否有来源支撑", "Whether the content is backed by sources") },
+        relevance: { score: relevanceResult.score, label: pickLang(readLanguage(req), "内容相关度", "Relevance"), description: pickLang(readLanguage(req), "内容是否与需求相关", "Whether the content matches the request"), irrelevantSentences: relevanceResult.irrelevantSentences },
+        completeness: { score: completenessResult.score, label: pickLang(readLanguage(req), "内容完整度", "Completeness"), description: pickLang(readLanguage(req), "是否覆盖需求的所有要点", "Whether all required points are covered"), coveredPoints: completenessResult.coveredPoints, missingPoints: completenessResult.missingPoints, lackSourcePoints: completenessResult.lackSourcePoints },
+        conflicts: { hasConflicts: finalConflicts.hasConflicts, conflictRate: finalConflicts.conflictRate, items: finalConflicts.conflicts, label: pickLang(readLanguage(req), "内容冲突", "Conflicts"), description: pickLang(readLanguage(req), "不同来源之间的矛盾信息", "Contradictory information across sources") },
       },
     });
 
@@ -3510,24 +3515,24 @@ generationRouter.get("/:id/evaluation", (req, res) => {
     const metrics = {
       faithfulness: {
         score: rawMetrics.faithfulness ?? 0.5,
-        label: "事实忠实度",
-        description: "文档内容是否忠实于参考来源",
+        label: pickLang(readLanguage(req), "事实忠实度", "Faithfulness"),
+        description: pickLang(readLanguage(req), "文档内容是否忠实于参考来源", "Whether the content stays faithful to the reference sources"),
       },
       groundedness: {
         score: rawMetrics.groundedness ?? 0.5,
-        label: "有据可查度",
-        description: "内容是否有来源支撑",
+        label: pickLang(readLanguage(req), "有据可查度", "Groundedness"),
+        description: pickLang(readLanguage(req), "内容是否有来源支撑", "Whether the content is backed by sources"),
       },
       relevance: {
         score: typeof rawMetrics.relevance === 'object' ? rawMetrics.relevance.score : (rawMetrics.relevance ?? 1),
-        label: "内容相关度",
-        description: "内容是否与需求相关",
+        label: pickLang(readLanguage(req), "内容相关度", "Relevance"),
+        description: pickLang(readLanguage(req), "内容是否与需求相关", "Whether the content matches the request"),
         irrelevantSentences: rawMetrics.irrelevantSentences ?? rawMetrics.relevance?.irrelevantSentences ?? [],
       },
       completeness: {
         score: typeof rawMetrics.completeness === 'object' ? rawMetrics.completeness.score : (rawMetrics.completeness ?? 1),
-        label: "内容完整度",
-        description: "是否覆盖需求的所有要点",
+        label: pickLang(readLanguage(req), "内容完整度", "Completeness"),
+        description: pickLang(readLanguage(req), "是否覆盖需求的所有要点", "Whether all required points are covered"),
         coveredPoints: rawMetrics.coveredPoints ?? rawMetrics.completeness?.coveredPoints ?? [],
         missingPoints: rawMetrics.missingPoints ?? rawMetrics.completeness?.missingPoints ?? [],
       },
@@ -3535,8 +3540,8 @@ generationRouter.get("/:id/evaluation", (req, res) => {
         hasConflicts: rawMetrics.hasConflicts ?? rawMetrics.conflicts?.hasConflicts ?? false,
         conflictRate: rawMetrics.conflictRate ?? rawMetrics.conflicts?.conflictRate ?? 0,
         items: rawMetrics.conflictItems ?? rawMetrics.conflicts?.items ?? [],
-        label: "内容冲突",
-        description: "不同来源之间的矛盾信息",
+        label: pickLang(readLanguage(req), "内容冲突", "Conflicts"),
+        description: pickLang(readLanguage(req), "不同来源之间的矛盾信息", "Contradictory information across sources"),
       },
     };
 

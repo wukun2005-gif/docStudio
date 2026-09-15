@@ -15,6 +15,8 @@ import {
   deleteCustomTemplate,
 } from "../lib/promptTemplates.js";
 import { detectStyle, detectFormat, detectAudience } from "../lib/promptTemplates.js";
+import { localizeStyle, localizeFormat, localizeAudience } from "../lib/promptTemplates.js";
+import { readLanguage } from "../lib/serverI18n.js";
 import { logger } from "../lib/logger.js";
 
 export const promptTemplatesRouter = Router();
@@ -22,27 +24,30 @@ export const promptTemplatesRouter = Router();
 // ── 查询所有模板 ─────────────────────────────────────
 
 /** GET /api/prompt-templates/styles — 获取所有 Style 模板 */
-promptTemplatesRouter.get("/styles", (_req, res) => {
+promptTemplatesRouter.get("/styles", (req, res) => {
   try {
-    res.json({ ok: true, data: getAllStyles() });
+    const language = readLanguage(req);
+    res.json({ ok: true, data: getAllStyles().map((s) => localizeStyle(s, language)) });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) });
   }
 });
 
 /** GET /api/prompt-templates/formats — 获取所有 Format 模板 */
-promptTemplatesRouter.get("/formats", (_req, res) => {
+promptTemplatesRouter.get("/formats", (req, res) => {
   try {
-    res.json({ ok: true, data: getAllFormats() });
+    const language = readLanguage(req);
+    res.json({ ok: true, data: getAllFormats().map((f) => localizeFormat(f, language)) });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) });
   }
 });
 
 /** GET /api/prompt-templates/audiences — 获取所有 Audience 模板 */
-promptTemplatesRouter.get("/audiences", (_req, res) => {
+promptTemplatesRouter.get("/audiences", (req, res) => {
   try {
-    res.json({ ok: true, data: getAllAudiences() });
+    const language = readLanguage(req);
+    res.json({ ok: true, data: getAllAudiences().map((a) => localizeAudience(a, language)) });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) });
   }
@@ -59,13 +64,19 @@ promptTemplatesRouter.post("/detect", (req, res) => {
       return;
     }
 
+    const language = readLanguage(req);
     const style = detectStyle(userRequest);
     const format = detectFormat(userRequest);
     const audience = detectAudience(userRequest);
 
     res.json({
       ok: true,
-      data: { style, format, audience },
+      // id 保持原值供业务判断，只有 name/description 跟随语言
+      data: {
+        style: localizeStyle(style, language),
+        format: localizeFormat(format, language),
+        audience: localizeAudience(audience, language),
+      },
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) });

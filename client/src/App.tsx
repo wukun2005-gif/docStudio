@@ -5,18 +5,14 @@ import GenerationPage from "./components/GenerationPage";
 import CaseList from "./components/CaseList";
 import ChatBox from "./components/ChatBox";
 import DemoOverlay from "./components/DemoOverlay";
+import LanguageSwitcher from "./components/LanguageSwitcher";
 import { useCaseStore } from "./store/caseStore.js";
+import { useLanguage } from "./i18n";
 
 type Page = "home" | "generate" | "knowledge" | "settings";
 
-const NAV_ITEMS: Array<{ id: Page; label: string }> = [
-  { id: "home", label: "首页" },
-  { id: "generate", label: "生成文档" },
-  { id: "knowledge", label: "知识库" },
-  { id: "settings", label: "设置" },
-];
-
 export default function App() {
+  const { t } = useLanguage();
   const [page, setPage] = useState<Page>("home");
   const [leftCollapsed, setLeftCollapsed] = useState(true);
   const [rightCollapsed, setRightCollapsed] = useState(false);
@@ -38,6 +34,13 @@ export default function App() {
     return () => window.removeEventListener("demo-nav", onNav);
   }, [isDemoPlaying]);
 
+  const NAV_ITEMS: Array<{ id: Page; label: string }> = [
+    { id: "home", label: t("nav.home") },
+    { id: "generate", label: t("nav.generate") },
+    { id: "knowledge", label: t("nav.knowledge") },
+    { id: "settings", label: t("nav.settings") },
+  ];
+
   return (
     <div className="h-screen bg-gray-50 flex flex-col">
       {/* 顶部导航 */}
@@ -48,7 +51,7 @@ export default function App() {
               <button
                 onClick={() => setLeftCollapsed(!leftCollapsed)}
                 className="p-1.5 rounded hover:bg-gray-100 text-gray-500"
-                title={leftCollapsed ? "展开文档列表" : "收起文档列表"}
+                title={leftCollapsed ? t("nav.expandDocList") : t("nav.collapseDocList")}
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   {leftCollapsed ? (
@@ -64,45 +67,48 @@ export default function App() {
             )}
             <h1 className="text-lg font-bold text-gray-800">i-Write<span className="text-xs font-normal text-gray-500 ml-1">, a Studio of Document Generation with Knowledge</span></h1>
           </div>
-          <div className="flex gap-1">
-            {NAV_ITEMS.map((item) => (
-              <button
-                key={item.id}
-                onClick={() => setPage(item.id)}
-                className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                  page === item.id ? "bg-blue-100 text-blue-700 font-medium" : "text-gray-600 hover:bg-gray-100"
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-          {showSidePanels && (
-            <>
-              {!isDemoPlaying && (
+          <div className="flex items-center gap-2">
+            <div className="flex gap-1">
+              {NAV_ITEMS.map((item) => (
                 <button
-                  id="btn-demo-start"
-                  title="一键演示"
-                  onClick={() => setIsDemoPlaying(true)}
-                  className="px-2.5 py-1 text-xs rounded border border-blue-300 bg-blue-50 hover:bg-blue-100 text-blue-600 transition-colors font-medium"
+                  key={item.id}
+                  onClick={() => setPage(item.id)}
+                  className={`px-3 py-1.5 rounded text-sm transition-colors ${
+                    page === item.id ? "bg-blue-100 text-blue-700 font-medium" : "text-gray-600 hover:bg-gray-100"
+                  }`}
                 >
-                  ▶
+                  {item.label}
                 </button>
-              )}
-              <button
-                onClick={() => setRightCollapsed(!rightCollapsed)}
-                className="p-1.5 rounded hover:bg-gray-100 text-gray-500"
-                title={rightCollapsed ? "展开对话面板" : "收起对话面板"}
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                </svg>
-              </button>
-            </>
-          )}
-          <span className="text-xs text-gray-400 opacity-60 hover:opacity-100 transition-opacity ml-2 select-none" title="作者邮箱">
-            wukun2005@gmail.com
-          </span>
+              ))}
+            </div>
+            <LanguageSwitcher />
+            {showSidePanels && (
+              <>
+                {!isDemoPlaying && (
+                  <button
+                    id="btn-demo-start"
+                    title={t("nav.demo")}
+                    onClick={() => setIsDemoPlaying(true)}
+                    className="px-2.5 py-1 text-xs rounded border border-blue-300 bg-blue-50 hover:bg-blue-100 text-blue-600 transition-colors font-medium"
+                  >
+                    ▶
+                  </button>
+                )}
+                <button
+                  onClick={() => setRightCollapsed(!rightCollapsed)}
+                  className="p-1.5 rounded hover:bg-gray-100 text-gray-500"
+                  title={rightCollapsed ? t("nav.expandChat") : t("nav.collapseChat")}
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                  </svg>
+                </button>
+              </>
+            )}
+            <span className="text-xs text-gray-400 opacity-60 hover:opacity-100 transition-opacity ml-2 select-none" title={t("nav.authorEmail")}>
+              wukun2005@gmail.com
+            </span>
+          </div>
         </div>
       </nav>
 
@@ -149,29 +155,30 @@ export default function App() {
 
 function HomePage({ onNavigate }: { onNavigate: (page: Page) => void }) {
   const { cases } = useCaseStore();
+  const { t } = useLanguage();
 
   return (
     <div className="h-full flex items-center justify-center">
       <div className="text-center max-w-lg">
         <h2 className="text-2xl font-bold text-gray-800 mb-1">i-Write</h2>
-        <p className="text-sm text-gray-500 mb-1">a Studio of Document Generation with Knowledge</p>
-        <p className="text-xs text-gray-400 mb-8">连接知识碎片，生成可信文档</p>
+        <p className="text-sm text-gray-500 mb-1">{t("home.subtitle")}</p>
+        <p className="text-xs text-gray-400 mb-8">{t("home.tagline")}</p>
         <div className="flex justify-center gap-3">
           <button
             onClick={() => onNavigate("generate")}
             className="px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium"
           >
-            开始创作
+            {t("home.startCreate")}
           </button>
           <button
             onClick={() => onNavigate("knowledge")}
             className="px-6 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors text-sm"
           >
-            管理知识库
+            {t("home.manageKnowledge")}
           </button>
         </div>
         {cases.length > 0 && (
-          <p className="text-xs text-gray-400 mt-6">← 左侧选择已有文档继续编辑</p>
+          <p className="text-xs text-gray-400 mt-6">{t("home.selectExisting")}</p>
         )}
       </div>
     </div>

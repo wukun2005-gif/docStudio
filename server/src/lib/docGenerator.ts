@@ -18,7 +18,10 @@ import { cleanContent, type CitationLink } from "./contentCleaner.js";
 import { logger } from "./logger.js";
 import { dbGet, dbAll } from "./dbQuery.js";
 import { getAllPeople, getPersonById, getPersonContext, findPersonByTitle, type Person } from "./peopleGraph.js";
-import { detectStyle, detectFormat, detectAudience, getStyle, getFormat, getAudience } from "./promptTemplates.js";
+import {
+  detectStyle, detectFormat, detectAudience, getStyle, getFormat, getAudience,
+  styleFragment, styleName, formatConstraints, audienceGuidance,
+} from "./promptTemplates.js";
 import { analyzeQuery, buildRagQueryFromAnalysis, type QueryAnalysis } from "./queryAnalyzer.js";
 import { getRulesForContext } from "./writingRules.js";
 import { detectConflicts, autoResolveConflicts, type ConflictResolutionResult } from "./conflictDetection.js";
@@ -157,6 +160,80 @@ export interface GenerateDocRequest {
   /** 生成前冲突源过滤（默认 true：检测到冲突的 chunk 在生成前即被排除，确保冲突数据不进入文档。
    *  post-filter 为第二道防线，移除 LLM 意外生成的冲突引用。 */
   preFilter?: boolean;
+  /** 文档语言：zh-CN（默认中文）或 en（英文） */
+  language?: "zh-CN" | "en";
+}
+
+/** 判断是否为英文文档模式（默认中文） */
+function isEnglishDoc(language?: string): boolean {
+  return language === "en";
+}
+
+/** 统一的输出语言指令块，附加在 system prompt 末尾，确保 LLM 全篇使用目标语言 */
+function languageRuleBlock(language?: string): string {
+  if (!isEnglishDoc(language)) return "";
+  return `
+
+═══ Output Language (MANDATORY) ═══
+
+Write the ENTIRE output in ENGLISH. This is non-negotiable:
+- All prose, table text, chart titles and labels must be in English.
+- Do NOT use any Chinese characters (汉字) anywhere in the output, including in examples, notes or asides.
+- Keep citation markers [N] and HTML tags (<h3>, <table>, etc.) exactly as specified.
+- If the reference material is written in Chinese, TRANSLATE it into English before using it; never quote Chinese verbatim.`;
+}
+
+/** 邮件章节指令（中英双语），generateSection / generateMergedSection 共用 */
+function buildEmailSectionRule(p: {
+  en: boolean;
+  isFirstSection: boolean;
+  isEmail: boolean;
+  isLastSection: boolean;
+  hasRecipients: boolean;
+  toLine: string;
+  subject?: string;
+  greetingExample: string;
+  senderName: string;
+}): string {
+  const { en, isFirstSection, isEmail, isLastSection, hasRecipients, toLine, subject, greetingExample, senderName } = p;
+  if (isFirstSection && isEmail && hasRecipients) {
+    return en
+      ? `This is the first section of the email. Open with:
+   - To: ${toLine}
+   - Subject: ${subject || "(derive from the content)"}
+   Then write the salutation (e.g. ${greetingExample}).
+   [NOTE] Do NOT write an email closing (e.g. "Best regards", "Sincerely") or a signature — later sections handle that.`
+      : `这是邮件的第一个章节。请在开头写明：
+   - 收件人：${toLine}
+   - 主题：${subject || "（从内容中提炼）"}
+   然后写称呼（如${greetingExample}）。
+   【注意】不要写邮件结尾（如"此致"、"祝好"、"Best regards"等）和署名，结尾由后续章节处理。`;
+  }
+  if (isFirstSection) {
+    return en
+      ? `This is the first section — write the salutation (e.g. ${greetingExample}).${isEmail ? ' [NOTE] Do NOT write an email closing (e.g. "Best regards") or a signature — later sections handle that.' : ""}`
+      : `这是第一个章节，请写称呼（如${greetingExample}）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}`;
+  }
+  if (isEmail && isLastSection) {
+    return en
+      ? `This is NOT the first section — never write a salutation or greeting (e.g. "Hi XXX,"). But it IS the last section, so end the content with an email closing (e.g. "Best regards", "Sincerely") and a signature (e.g. "${senderName}").`
+      : `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："）。但这是最后一个章节，请在内容末尾写上邮件结尾问候语（如"此致"、"祝好"、"Best regards"等）和署名（如"${senderName}"）。`;
+  }
+  return en
+    ? `This is NOT the first section — never write a salutation or greeting (e.g. "Hi XXX," "Best regards").${isEmail ? " [NOTE] Do NOT write an email closing or signature." : ""}`
+    : `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`;
+}
+
+/** 邮件称呼示例（中英双语） */
+function buildGreetingExample(en: boolean, names: string[]): string {
+  if (en) {
+    if (names.length === 0) return `"Dear XXX,"`;
+    if (names.length === 1) return `"Dear ${names[0]},"`;
+    return `"Dear ${names.slice(0, -1).join(", ")} and ${names[names.length - 1]},"`;
+  }
+  if (names.length === 0) return `"XXX，你好："`;
+  if (names.length === 1) return `"${names[0]}，你好："`;
+  return `"${names.slice(0, -1).join("、")}和${names[names.length - 1]}，你们好："`;
 }
 
 export interface GenerateDocResult {
@@ -685,7 +762,7 @@ async function generateSection(
   // 注意：不在此处添加 [N] 编号，由 toolExecutor re-inject 统一提供编号
   const sourceText = sources.map((s, i) => {
     const sourceLabel = s.sourceName ? `《${s.sourceName}》` : '';
-    return `${sourceLabel}（相似度: ${s.score.toFixed(2)}）\n${s.content}`;
+    return `${sourceLabel}${isEnglishDoc(config.language) ? ` (similarity: ${s.score.toFixed(2)})` : `（相似度: ${s.score.toFixed(2)}）`}\n${s.content}`;
   }).join("\n\n");
 
   // ── Fidelity 门控：LLM-as-Judge 判断 RAG 文档是否包含实质性信息 ──
@@ -726,7 +803,7 @@ async function generateSection(
   const styleTemplate = getStyle(effectiveStyleId);
   const formatTemplate = getFormat(effectiveFormatId);
   const audienceTemplate = getAudience(effectiveAudienceId);
-  const writingRules = getRulesForContext(effectiveStyleId, effectiveFormatId);
+  const writingRules = getRulesForContext(effectiveStyleId, effectiveFormatId, isEnglishDoc(config.language));
 
   const metadata = config.metadata;
 
@@ -747,24 +824,28 @@ async function generateSection(
 
   // 读者画像注入 — 对所有文档类型开放。支持多读者（如"CEO 和 COO"）
   let personContextSection = "";
-  const recipientLabel = isEmail ? "收件人" : "读者";
-  const sectionTitle = isEmail ? "邮件信息" : "读者信息";
+  const en = isEnglishDoc(config.language);
+  const recipientLabel = isEmail ? (en ? "Recipient" : "收件人") : (en ? "Reader" : "读者");
+  const sectionTitle = isEmail ? (en ? "Email Info" : "邮件信息") : (en ? "Reader Info" : "读者信息");
   const recipients = metadata?.recipients?.length ? metadata.recipients : (metadata?.recipient ? [metadata.recipient] : []);
   const primaryReaders = recipients.filter(r => !r.role || r.role !== "attendee");
 
   if (recipients.length > 0) {
     const readerLines = recipients.map((r) => {
-      const parts = [`${r.role === "attendee" ? "列席" : "主读者"}: ${r.name}`];
-      if (r.title) parts.push(`职位: ${r.title}`);
-      if (r.department) parts.push(`部门: ${r.department}`);
-      if (r.email) parts.push(`邮箱: ${r.email}`);
+      const roleLabel = r.role === "attendee"
+        ? (en ? "Attendee" : "列席")
+        : (en ? "Primary reader" : "主读者");
+      const parts = [`${roleLabel}: ${r.name}`];
+      if (r.title) parts.push(`${en ? "Title" : "职位"}: ${r.title}`);
+      if (r.department) parts.push(`${en ? "Department" : "部门"}: ${r.department}`);
+      if (r.email) parts.push(`${en ? "Email" : "邮箱"}: ${r.email}`);
       return parts.join(" | ");
     });
     personContextSection = `\n═══ ${sectionTitle} ═══\n\n${readerLines.join("\n")}`;
 
     if (isEmail) {
-      if (metadata?.subject) personContextSection += `\n主题: ${metadata.subject}`;
-      if (metadata?.cc?.length) personContextSection += `\n抄送: ${metadata.cc.join(", ")}`;
+      if (metadata?.subject) personContextSection += `\n${en ? "Subject" : "主题"}: ${metadata.subject}`;
+      if (metadata?.cc?.length) personContextSection += `\n${en ? "CC" : "抄送"}: ${metadata.cc.join(", ")}`;
     }
 
     // 注入所有读者的 People Graph 画像
@@ -778,7 +859,7 @@ async function generateSection(
       }
     }
     if (pgProfiles.length > 0) {
-      personContextSection += `\n${recipientLabel}画像:\n${pgProfiles.join("\n")}`;
+      personContextSection += `\n${recipientLabel}${en ? " profile" : "画像"}:\n${pgProfiles.join("\n")}`;
     }
 
     personContextSection += "\n";
@@ -788,29 +869,20 @@ async function generateSection(
   const rulesText = writingRules.map((r, i) => `${i + 1}. ${r.rule}`).join("\n");
 
   // 邮件特有的章节指令（支持多读者称呼）
-  let emailSectionRule = "";
   const primaryNames = primaryReaders.map(r => r.name);
-  const greetingNames = primaryNames.length > 1
-    ? `${primaryNames.slice(0, -1).join("、")}和${primaryNames[primaryNames.length - 1]}`
-    : (primaryNames[0] ?? "XXX");
-  const greetingExample = primaryNames.length > 1
-    ? `"${greetingNames}，你们好："`
-    : `"${greetingNames}，你好："`;
-
-  if (isFirstSection && isEmail && recipients.length > 0) {
-    const toLine = primaryReaders.map(r => r.email ? `${r.name} <${r.email}>` : r.name).join("、");
-    emailSectionRule = `这是邮件的第一个章节。请在开头写明：
-   - 收件人：${toLine}
-   - 主题：${metadata?.subject || "（从内容中提炼）"}
-   然后写称呼（如${greetingExample}）。
-   【注意】不要写邮件结尾（如"此致"、"祝好"、"Best regards"等）和署名，结尾由后续章节处理。`;
-  } else if (isFirstSection) {
-    emailSectionRule = `这是第一个章节，请写称呼（如${greetingExample}）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}`;
-  } else if (isEmail && isLastSection) {
-    emailSectionRule = `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："）。但这是最后一个章节，请在内容末尾写上邮件结尾问候语（如"此致"、"祝好"、"Best regards"等）和署名（如"${senderName}"）。`;
-  } else {
-    emailSectionRule = `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`;
-  }
+  const greetingExample = buildGreetingExample(en, primaryNames);
+  const toLine = primaryReaders.map(r => r.email ? `${r.name} <${r.email}>` : r.name).join(en ? ", " : "、");
+  const emailSectionRule = buildEmailSectionRule({
+    en,
+    isFirstSection,
+    isEmail,
+    isLastSection,
+    hasRecipients: recipients.length > 0,
+    toLine,
+    subject: metadata?.subject,
+    greetingExample,
+    senderName,
+  });
 
   // 读者沟通风格偏好 — 取第一个有 personId 的读者
   let toneRule = "";
@@ -818,12 +890,67 @@ async function generateSection(
   if (toneReader?.personId) {
     const person = getPersonById(toneReader.personId);
     const commStyle = person?.attributes?.communicationStyle;
-    if (commStyle === "formal") toneRule = `\n【语气要求】${recipientLabel}偏好正式风格，请使用严谨、正式的措辞，避免口语化表达`;
-    if (commStyle === "casual") toneRule = `\n【语气要求】${recipientLabel}偏好轻松风格，请使用亲切、自然的措辞，适当口语化`;
-    if (commStyle === "technical") toneRule = `\n【语气要求】${recipientLabel}偏好技术风格，请使用专业术语和精确表述，逻辑清晰`;
+    if (commStyle === "formal") toneRule = en
+      ? `\n[Tone] The ${recipientLabel} prefers a formal style. Use rigorous, formal wording and avoid colloquialisms.`
+      : `\n【语气要求】${recipientLabel}偏好正式风格，请使用严谨、正式的措辞，避免口语化表达`;
+    if (commStyle === "casual") toneRule = en
+      ? `\n[Tone] The ${recipientLabel} prefers a relaxed style. Use warm, natural wording with a conversational touch.`
+      : `\n【语气要求】${recipientLabel}偏好轻松风格，请使用亲切、自然的措辞，适当口语化`;
+    if (commStyle === "technical") toneRule = en
+      ? `\n[Tone] The ${recipientLabel} prefers a technical style. Use precise domain terminology and clear logic.`
+      : `\n【语气要求】${recipientLabel}偏好技术风格，请使用专业术语和精确表述，逻辑清晰`;
   }
 
-  const systemPrompt = `你是一个文档写作助手，负责为一篇完整文档撰写其中一个章节。
+  const systemPrompt = en
+    ? `You are a document writing assistant. Your job is to write ONE section of a complete document.
+
+═══ Document Style ═══
+
+${styleFragment(styleTemplate, true)}
+
+═══ Output Format ═══
+
+${formatConstraints(formatTemplate, true)}
+
+═══ Target Audience ═══
+
+${audienceGuidance(audienceTemplate, true)}
+
+═══ Writing Rules ═══
+
+${rulesText}
+
+═══ Document Global View ═══
+
+Document type: ${styleName(styleTemplate, true)}
+User request: ${userRequest}
+${personContextSection}
+Full document outline (${totalSections} sections in total):
+${outlineText}
+
+You are writing section ${sectionIndex + 1} of ${totalSections}: "${section.title}"
+
+═══ Summary of Previously Written Content ═══
+
+${rollingSummary || "(This is the first section — nothing written yet.)"}
+
+═══ Reference Material (knowledge-base retrieval results) ═══
+
+${sourceText || "(No reference material.)"}
+
+═══ General Generation Rules ═══
+
+1. Output the section body directly. Do NOT output the section title and do NOT output section numbers (e.g. "1.", "5.").
+2. Do not write lead-ins such as "Here is..." or "Based on the reference documents...". Output the content directly.
+3. Do not write supplementary notes, caveats or other meta-information.
+4. ${emailSectionRule}
+5. Connect naturally with the preceding content — bridge forward and backward. Do not repeat what earlier sections already covered.
+6. If you need up-to-date industry news, market data or external figures, you MUST call the web_search tool.
+7. [IMPORTANT] When citing reference material, you MUST mark the source with [N]. The system supplies numbered references — reuse those numbers directly.
+8. [FORBIDDEN] Only use numbers from the system-supplied references. Never cite a number that does not exist. If a sentence has no matching source, write it plainly with no citation marker.
+9. [TABLE FORMAT] When outputting a table you MUST use standard markdown table syntax: every row starts and ends with |, columns are separated by |, and the second row is the separator (e.g. |---|---|). Never concatenate cells into a single line of text — always separate every cell with |.
+10. [MOST IMPORTANT] This is the final output stage. Never emit thinking or planning text such as "Let me analyse...", "I need to search...", "The user asked for...", "The previous text already covered...", "Reference material:", "Now I need to write...". Output the section body and nothing else.${toneRule}${languageRuleBlock(config.language)}`
+    : `你是一个文档写作助手，负责为一篇完整文档撰写其中一个章节。
 
 ═══ 文档风格 ═══
 
@@ -872,7 +999,9 @@ ${sourceText || "（无参考信息）"}
 9. 【表格格式】输出表格时，必须使用标准 markdown 表格格式：每行以 | 开头和结尾，列之间用 | 分隔，第二行为分隔行（如 |---|---|）。绝对不要将表格单元格直接拼接为一行文字（如"任务优先级负责人"），必须用 | 分隔每个单元格。
 10. 【最重要】这是最终输出阶段。禁止输出"让我分析..."、"我需要搜索..."、"用户要求..."、"前文已经涵盖..."、"参考信息："、"现在需要写..."等任何思考过程或规划性文字。只能输出章节正文。${toneRule}`;
 
-  const userPrompt = `请为"${section.title}"章节撰写内容。${section.description ? `该章节要写：${section.description}` : ""}`;
+  const userPrompt = en
+    ? `Write the content for the section "${section.title}".${section.description ? ` This section should cover: ${section.description}` : ""}`
+    : `请为"${section.title}"章节撰写内容。${section.description ? `该章节要写：${section.description}` : ""}`;
 
   // 从用户设置读取 provider 优先级
   const dbSettings = readSettingsFromDb();
@@ -1138,7 +1267,7 @@ async function generateMergedSection(
   const sources = await retrieveForSection(allTitles, allDescriptions || undefined, excludeChunkIds, _rerankerConfigMerged);
   const sourceText = sources.map((s, i) => {
     const sourceLabel = s.sourceName ? `《${s.sourceName}》` : '';
-    return `${sourceLabel}（相似度: ${s.score.toFixed(2)}）\n${s.content}`;
+    return `${sourceLabel}${isEnglishDoc(config.language) ? ` (similarity: ${s.score.toFixed(2)})` : `（相似度: ${s.score.toFixed(2)}）`}\n${s.content}`;
   }).join("\n\n");
 
   // ── Fidelity 门控：同 generateSection 逻辑 ──
@@ -1186,28 +1315,32 @@ async function generateMergedSection(
   const totalSections = countOutlineSections(fullOutline);
   const outlineText = outlineToText(fullOutline);
 
-  const writingRules = getRulesForContext(effectiveStyleId, effectiveFormatId);
+  const writingRules = getRulesForContext(effectiveStyleId, effectiveFormatId, isEnglishDoc(config.language));
   const rulesText = writingRules.map((r, i) => `${i + 1}. ${r.rule}`).join("\n");
 
   // 读者画像注入 — 对所有文档类型开放。支持多读者
   let personContextSection = "";
-  const recipientLabel = isEmail ? "收件人" : "读者";
-  const sectionTitle = isEmail ? "邮件信息" : "读者信息";
+  const en = isEnglishDoc(config.language);
+  const recipientLabel = isEmail ? (en ? "Recipient" : "收件人") : (en ? "Reader" : "读者");
+  const sectionTitle = isEmail ? (en ? "Email Info" : "邮件信息") : (en ? "Reader Info" : "读者信息");
   const allRecipients = metadata?.recipients?.length ? metadata.recipients : (metadata?.recipient ? [metadata.recipient] : []);
   const allPrimary = allRecipients.filter(r => !r.role || r.role !== "attendee");
 
   if (allRecipients.length > 0) {
     const readerLines = allRecipients.map((r) => {
-      const parts = [`${r.role === "attendee" ? "列席" : "主读者"}: ${r.name}`];
-      if (r.title) parts.push(`职位: ${r.title}`);
-      if (r.department) parts.push(`部门: ${r.department}`);
-      if (r.email) parts.push(`邮箱: ${r.email}`);
+      const roleLabel = r.role === "attendee"
+        ? (en ? "Attendee" : "列席")
+        : (en ? "Primary reader" : "主读者");
+      const parts = [`${roleLabel}: ${r.name}`];
+      if (r.title) parts.push(`${en ? "Title" : "职位"}: ${r.title}`);
+      if (r.department) parts.push(`${en ? "Department" : "部门"}: ${r.department}`);
+      if (r.email) parts.push(`${en ? "Email" : "邮箱"}: ${r.email}`);
       return parts.join(" | ");
     });
     personContextSection = `\n═══ ${sectionTitle} ═══\n\n${readerLines.join("\n")}`;
 
     if (isEmail) {
-      if (metadata?.subject) personContextSection += `\n主题: ${metadata.subject}`;
+      if (metadata?.subject) personContextSection += `\n${en ? "Subject" : "主题"}: ${metadata.subject}`;
     }
 
     const pgProfiles: string[] = [];
@@ -1217,31 +1350,24 @@ async function generateMergedSection(
         if (personCtx) pgProfiles.push(`${r.name}: ${personCtx}`);
       }
     }
-    if (pgProfiles.length > 0) personContextSection += `\n${recipientLabel}画像:\n${pgProfiles.join("\n")}`;
+    if (pgProfiles.length > 0) personContextSection += `\n${recipientLabel}${en ? " profile" : "画像"}:\n${pgProfiles.join("\n")}`;
 
     personContextSection += "\n";
   }
 
-  const greetingNames = allPrimary.map(r => r.name);
-  const greetingExample = greetingNames.length > 1
-    ? `"${greetingNames.slice(0, -1).join("、")}和${greetingNames[greetingNames.length - 1]}，你们好："`
-    : `"${greetingNames[0] ?? "XXX"}，你好："`;
-
-  let emailSectionRule = "";
-  if (isFirstSection && isEmail && allRecipients.length > 0) {
-    const toLine = allPrimary.map(r => r.email ? `${r.name} <${r.email}>` : r.name).join("、");
-    emailSectionRule = `这是邮件的第一个章节。请在开头写明：
-   - 收件人：${toLine}
-   - 主题：${metadata?.subject || "（从内容中提炼）"}
-   然后写称呼（如${greetingExample}）。
-   【注意】不要写邮件结尾（如"此致"、"祝好"、"Best regards"等）和署名，结尾由后续章节处理。`;
-  } else if (isFirstSection) {
-    emailSectionRule = `这是第一个章节，请写称呼（如${greetingExample}）。${isEmail ? "【注意】不要写邮件结尾（如\"此致\"、\"祝好\"、\"Best regards\"等）和署名，结尾由后续章节处理。" : ""}`;
-  } else if (isEmail && isLastSection) {
-    emailSectionRule = `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："）。但这是最后一个章节，请在内容末尾写上邮件结尾问候语（如"此致"、"祝好"、"Best regards"等）和署名（如"${senderName}"）。`;
-  } else {
-    emailSectionRule = `这不是第一个章节，绝对不要写称呼或问候语（如"XXX，你好："、"此致"等）。${isEmail ? "【注意】不要写邮件结尾和署名。" : ""}`;
-  }
+  const greetingExample = buildGreetingExample(en, allPrimary.map(r => r.name));
+  const toLine = allPrimary.map(r => r.email ? `${r.name} <${r.email}>` : r.name).join(en ? ", " : "、");
+  const emailSectionRule = buildEmailSectionRule({
+    en,
+    isFirstSection,
+    isEmail,
+    isLastSection,
+    hasRecipients: allRecipients.length > 0,
+    toLine,
+    subject: metadata?.subject,
+    greetingExample,
+    senderName,
+  });
 
   // 读者沟通风格偏好 — 取第一个有 personId 的读者
   let toneRule = "";
@@ -1249,9 +1375,15 @@ async function generateMergedSection(
   if (toneReader?.personId) {
     const person = getPersonById(toneReader.personId);
     const commStyle = person?.attributes?.communicationStyle;
-    if (commStyle === "formal") toneRule = `\n【语气要求】${recipientLabel}偏好正式风格，请使用严谨、正式的措辞，避免口语化表达`;
-    if (commStyle === "casual") toneRule = `\n【语气要求】${recipientLabel}偏好轻松风格，请使用亲切、自然的措辞，适当口语化`;
-    if (commStyle === "technical") toneRule = `\n【语气要求】${recipientLabel}偏好技术风格，请使用专业术语和精确表述，逻辑清晰`;
+    if (commStyle === "formal") toneRule = en
+      ? `\n[Tone] The ${recipientLabel} prefers a formal style. Use rigorous, formal wording and avoid colloquialisms.`
+      : `\n【语气要求】${recipientLabel}偏好正式风格，请使用严谨、正式的措辞，避免口语化表达`;
+    if (commStyle === "casual") toneRule = en
+      ? `\n[Tone] The ${recipientLabel} prefers a relaxed style. Use warm, natural wording with a conversational touch.`
+      : `\n【语气要求】${recipientLabel}偏好轻松风格，请使用亲切、自然的措辞，适当口语化`;
+    if (commStyle === "technical") toneRule = en
+      ? `\n[Tone] The ${recipientLabel} prefers a technical style. Use precise domain terminology and clear logic.`
+      : `\n【语气要求】${recipientLabel}偏好技术风格，请使用专业术语和精确表述，逻辑清晰`;
   }
 
   // 构建子章节列表用于 prompt
@@ -1260,11 +1392,65 @@ async function generateMergedSection(
     ...childSections.map((c, i) => ({ index: i + 1, title: c.title, description: c.description || "" })),
   ];
   const subSectionPrompt = subSectionList.map((s, i) => {
-    const desc = s.description ? `（内容要点: ${s.description}）` : "";
+    const desc = s.description ? (en ? ` (key points: ${s.description})` : `（内容要点: ${s.description}）`) : "";
     return `  ${i + 1}) "${s.title}"${desc}`;
   }).join("\n");
 
-  const systemPrompt = `你是一个文档写作助手，负责一次性撰写完整的文档章节（含 ${subSectionList.length} 个子章节）。
+  const systemPrompt = en
+    ? `You are a document writing assistant. Your job is to write a complete document section group in one pass (${subSectionList.length} sub-sections in total).
+
+═══ Document Style ═══
+
+${styleFragment(styleTemplate, true)}
+
+═══ Output Format ═══
+
+${formatConstraints(formatTemplate, true)}
+
+═══ Target Audience ═══
+
+${audienceGuidance(audienceTemplate, true)}
+
+═══ Writing Rules ═══
+
+${rulesText}
+
+═══ Document Global View ═══
+
+Document type: ${styleName(styleTemplate, true)}
+User request: ${userRequest ?? "(not provided)"}
+${personContextSection}
+Full document outline (${totalSections} sections in total):
+${outlineText}
+
+You are writing section group ${sectionIndex + 1} of ${totalSections} (parent section "${parentSection.title}" + ${childSections.length} sub-sections).
+
+═══ Summary of Previously Written Content ═══
+
+${rollingSummary || "(This is the first section — nothing written yet.)"}
+
+═══ Reference Material (knowledge-base retrieval results) ═══
+
+${sourceText || "(No reference material.)"}
+
+═══ Sub-sections to Write Now ═══
+
+${subSectionPrompt}
+
+═══ General Generation Rules ═══
+
+1. Output the full content of all ${subSectionList.length} sub-sections in one pass.
+2. [CRITICAL FORMAT MARKER] Each sub-section MUST start with a <h3>sub-section title</h3> marker. This is the key to downstream parsing — follow it strictly. Example: <h3>1. Executive Summary — Overall Readiness Score</h3>
+3. Use the actual sub-section titles. Never write generic placeholders like "Section One" or "Part One".
+4. Do not output lead-ins such as "Here is..." or "Based on the reference documents...".
+5. Do not write supplementary notes, caveats or other meta-information.
+6. ${emailSectionRule}
+7. Connect naturally with the preceding content — bridge forward and backward.
+8. If you need up-to-date industry news, market data or external figures, you MUST call the web_search tool.
+9. [IMPORTANT] When citing reference material, you MUST mark the source with [N]. The system supplies numbered references — reuse those numbers directly.
+10. [FORBIDDEN] Only use numbers from the system-supplied references. Never cite a number that does not exist. If a sentence has no matching source, write it plainly with no citation marker.
+11. [TABLE FORMAT] When outputting a table you MUST use standard markdown table syntax: every row starts and ends with |, columns are separated by |, and the second row is the separator (e.g. |---|---|). Never concatenate cells into a single line of text — always separate every cell with |.${toneRule}${languageRuleBlock(config.language)}`
+    : `你是一个文档写作助手，负责一次性撰写完整的文档章节（含 ${subSectionList.length} 个子章节）。
 
 ═══ 文档风格 ═══
 
@@ -1319,7 +1505,9 @@ ${subSectionPrompt}
 10. 【禁止】只允许引用系统提供的参考文档中的编号，绝对不要引用不存在的编号。如果某句话没有对应的参考来源，直接写出该句，不要添加任何引用标记。
 11. 【表格格式】输出表格时，必须使用标准 markdown 表格格式：每行以 | 开头和结尾，列之间用 | 分隔，第二行为分隔行（如 |---|---|）。绝对不要将表格单元格直接拼接为一行文字（如"任务优先级负责人"），必须用 | 分隔每个单元格。${toneRule}`;
 
-  const userPrompt = `请一次性撰写上述 ${subSectionList.length} 个子章节的完整内容。请确保每个子章节都以 <h3>子章节标题</h3> 开头标记。`;
+  const userPrompt = en
+    ? `Write the full content of the ${subSectionList.length} sub-sections above in one pass. Make sure every sub-section starts with a <h3>sub-section title</h3> marker.`
+    : `请一次性撰写上述 ${subSectionList.length} 个子章节的完整内容。请确保每个子章节都以 <h3>子章节标题</h3> 开头标记。`;
 
   // ── 3. LLM call + tool calling（一次） ────────────────────────
   const dbSettings = readSettingsFromDb();
@@ -1732,12 +1920,12 @@ async function generateSections(
 }
 
 /** 清洗 LLM 生成的标题（去除特殊符号、截断） */
-function sanitizeTitle(raw: string): string {
+function sanitizeTitle(raw: string, en = false): string {
   return raw
     .replace(/[^一-鿿\w\s]/g, " ")  // 只保留 CJK + 字母数字 + 空白
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 20) || "文档";
+    .slice(0, 20) || (en ? "Document" : "文档");
 }
 
 /** 用 LLM 根据用户需求生成简短标题 */
@@ -1753,8 +1941,28 @@ async function generateTitleWithLLM(
   outline: OutlineSection[],
   config: GenerateDocRequest,
 ): Promise<{ title: string; readers: ExtractedReader[] }> {
-  const outlineText = outline.map((s) => s.title).join("、");
-  const systemPrompt = `你是一个文档标题生成器和读者信息提取助手。根据用户的写作需求，完成两项任务：
+  const en = isEnglishDoc(config.language);
+  const outlineText = outline.map((s) => s.title).join(en ? ", " : "、");
+  const systemPrompt = en
+    ? `You are a document title generator and reader-information extractor. Given the user's writing request, do two things:
+1. Generate a SHORT ENGLISH title (at most 8 words). The title MUST be in English.
+2. Extract the document's target readers — the user may describe them by name, by job title, or by both.
+
+Reader extraction rules:
+- Extract every person mentioned as a reader / recipient / report target of the document
+- **IMPORTANT**: Check the greeting or salutation at the start (e.g. "Dear Sarah,", "Hi Mr. Chen") and pull the recipient's name and title from it
+- If the user gives a concrete name (e.g. "John Smith"), put it in the name field
+- If the user describes the reader by job title (e.g. "COO", "Head of Product", "VP Engineering"), put it in the title field
+- If both name and title are given (e.g. "Sarah, our COO"), set name to "Sarah" and title to "COO"
+- If the greeting and the body both mention the reader, merge them: greeting "Sarah" + body "the primary reader is the COO" → {name:"Sarah", title:"COO"}
+- Distinguish roles: "primary reader" / "reporting to" / "addressed to" means primary; "cc'd" / "attending" means attendee
+- A department name is NOT a reader — "Engineering" is not a reader, but "Head of Engineering" means the reader's title is "Head of Engineering"
+- Do not extract non-reader mentions (e.g. "a competitor's CEO said" — that is not a reader of this document)
+- If the request names no reader, return an empty readers array
+
+Output JSON only (no other text, no markdown code fences):
+{"title": "Document Title", "readers": [{"name": null, "title": "COO", "role": "primary"}, {"name": "John Smith", "title": "Head of Engineering", "role": "primary"}]}`
+    : `你是一个文档标题生成器和读者信息提取助手。根据用户的写作需求，完成两项任务：
 1. 生成一个简短的中文标题（不超过 10 个字）
 2. 提取文档的目标读者信息——用户可能用人名、职位或两者混合来描述读者
 
@@ -1773,7 +1981,10 @@ async function generateTitleWithLLM(
 输出 JSON 格式（不要添加任何其他内容，不要 markdown 代码块标记）：
 {"title": "文档标题", "readers": [{"name": null, "title": "COO", "role": "primary"}, {"name": "陈强", "title": "技术负责人", "role": "primary"}]}`;
 
-  const userPrompt = `用户需求：${userRequest}
+  const userPrompt = en
+    ? `User request: ${userRequest}
+Document outline: ${outlineText}`
+    : `用户需求：${userRequest}
 文档大纲：${outlineText}`;
 
   try {
@@ -1807,7 +2018,7 @@ async function generateTitleWithLLM(
 
     if (result.response.error || !result.response.text?.trim()) {
       logger.warn(`[DocGenerator] LLM 标题生成失败: ${result.response.error?.message ?? "空响应"}，回退到启发式`);
-      return { title: sanitizeTitle(userRequest.slice(0, 10)), readers: [] };
+      return { title: sanitizeTitle(userRequest.slice(0, 10), en), readers: [] };
     }
 
     const rawResponse = result.response.text.trim();
@@ -1817,7 +2028,7 @@ async function generateTitleWithLLM(
       const codeBlockMatch = rawResponse.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
       if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
       const parsed = JSON.parse(jsonStr);
-      const title = sanitizeTitle((typeof parsed.title === "string" ? parsed.title : "") || rawResponse.slice(0, 10));
+      const title = sanitizeTitle((typeof parsed.title === "string" ? parsed.title : "") || rawResponse.slice(0, 10), en);
 
       // 解析 readers 数组
       const rawReaders: unknown[] = Array.isArray(parsed.readers) ? parsed.readers : [];
@@ -1838,13 +2049,13 @@ async function generateTitleWithLLM(
       return { title, readers };
     } catch {
       // JSON 解析失败，回退到纯文本标题
-      const title = sanitizeTitle(rawResponse);
+      const title = sanitizeTitle(rawResponse, en);
       logger.info(`[DocGenerator] LLM 生成标题（非 JSON）: "${rawResponse}" → 清洗后: "${title}"`);
       return { title, readers: [] };
     }
   } catch (err) {
     logger.warn(`[DocGenerator] LLM 标题生成失败，回退到启发式: ${err}`);
-    return { title: sanitizeTitle(userRequest.slice(0, 10)), readers: [] };
+    return { title: sanitizeTitle(userRequest.slice(0, 10), en), readers: [] };
   }
 }
 
